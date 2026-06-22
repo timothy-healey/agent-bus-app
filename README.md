@@ -6,13 +6,13 @@ The predecessor system was a tmux + bash-supervised file-queue (see `~/agent-bus
 
 ## Status
 
-**Pre-implementation.** Design and planning complete; code not yet started.
+**Plan 1 complete** — foundation only. Project creation + SQLite persistence +
+warm dark/light theme toggle work. No pipeline runtime yet (Plans 2–6).
 
 - ✅ Brainstorm + spec
 - ✅ DDD model (7 bounded contexts, aggregates with invariants, relationships)
 - ✅ Vet pass (8 findings, all resolved)
-- ✅ Plan 1 (Foundation) — 17 tasks ready for execution
-- ⬜ Plan 1 implementation
+- ✅ Plan 1 (Foundation) — 17 tasks, implemented
 - ⬜ Plans 2–7
 
 ## Source-of-truth documents
@@ -39,18 +39,42 @@ The predecessor system was a tmux + bash-supervised file-queue (see `~/agent-bus
 
 Plus a deliberate second shared kernel: `agent_bus_core` (ID newtypes, cross-context enums, OHS protocol types).
 
-## Run (once Plan 1 lands)
+## Run
 
 ```bash
 bun install
 bun tauri dev
 ```
 
-## Test (once Plan 1 lands)
+## Test
 
 ```bash
+# Rust unit tests (all crates)
 cargo test --manifest-path src-tauri/Cargo.toml --workspace
+
+# Frontend tests (vitest)
 bun vitest run
+```
+
+## Structure
+
+The Rust workspace mirrors the DDD bounded contexts from the spec:
+
+```
+src-tauri/
+├── agent_bus_core/        shared kernel — ID newtypes, enums, OHS protocol
+├── workspace/             Workspace context — projects + path resolution
+└── app/                   composition root — Tauri runtime + migrations
+```
+
+Frontend:
+
+```
+src/
+├── components/            React components (one per file, colocated test)
+├── hooks/                 useTheme, useProjects
+├── ipc/                   typed wrappers over Tauri commands
+└── styles/                tokens.css + global.css
 ```
 
 ## License
