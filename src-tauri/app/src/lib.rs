@@ -29,6 +29,38 @@ struct RootDispatcher {
     app: tauri::AppHandle,
 }
 
+/// Concrete revise-bundle reader (Plan 4 vet F1 consumer). Reads the comments
+/// table written by Review and flattens rows into Runtime's RevisionNote. Lives
+/// at the root because it bridges Runtime's trait + Review's schema without
+/// either crate depending on the other.
+pub struct SqliteRevisionReader {
+    pub pool: sqlx::SqlitePool,
+}
+
+#[async_trait]
+impl runtime::revision::RevisionBundleReader for SqliteRevisionReader {
+    async fn load(&self, task_id: &str) -> runtime::revision::RevisionBundle {
+        let rows: Vec<(Option<String>, String, String)> = sqlx::query_as(
+            "SELECT anchor_text, note, kind FROM comments WHERE task_id = ? \
+             ORDER BY created_at ASC, anchor_offset ASC",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        runtime::revision::RevisionBundle {
+            notes: rows
+                .into_iter()
+                .map(|(anchor_text, note, kind)| runtime::revision::RevisionNote {
+                    anchor_text,
+                    note,
+                    kind,
+                })
+                .collect(),
+        }
+    }
+}
+
 fn ok(v: serde_json::Value) -> ToolCallResult { ToolCallResult::Ok { result: v } }
 fn err(e: impl ToString) -> ToolCallResult { ToolCallResult::Err { error: e.to_string() } }
 
@@ -258,7 +290,9 @@ pub fn run() {
                 // Spawn one continuous worker loop per team. Each loop calls
                 // process_one_claim and emits task.changed on a settle.
                 if !pipe.teams.is_empty() {
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()));
+                    let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
+                        Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader);
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -335,6 +369,7 @@ fn spawn_worker_loops(
     brake: Arc<Brake>,
     project_root: String,
     usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
+    revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
 ) {
     let runner: Arc<dyn runners::output::Runner> = Arc::new(ClaudeCliRunner::new());
     for team in pipeline.teams.clone() {
@@ -352,7 +387,7 @@ fn spawn_worker_loops(
                 }
             }),
             usage_sink: usage_sink.clone(),
-            revision_reader: None,
+            revision_reader: revision_reader.clone(),
         };
         let handle = handle.clone();
         let team = team.clone();
@@ -376,5 +411,51 @@ fn spawn_worker_loops(
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod revision_reader_tests {
+    use super::SqliteRevisionReader;
+    use runtime::revision::RevisionBundleReader;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    async fn pool_with_comment(task: &str, kind: &str, anchor: Option<&str>, note: &str) -> sqlx::SqlitePool {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:").unwrap().foreign_keys(false);
+        let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+        for sql in [
+            include_str!("../migrations/001_initial.sql"),
+            include_str!("../migrations/003_runtime.sql"),
+            include_str!("../migrations/004_comments_kind.sql"),
+        ] {
+            for stmt in sql.split(';') {
+                let s = stmt.trim();
+                if !s.is_empty() { sqlx::query(s).execute(&pool).await.unwrap(); }
+            }
+        }
+        sqlx::query("INSERT INTO comments (id, task_id, artifact_path, anchor_text, anchor_offset, note, kind, created_at) VALUES (?,?,?,?,?,?,?,?)")
+            .bind("c1").bind(task).bind("artifacts/specs/T-1-v1.md")
+            .bind(anchor).bind::<Option<i64>>(None).bind(note).bind(kind).bind(1000i64)
+            .execute(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn reads_inline_comment_into_bundle() {
+        let pool = pool_with_comment("T-1", "inline", Some("batch key"), "per-row").await;
+        let reader = SqliteRevisionReader { pool };
+        let bundle = reader.load("T-1").await;
+        assert_eq!(bundle.notes.len(), 1);
+        assert_eq!(bundle.notes[0].kind, "inline");
+        assert_eq!(bundle.notes[0].anchor_text.as_deref(), Some("batch key"));
+        assert_eq!(bundle.notes[0].note, "per-row");
+    }
+
+    #[tokio::test]
+    async fn missing_task_yields_empty_bundle() {
+        let pool = pool_with_comment("T-1", "inline", None, "x").await;
+        let reader = SqliteRevisionReader { pool };
+        assert!(reader.load("T-NOPE").await.notes.is_empty());
     }
 }
