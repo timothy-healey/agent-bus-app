@@ -6,5 +6,6 @@
 
 pub mod output;
 pub mod scope;
+pub mod stream_json;
 
 pub use output::*;
