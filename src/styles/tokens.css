@@ -63,4 +63,10 @@
   --sp-9: 28px;  --sp-10: 32px; --sp-12: 48px; --sp-14: 64px;
   --r-xs: 2px;   --r-sm: 3px;   --r-md: 4px;   --r-lg: 6px;
   --r-pill: 999px;
+
+  /* motion (DESIGN.md §Motion) */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 100ms;
+  --dur-base: 150ms;
+  --dur-slow: 250ms;
 }

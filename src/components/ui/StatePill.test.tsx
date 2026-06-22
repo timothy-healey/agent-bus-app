@@ -28,4 +28,11 @@ describe("StatePill", () => {
     const { container } = render(<StatePill state="gated" />);
     expect(container.querySelector("[data-dot]")).toBeTruthy();
   });
+
+  it("applies the pulse class only to the running dot", () => {
+    const { container, rerender } = render(<StatePill state="running" />);
+    expect(container.querySelector(".abp-pulse")).not.toBeNull();
+    rerender(<StatePill state="queued" />);
+    expect(container.querySelector(".abp-pulse")).toBeNull();
+  });
 });
