@@ -14,6 +14,8 @@ import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as
 import { recordVerdict, addComment } from "./ipc/review";
 import { instantiateTemplate, listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
+import { Terminal } from "./components/Terminal";
+import { useConversation } from "./hooks/useConversation";
 
 export default function App() {
   const { projects, reload } = useProjects();
@@ -30,6 +32,10 @@ export default function App() {
     openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
 
   const { snapshot: usage } = useUsage();
+  const { turns: convoTurns, send: sendToTerminal } = useConversation();
+  const terminalContext = pipeline
+    ? `${pipeline.name} + ${pipeline.teams.length} teams`
+    : "no active pipeline";
   const [brake, setBrake] = useState<{ on: boolean; reason: string | null }>({ on: false, reason: null });
 
   useEffect(() => {
@@ -163,6 +169,7 @@ export default function App() {
           />
         )}
       </main>
+      <Terminal turns={convoTurns} contextLine={terminalContext} onSend={sendToTerminal} />
       <Drawer open={openTask != null} onClose={() => setOpenTaskId(null)}>
         {openTask && (
           <CardDrawer
