@@ -10,7 +10,76 @@ use runtime::pool::{process_one_claim, PoolContext};
 use runtime::task_store::TaskStore;
 use pipeline::model::{Pipeline, Team};
 
+use conversational_control::catalog::ToolCatalog;
+use conversational_control::dispatch::ToolDispatcher;
+use conversational_control::engine::CommandEngine;
+use conversational_control::store::ConversationStore;
+use conversational_control::api::TerminalState;
+use agent_bus_core::{ToolCallRequest, ToolCallResult};
+use async_trait::async_trait;
+
 const DB_URL: &str = "sqlite:agent_bus.db";
+
+/// The concrete dispatcher. Lives at the root — the only module that imports
+/// every context (D1/D2). Routes a ToolCallRequest to the owning supplier's
+/// logic, reusing the same stores the Tauri commands use.
+struct RootDispatcher {
+    runtime: Arc<RuntimeState>,
+    usage: Arc<usage_telemetry::api::UsageState>,
+    app: tauri::AppHandle,
+}
+
+fn ok(v: serde_json::Value) -> ToolCallResult { ToolCallResult::Ok { result: v } }
+fn err(e: impl ToString) -> ToolCallResult { ToolCallResult::Err { error: e.to_string() } }
+
+#[async_trait]
+impl ToolDispatcher for RootDispatcher {
+    async fn dispatch(&self, req: &ToolCallRequest) -> ToolCallResult {
+        use tauri::Emitter;
+        let a = &req.args;
+        let str_arg = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+        let result = match req.tool_name.as_str() {
+            "inject_topic" => {
+                match runtime::api::inject_topic_inner(
+                    &self.runtime, str_arg("topic").unwrap_or_default(), str_arg("target_repo"),
+                ).await {
+                    Ok(task) => { let _ = self.app.emit("task.changed", &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
+                    Err(e) => err(e),
+                }
+            }
+            "approve_gate" | "reject_gate" | "revise_gate" => {
+                let task_id = str_arg("task_id").unwrap_or_default();
+                let verdict = match req.tool_name.as_str() {
+                    "approve_gate" => agent_bus_core::Verdict::Approve,
+                    "reject_gate" => agent_bus_core::Verdict::Reject,
+                    _ => agent_bus_core::Verdict::Revise,
+                };
+                match runtime::api::apply_gate_verdict_inner(&self.runtime, &task_id, verdict).await {
+                    Ok(task) => { let _ = self.app.emit("task.changed", &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
+                    Err(e) => err(e),
+                }
+            }
+            "brake_on" => { let s = self.runtime.brake.clone(); s.set_on(str_arg("reason").unwrap_or_else(|| "manual".into())); let _ = self.app.emit("usage.changed", ()); ok(serde_json::to_value(s.state()).unwrap()) }
+            "brake_off" => { self.runtime.brake.set_off(); let _ = self.app.emit("usage.changed", ()); ok(serde_json::to_value(self.runtime.brake.state()).unwrap()) }
+            "scale_team" => {
+                match runtime::api::scale_team_inner(&self.runtime, str_arg("team_id").unwrap_or_default()) {
+                    Ok(maxn) => ok(serde_json::json!({ "max": maxn })),
+                    Err(e) => err(e),
+                }
+            }
+            "usage_snapshot" => {
+                let cfg = usage_telemetry::api::load_config(&self.usage.pool).await;
+                let braked = (self.usage.is_braked)();
+                match usage_telemetry::snapshot::compute_snapshot(&self.usage.cc, &self.usage.worker, &cfg, braked, now_unix()).await {
+                    Ok(snap) => serde_json::to_value(snap).map(ok).unwrap_or_else(err),
+                    Err(e) => err(e),
+                }
+            }
+            other => err(format!("tool not dispatchable in v1: {other}")),
+        };
+        result
+    }
+}
 
 fn now_unix() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,6 +176,11 @@ pub fn run() {
                 // F4 crash recovery: release any tasks stuck in `running`.
                 let _ = tasks.release_orphaned_running(now_unix()).await;
 
+                // Runtime state — keep an Arc so the terminal dispatcher can reuse the same logic.
+                let runtime_state_arc = Arc::new(RuntimeState {
+                    tasks: tasks.clone(), brake: brake.clone(), pipeline: pipe.clone(),
+                    project_id: project_id.clone(), project_root: project_root.clone(),
+                });
                 handle.manage(RuntimeState {
                     tasks: tasks.clone(),
                     brake: brake.clone(),
@@ -129,12 +203,56 @@ pub fn run() {
                 let cc_store = Arc::new(CcUsageStore::new(pool.clone()));
                 let worker_usage = Arc::new(WorkerUsageStore::new(pool.clone()));
                 let usage_sink: Arc<dyn agent_bus_core::UsageSink> = worker_usage.clone();
-                let brake_for_cb = brake.clone();
+                let usage_state_arc = Arc::new(usage_telemetry::api::UsageState {
+                    cc: cc_store.clone(), worker: worker_usage.clone(), pool: pool.clone(),
+                    is_braked: Arc::new({ let b = brake.clone(); move || b.is_on() }),
+                });
                 handle.manage(usage_telemetry::api::UsageState {
                     cc: cc_store.clone(),
                     worker: worker_usage.clone(),
                     pool: pool.clone(),
-                    is_braked: Arc::new(move || brake_for_cb.is_on()),
+                    is_braked: Arc::new({ let b = brake.clone(); move || b.is_on() }),
+                });
+
+                // Conversational Control (Plan 6). Build the tool catalog by UNIONing every supplier's tools().
+                let mut specs = Vec::new();
+                specs.extend(pipeline::api::tools());
+                specs.extend(runtime::api::tools());
+                specs.extend(review::api::tools());
+                specs.extend(usage_telemetry::api::tools());
+                specs.extend(runners::api::tools());
+                specs.extend(workspace::api::tools());
+                specs.extend(conversational_control::api::tools());
+                let catalog = Arc::new(ToolCatalog::new(specs));
+                debug_assert!(catalog.duplicate_names().is_empty(), "tool name collision in catalog");
+
+                let dispatcher: Arc<dyn ToolDispatcher> = Arc::new(RootDispatcher {
+                    runtime: runtime_state_arc.clone(),
+                    usage: usage_state_arc.clone(),
+                    app: handle.clone(),
+                });
+
+                let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
+                    Arc::new(CommandEngine::new(dispatcher.clone()));
+
+                let convo_store = Arc::new(ConversationStore::new(pool.clone()));
+
+                // 24h-summarisation on launch (D5).
+                if !project_id.is_empty() {
+                    if let Ok(Some(mut convo)) = convo_store.load(&project_id).await {
+                        if conversational_control::summarise::summarise_on_launch(
+                            &mut convo, uuid::Uuid::new_v4().to_string(), now_unix(),
+                        ) {
+                            let _ = convo_store.save(&convo).await;
+                        }
+                    }
+                }
+
+                handle.manage(TerminalState {
+                    catalog: catalog.clone(),
+                    engine,
+                    store: convo_store,
+                    project_id: project_id.clone(),
                 });
 
                 // Spawn one continuous worker loop per team. Each loop calls
@@ -200,6 +318,8 @@ pub fn run() {
             review::api::record_verdict,
             usage_telemetry::api::usage_snapshot,
             usage_telemetry::api::usage_set_budget,
+            conversational_control::api::send_message,
+            conversational_control::api::get_conversation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
