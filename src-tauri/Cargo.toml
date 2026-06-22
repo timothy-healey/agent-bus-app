@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app", "agent_bus_core", "workspace"]
+members = ["app", "agent_bus_core", "workspace", "pipeline"]
 
 [workspace.package]
 version = "0.1.0"
