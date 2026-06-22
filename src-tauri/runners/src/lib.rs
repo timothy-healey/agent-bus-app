@@ -5,5 +5,6 @@
 //! ClaudeCliRunner; everything else is pure and fixture-tested.
 
 pub mod output;
+pub mod scope;
 
 pub use output::*;
