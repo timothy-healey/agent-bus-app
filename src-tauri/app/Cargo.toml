@@ -27,4 +27,5 @@ workspace = { path = "../workspace" }
 pipeline = { path = "../pipeline" }
 runners = { path = "../runners" }
 runtime = { path = "../runtime" }
+review = { path = "../review" }
 sqlx = { workspace = true }
