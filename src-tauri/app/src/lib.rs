@@ -68,6 +68,12 @@ pub fn run() {
             sql: include_str!("../migrations/004_comments_kind.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            description: "usage telemetry — worker_usage_log + cc_usage_log + usage_config",
+            sql: include_str!("../migrations/005_usage.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
