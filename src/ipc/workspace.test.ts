@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { createProject, listProjects } from "./workspace";
+import { createProject, listProjects, readArtifact } from "./workspace";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -38,5 +38,15 @@ describe("workspace ipc", () => {
     const result = await listProjects();
     expect(invokeMock).toHaveBeenCalledWith("workspace_list_projects");
     expect(result).toEqual([]);
+  });
+
+  it("readArtifact passes project_id + path", async () => {
+    invokeMock.mockResolvedValueOnce("# Plan\n\nbody");
+    const md = await readArtifact("p", "artifacts/specs/T-1-v1.md");
+    expect(invokeMock).toHaveBeenCalledWith("read_artifact", {
+      project_id: "p",
+      path: "artifacts/specs/T-1-v1.md",
+    });
+    expect(md).toContain("# Plan");
   });
 });

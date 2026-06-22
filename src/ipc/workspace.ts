@@ -25,3 +25,13 @@ export async function listProjects(): Promise<Project[]> {
 export async function getProject(id: string): Promise<Project> {
   return await invoke<Project>("workspace_get_project", { id });
 }
+
+export async function readArtifact(
+  projectId: string,
+  path: string,
+): Promise<string> {
+  return await invoke<string>("read_artifact", {
+    project_id: projectId,
+    path,
+  });
+}
