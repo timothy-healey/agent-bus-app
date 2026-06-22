@@ -128,6 +128,7 @@ pub fn run() {
             workspace::api::workspace_list_projects,
             workspace::api::workspace_get_project,
             workspace::api::workspace_set_active_pipeline,
+            workspace::api::read_artifact,
             pipeline::api::pipeline_list_templates,
             pipeline::api::pipeline_list,
             pipeline::api::pipeline_load,
