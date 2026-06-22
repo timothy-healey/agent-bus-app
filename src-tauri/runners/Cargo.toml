@@ -1,0 +1,17 @@
+[package]
+name = "runners"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent_bus_core = { path = "../agent_bus_core" }
+workspace = { path = "../workspace" }
+pipeline = { path = "../pipeline" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+uuid = { workspace = true }
