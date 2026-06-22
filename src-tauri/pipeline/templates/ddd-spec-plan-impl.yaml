@@ -1,0 +1,153 @@
+id: ddd-spec-plan-impl
+name: DDD Spec → Plan → Implement
+description: Domain-driven design pipeline with two human gates.
+schema_version: 1
+
+teams:
+  - id: research
+    name: Research
+    prompt: prompts/research.md
+    runner:
+      kind: claude-cli
+      model: claude-opus-4-7
+      effort:
+        mode: extended-high
+    scope:
+      reads: ["${target_repo}", "${project}/artifacts/analyses"]
+      writes: ["${project}/artifacts/analyses", "${target_repo}/docs/critique-*.md"]
+      tools: [Read, Write, Edit, Glob, Grep, "Bash(ls:*)", "Bash(rg:*)", "Bash(git diff:*)", Skill]
+    outputs:
+      on_approve: spec-writers
+    workers:
+      default: 1
+      max: 3
+
+  - id: spec-writers
+    name: Spec Writers
+    prompt: prompts/spec-writers.md
+    runner:
+      kind: claude-cli
+      model: claude-sonnet-4-6
+      effort:
+        mode: extended-low
+    scope:
+      reads: ["${project}/artifacts/analyses", "${project}/artifacts/specs"]
+      writes: ["${project}/artifacts/specs"]
+      tools: [Read, Write, Edit, Glob, Grep]
+    outputs:
+      on_approve: spec-reviewers
+      on_revise: research
+      on_reject: needs-human
+    workers:
+      default: 1
+      max: 2
+
+  - id: spec-reviewers
+    name: Spec Reviewers
+    prompt: prompts/spec-reviewers.md
+    runner:
+      kind: claude-cli
+      model: claude-opus-4-7
+      effort:
+        mode: extended-high
+    scope:
+      reads: ["${project}/artifacts/specs", "${target_repo}"]
+      writes: ["${project}/artifacts/reviews"]
+      tools: [Read, Glob, Grep]
+    outputs:
+      on_approve: gate-1-spec
+      on_revise: spec-writers
+      on_reject: needs-human
+    workers:
+      default: 1
+      max: 2
+
+  - id: plan-writers
+    name: Plan Writers
+    prompt: prompts/plan-writers.md
+    runner:
+      kind: claude-cli
+      model: claude-sonnet-4-6
+      effort:
+        mode: extended-low
+    scope:
+      reads: ["${project}/artifacts/specs", "${project}/artifacts/plans"]
+      writes: ["${project}/artifacts/plans"]
+      tools: [Read, Write, Edit, Glob, Grep]
+    outputs:
+      on_approve: plan-reviewers
+      on_revise: spec-writers
+      on_reject: needs-human
+    workers:
+      default: 1
+      max: 2
+
+  - id: plan-reviewers
+    name: Plan Reviewers
+    prompt: prompts/plan-reviewers.md
+    runner:
+      kind: claude-cli
+      model: claude-opus-4-7
+      effort:
+        mode: extended-high
+    scope:
+      reads: ["${project}/artifacts/plans", "${project}/artifacts/specs"]
+      writes: ["${project}/artifacts/reviews"]
+      tools: [Read, Glob, Grep]
+    outputs:
+      on_approve: gate-2-plan
+      on_revise: plan-writers
+      on_reject: needs-human
+    workers:
+      default: 1
+      max: 2
+
+  - id: implementers
+    name: Implementers
+    prompt: prompts/implementers.md
+    runner:
+      kind: claude-cli
+      model: claude-opus-4-7
+      effort:
+        mode: extended-high
+    scope:
+      reads: ["${project}/artifacts/plans", "${target_repo}"]
+      writes: ["${project}/worktrees/${task_id}"]
+      tools: [Read, Write, Edit, Glob, Grep, "Bash(git diff:*)", "Bash(git add:*)", "Bash(git commit:*)"]
+    outputs:
+      on_approve: done
+      on_revise: plan-writers
+      on_reject: needs-human
+    workers:
+      default: 1
+      max: 1
+
+  - id: done
+    name: Done
+    prompt: prompts/done.md
+    runner:
+      kind: claude-cli
+      model: claude-sonnet-4-6
+      effort:
+        mode: off
+    scope:
+      reads: ["${project}/worktrees/${task_id}"]
+      writes: []
+      tools: [Read]
+    outputs: {}
+    workers:
+      default: 1
+      max: 1
+
+gates:
+  - id: gate-1-spec
+    label: Gate 1 — Spec Approval
+    downstream: plan-writers
+
+  - id: gate-2-plan
+    label: Gate 2 — Plan Approval
+    downstream: implementers
+
+escalations:
+  - id: needs-human
+    triggers: ["attempts >= 3", "verdict == reject"]

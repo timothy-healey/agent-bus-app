@@ -6,14 +6,18 @@ The predecessor system was a tmux + bash-supervised file-queue (see `~/agent-bus
 
 ## Status
 
-**Plan 1 complete** — foundation only. Project creation + SQLite persistence +
-warm dark/light theme toggle work. No pipeline runtime yet (Plans 2–6).
+**Plan 2 complete** — Pipeline Authoring context. YAML pipeline schema (parse +
+validate), the bundled DDD spec→plan→impl template, the Workspace
+path-resolution kernel, and a read-only pipeline viewer reachable from the view
+switcher. Plan 1 (foundation: project wizard + persistence + theme) remains.
+Runtime/Review/Telemetry/Conversational Control are Plans 3–6.
 
 - ✅ Brainstorm + spec
 - ✅ DDD model (7 bounded contexts, aggregates with invariants, relationships)
 - ✅ Vet pass (8 findings, all resolved)
 - ✅ Plan 1 (Foundation) — 17 tasks, implemented
-- ⬜ Plans 2–7
+- ✅ Plan 2 (Pipeline Authoring) — 13 tasks, implemented
+- ⬜ Plans 3–7
 
 ## Source-of-truth documents
 
@@ -63,7 +67,8 @@ The Rust workspace mirrors the DDD bounded contexts from the spec:
 ```
 src-tauri/
 ├── agent_bus_core/        shared kernel — ID newtypes, enums, OHS protocol
-├── workspace/             Workspace context — projects + path resolution
+├── workspace/             Workspace context — projects + path-resolution kernel
+├── pipeline/              Pipeline Authoring context — YAML schema, validation, templates
 └── app/                   composition root — Tauri runtime + migrations
 ```
 
