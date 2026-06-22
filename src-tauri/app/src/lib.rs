@@ -14,6 +14,12 @@ pub fn run() {
             sql: include_str!("../migrations/001_initial.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 2,
+            description: "pipeline activation index",
+            sql: include_str!("../migrations/002_pipeline_activation.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
