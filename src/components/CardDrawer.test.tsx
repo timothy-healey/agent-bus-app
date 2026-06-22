@@ -83,6 +83,14 @@ describe("CardDrawer", () => {
     expect(screen.getByText(/no log/i)).toBeInTheDocument();
   });
 
+  it("shows an empty artifact hint when there is no markdown", () => {
+    render(
+      <CardDrawer task={task()} artifactMarkdown="" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />,
+    );
+    // artifact tab is default; with no body the ArtifactView empty state shows.
+    expect(screen.getByText(/no artifact|nothing to show|empty/i)).toBeInTheDocument();
+  });
+
   it("renders a lineage tab that can be selected", () => {
     render(
       <CardDrawer

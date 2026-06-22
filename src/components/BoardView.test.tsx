@@ -64,4 +64,10 @@ describe("BoardView", () => {
     render(<BoardView pipeline={null} tasks={[]} onOpenCard={() => {}} />);
     expect(screen.getByText(/no active pipeline/i)).toBeInTheDocument();
   });
+
+  it("shows the lane header when the pipeline has lanes but no tasks", () => {
+    render(<BoardView pipeline={pipeline()} tasks={[]} tokensByTask={{}} onOpenCard={() => {}} />);
+    // the board is not blank-blank — at minimum the lane label shows.
+    expect(screen.getByText("Research")).toBeInTheDocument();
+  });
 });
