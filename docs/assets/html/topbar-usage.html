@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Topbar — usage widget</title>
+<style>
+  :root {
+    --bg: oklch(11% 0.005 60);
+    --bg-2: oklch(9% 0.004 60);
+    --surface: oklch(15% 0.005 60);
+    --surface-2: oklch(18% 0.006 60);
+    --surface-3: oklch(22% 0.008 60);
+    --border: oklch(24% 0.008 60);
+    --border-2: oklch(32% 0.010 60);
+    --text: oklch(92% 0.008 70);
+    --text-2: oklch(72% 0.008 70);
+    --text-3: oklch(55% 0.008 70);
+    --text-4: oklch(42% 0.008 70);
+    --accent: oklch(74% 0.13 55);
+    --accent-2: oklch(20% 0.040 55);
+    --running: oklch(72% 0.08 145);
+    --running-2: oklch(22% 0.030 145);
+    --warn: oklch(78% 0.14 75);
+    --danger: oklch(70% 0.12 25);
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Berkeley Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    margin: 0;
+    padding: 32px;
+    font-feature-settings: 'ss01', 'ss02';
+  }
+  .label {
+    color: var(--text-3);
+    font-size: 11px;
+    margin-bottom: 8px;
+  }
+
+  /* ============ TOPBAR ============ */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 18px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 4px;
+    margin-bottom: 28px;
+  }
+  .brand { font-weight: 600; font-size: 14px; }
+  .brand .dot { color: var(--accent); }
+  .pipeline-badge {
+    color: var(--text-2);
+    font-size: 12px;
+    padding: 2px 10px;
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    background: var(--bg);
+  }
+  .topbar-spacer { flex: 1; }
+
+  /* ============ USAGE METER WIDGET ============ */
+  .usage-meter {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 12px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    position: relative;
+  }
+  .usage-meter:hover { border-color: var(--border-2); }
+  .usage-meter:hover .tooltip { display: block; }
+
+  .usage-bar-wrap {
+    width: 100px;
+    height: 6px;
+    background: var(--surface-3);
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+  }
+  .usage-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--running) 0%, var(--warn) 60%, var(--danger) 90%);
+  }
+  .usage-label {
+    font-size: 11px;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .usage-pct { color: var(--text); font-weight: 500; }
+  .usage-window-mark {
+    color: var(--text-3);
+    font-size: 10.5px;
+  }
+  .burn {
+    font-size: 11px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .burn .num { color: var(--text-2); }
+
+  /* tooltip on hover */
+  .tooltip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-radius: 4px;
+    padding: 12px 14px;
+    width: 280px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    z-index: 10;
+    text-align: left;
+  }
+  .tooltip .title {
+    font-size: 11.5px;
+    color: var(--text);
+    font-weight: 500;
+    margin-bottom: 10px;
+  }
+  .tooltip .row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-3);
+    padding: 3px 0;
+  }
+  .tooltip .row .v { color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .tooltip .row.divider { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
+  .tooltip .row.warn .v { color: var(--warn); }
+  .tooltip .breakdown {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .tooltip .breakdown .title { color: var(--text-3); font-weight: 400; font-size: 10.5px; text-transform: lowercase; margin-bottom: 6px; }
+  .tooltip .team-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; color: var(--text-3); }
+  .tooltip .team-row .v { color: var(--text-2); }
+
+  .brake-state {
+    color: var(--text-3);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .brake-state .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--running);
+    box-shadow: 0 0 0 2px var(--running-2);
+  }
+
+  /* ============ VARIANTS ============ */
+  .variants-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 24px;
+    margin-top: 32px;
+  }
+  .variant {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .variant-label {
+    padding: 10px 14px;
+    background: var(--bg-2);
+    font-size: 11px;
+    color: var(--text-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .variant-body {
+    padding: 16px;
+    background: var(--surface);
+  }
+  .variant .usage-meter { cursor: default; }
+  .variant .usage-meter:hover .tooltip { display: none; }
+
+  .scenarios {
+    color: var(--text-3);
+    font-size: 11px;
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+  .scenarios strong { color: var(--text); font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div class="label">topbar with usage meter (hover the meter to see breakdown)</div>
+
+<div class="topbar">
+  <div class="brand"><span class="dot">●</span>&nbsp;agent bus</div>
+  <div class="pipeline-badge">ddd / spec → plan → impl</div>
+
+  <div class="topbar-spacer"></div>
+
+  <!-- USAGE METER -->
+  <div class="usage-meter">
+    <div class="usage-bar-wrap"><div class="usage-bar" style="width: 47%"></div></div>
+    <div class="usage-label">
+      <span class="usage-pct">47%</span>
+      <span class="usage-window-mark">· 5h window · 1.2M tok</span>
+    </div>
+    <span style="color: var(--text-4); font-size: 11px">·</span>
+    <div class="burn">burn <span class="num">18k/min</span></div>
+
+    <!-- tooltip on hover -->
+    <div class="tooltip">
+      <div class="title">claude usage · rolling 5h window</div>
+      <div class="row"><span>tokens this window</span><span class="v">1.2M / 2.6M est</span></div>
+      <div class="row"><span>started</span><span class="v">11:14 (4h 22m ago)</span></div>
+      <div class="row"><span>burn rate (1-min avg)</span><span class="v">18.2k tok/min</span></div>
+      <div class="row warn"><span>est. brake at</span><span class="v">≈ 15:45 (33m)</span></div>
+      <div class="row divider"><span>session cost (api runners only)</span><span class="v">$3.42</span></div>
+
+      <div class="breakdown">
+        <div class="title">by team</div>
+        <div class="team-row"><span>research (opus, hi)</span><span class="v">540k · 45%</span></div>
+        <div class="team-row"><span>plan-writers (opus, hi)</span><span class="v">320k · 27%</span></div>
+        <div class="team-row"><span>spec-reviewers (sonnet, lo)</span><span class="v">180k · 15%</span></div>
+        <div class="team-row"><span>impl (opus, lo)</span><span class="v">110k · 9%</span></div>
+        <div class="team-row"><span>others</span><span class="v">50k · 4%</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="brake-state">
+    <span class="dot"></span> brake off
+  </div>
+</div>
+
+<div class="label">the three visual states of the meter (left-to-right: safe / warn / hot)</div>
+
+<div class="variants-grid">
+  <div class="variant">
+    <div class="variant-label">SAFE · &lt; 60% of window · slow burn</div>
+    <div class="variant-body">
+      <div class="usage-meter" style="display: inline-flex">
+        <div class="usage-bar-wrap"><div class="usage-bar" style="width: 22%; background: var(--running)"></div></div>
+        <div class="usage-label">
+          <span class="usage-pct">22%</span>
+          <span class="usage-window-mark">· 5h window · 580k tok</span>
+        </div>
+        <span style="color: var(--text-4); font-size: 11px">·</span>
+        <div class="burn">burn <span class="num">2.4k/min</span></div>
+      </div>
+      <div class="scenarios">Sage bar, neutral text. <strong>No action needed.</strong> Burn rate suggests you can keep going for hours.</div>
+    </div>
+  </div>
+
+  <div class="variant">
+    <div class="variant-label">WARN · 60–85% · est. brake in &lt; 1h</div>
+    <div class="variant-body">
+      <div class="usage-meter" style="display: inline-flex">
+        <div class="usage-bar-wrap"><div class="usage-bar" style="width: 72%"></div></div>
+        <div class="usage-label">
+          <span class="usage-pct" style="color: var(--warn)">72%</span>
+          <span class="usage-window-mark">· 5h window · 1.87M tok</span>
+        </div>
+        <span style="color: var(--text-4); font-size: 11px">·</span>
+        <div class="burn">burn <span class="num">22k/min</span></div>
+      </div>
+      <div class="scenarios">Bar shifts to amber gradient. Number turns amber. <strong>You'd notice this in a glance.</strong> Tooltip shows estimated brake-at time.</div>
+    </div>
+  </div>
+
+  <div class="variant">
+    <div class="variant-label">HOT · ≥ 85% · brake imminent</div>
+    <div class="variant-body">
+      <div class="usage-meter" style="display: inline-flex; border-color: oklch(40% 0.10 25)">
+        <div class="usage-bar-wrap"><div class="usage-bar" style="width: 92%"></div></div>
+        <div class="usage-label">
+          <span class="usage-pct" style="color: var(--danger)">92%</span>
+          <span class="usage-window-mark">· 5h window · 2.39M tok</span>
+        </div>
+        <span style="color: var(--text-4); font-size: 11px">·</span>
+        <div class="burn">burn <span class="num" style="color: var(--danger)">31k/min</span></div>
+      </div>
+      <div class="scenarios">Bar mostly red. Border tinted red. <strong>Auto-meter sets brake at 95%.</strong> Manual brake recommended now — finish in-flight tasks then halt.</div>
+    </div>
+  </div>
+
+  <div class="variant">
+    <div class="variant-label">BRAKED · already halted</div>
+    <div class="variant-body">
+      <div class="usage-meter" style="display: inline-flex; opacity: 0.6; border-color: oklch(40% 0.10 25)">
+        <div class="usage-bar-wrap"><div class="usage-bar" style="width: 96%"></div></div>
+        <div class="usage-label">
+          <span class="usage-pct" style="color: var(--danger)">96%</span>
+          <span class="usage-window-mark">· braked · ↻ 24m</span>
+        </div>
+      </div>
+      <div class="scenarios">Meter dims. Shows time until next window resets. <strong>New work won't claim;</strong> in-flight finishes naturally. <code>brake off</code> overrides if you want to risk it.</div>
+    </div>
+  </div>
+</div>
+
+<div class="label" style="margin-top: 32px">how it's computed</div>
+
+<div style="background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 16px 20px; color: var(--text-2); font-size: 12.5px; line-height: 1.6">
+  Every <code>claude --print --output-format stream-json</code> emits <code>usage</code> per response chunk: <code>input_tokens</code>, <code>output_tokens</code>, <code>cache_creation_input_tokens</code>, <code>cache_read_input_tokens</code>. The Rust backend tails the stream, persists a row per chunk to <code>SQLite usage_log(ts, team, task_id, tokens, model)</code>, and the topbar widget queries the last 5h.<br><br>
+  <span style="color: var(--text-3)">The "% of window" assumes a configurable budget per user (default: 2.6M tokens / 5h ≈ Pro plan rough estimate; user adjusts in settings if they're on Max or API). Anthropic doesn't expose the actual subscription quota via API, so this is an estimate — useful as a guide, not a hard number.</span>
+</div>
+
+</body>
+</html>

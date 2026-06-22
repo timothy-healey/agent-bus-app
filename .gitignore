@@ -1,0 +1,41 @@
+# Bun / Node
+node_modules/
+bun.lockb.bak
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/Cargo.lock
+target/
+
+# Vite
+dist/
+.vite/
+
+# Test output
+coverage/
+.nyc_output/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+*.iml
+
+# App-local state (created at runtime)
+*.db
+*.db-journal
+.agent-bus/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
