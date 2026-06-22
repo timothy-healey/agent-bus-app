@@ -67,7 +67,7 @@ export function Card({ task, tokens, onClick }: CardProps) {
   const cost: CSSProperties = { color: costColorVar[costBand(tokens)] };
 
   return (
-    <div style={root} onClick={() => onClick?.(task.id)}>
+    <div className="abp-card" style={root} onClick={() => onClick?.(task.id)}>
       <div style={topRow}>
         <code style={id}>
           {task.state === "revising" ? "↩ " : ""}

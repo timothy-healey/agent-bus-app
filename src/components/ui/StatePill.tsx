@@ -47,7 +47,7 @@ export function StatePill({ state }: StatePillProps) {
   };
   return (
     <span style={wrap}>
-      <span data-dot style={dot} />
+      <span data-dot className={state === "running" ? "abp-pulse" : undefined} style={dot} />
       {labels[state]}
     </span>
   );

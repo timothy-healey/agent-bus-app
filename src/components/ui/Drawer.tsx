@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
 export interface DrawerProps {
   open: boolean;
@@ -7,6 +7,18 @@ export interface DrawerProps {
 }
 
 export function Drawer({ open, onClose, children }: DrawerProps) {
+  // Slide the panel in from the right on mount (DESIGN.md §Motion). Reduced
+  // motion is honoured by the .abp-drawer-enter-active class (global.css guard).
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    if (!open) {
+      setEntered(false);
+      return;
+    }
+    const id = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(id);
+  }, [open]);
+
   if (!open) return null;
 
   const backdrop: CSSProperties = {
@@ -28,6 +40,8 @@ export function Drawer({ open, onClose, children }: DrawerProps) {
     display: "flex",
     flexDirection: "column",
     fontFamily: "inherit",
+    transform: entered ? "translateX(0)" : "translateX(100%)",
+    transition: "transform var(--dur-slow) var(--ease-out)",
   };
   const closeBtn: CSSProperties = {
     position: "absolute",
@@ -45,7 +59,7 @@ export function Drawer({ open, onClose, children }: DrawerProps) {
   return (
     <>
       <div data-testid="drawer-backdrop" style={backdrop} onClick={onClose} />
-      <aside style={panel}>
+      <aside className="abp-drawer-enter-active" style={panel}>
         <button
           type="button"
           aria-label="close"

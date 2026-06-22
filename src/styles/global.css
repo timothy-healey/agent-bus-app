@@ -20,3 +20,41 @@ code, .mono {
 
 .usage-tooltip { display: none; }
 .usage-meter-hoverable:hover .usage-tooltip { display: block; }
+
+/* Motion — DESIGN.md §Motion. State, never decoration. */
+@keyframes abp-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.abp-pulse {
+  animation: abp-pulse 1.8s var(--ease-out) infinite;
+}
+
+.abp-drawer-enter {
+  transform: translateX(100%);
+}
+.abp-drawer-enter-active {
+  transform: translateX(0);
+  transition: transform var(--dur-slow) var(--ease-out);
+}
+
+.abp-card {
+  transition: transform var(--dur-base) var(--ease-out),
+              border-color var(--dur-base) var(--ease-out);
+}
+.abp-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-2);
+}
+
+/* Accessibility — reduced-motion disables all transform/pulse animation (D10). */
+@media (prefers-reduced-motion: reduce) {
+  .abp-pulse,
+  .abp-drawer-enter-active,
+  .abp-card {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+}
