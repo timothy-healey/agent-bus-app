@@ -30,6 +30,9 @@ export default function App() {
 
   const { tasks, reload: reloadTasks } = useTasks();
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  // A lineage click overrides which artifact the pane shows (D5: single pane).
+  const [lineagePath, setLineagePath] = useState<string | null>(null);
+  useEffect(() => setLineagePath(null), [openTaskId]);
 
   const openTask: Task | null =
     openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
@@ -58,7 +61,7 @@ export default function App() {
   const [artifactMarkdown, setArtifactMarkdown] = useState("");
   useEffect(() => {
     let cancelled = false;
-    const path = openTask?.review_artifact ?? openTask?.parent_artifact ?? null;
+    const path = lineagePath ?? openTask?.review_artifact ?? openTask?.parent_artifact ?? null;
     if (!openTask || !activeProject || !path) {
       setArtifactMarkdown("");
       return;
@@ -74,7 +77,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [openTask, activeProject]);
+  }, [openTask, activeProject, lineagePath]);
 
   // The upstream writer a gate's revise routes back to: the team whose
   // on_approve points at this gate (best-effort; falls back to a label).
@@ -188,6 +191,7 @@ export default function App() {
             task={openTask}
             artifactMarkdown={artifactMarkdown}
             reviseTarget={reviseTargetFor(openTask)}
+            onOpenArtifact={setLineagePath}
             onApprove={handleApprove}
             onRevise={handleRevise}
             onReject={handleReject}

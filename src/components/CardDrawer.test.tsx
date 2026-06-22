@@ -82,4 +82,20 @@ describe("CardDrawer", () => {
     fireEvent.click(screen.getByRole("tab", { name: /live log/i }));
     expect(screen.getByText(/no log/i)).toBeInTheDocument();
   });
+
+  it("renders a lineage tab that can be selected", () => {
+    render(
+      <CardDrawer
+        task={task({ parent_artifact: "artifacts/specs/T-1-v1.md" })}
+        artifactMarkdown=""
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    const lineage = screen.getByRole("tab", { name: /lineage/i });
+    expect(lineage).toBeInTheDocument();
+    fireEvent.click(lineage);
+    expect(screen.getByText("topic")).toBeInTheDocument();
+  });
 });
