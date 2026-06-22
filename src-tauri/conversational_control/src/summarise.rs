@@ -25,7 +25,7 @@ pub fn summarise_turns(turns: &[Turn], prior: Option<&str>) -> String {
     if let Some(p) = prior {
         if !p.is_empty() {
             body.push_str(p);
-            body.push_str("\n");
+            body.push('\n');
         }
     }
     body.push_str(&format!(
