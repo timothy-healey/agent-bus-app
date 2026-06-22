@@ -7,6 +7,8 @@ import { PipelineView } from "./components/PipelineView";
 import { useProjects } from "./hooks/useProjects";
 import { useTasks } from "./hooks/useTasks";
 import { BoardView } from "./components/BoardView";
+import { ListView } from "./components/ListView";
+import { SettingsView } from "./components/SettingsView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
 import { readArtifact, type Project } from "./ipc/workspace";
@@ -14,6 +16,7 @@ import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as
 import { recordVerdict, addComment } from "./ipc/review";
 import { instantiateTemplate, listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
+import { setBudget } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
 import { useConversation } from "./hooks/useConversation";
 
@@ -158,8 +161,17 @@ export default function App() {
       <main style={{ flex: 1, overflow: "auto" }}>
         {view === "pipeline" ? (
           <PipelineView pipeline={pipeline} />
+        ) : view === "settings" ? (
+          <SettingsView usage={usage} onSetBudget={setBudget} />
         ) : activeProject == null ? (
           <ProjectList />
+        ) : view === "list" ? (
+          <ListView
+            tasks={tasks}
+            tokensByTask={usage?.tokens_by_task ?? {}}
+            now={Math.floor(Date.now() / 1000)}
+            onOpenCard={setOpenTaskId}
+          />
         ) : (
           <BoardView
             pipeline={pipeline}

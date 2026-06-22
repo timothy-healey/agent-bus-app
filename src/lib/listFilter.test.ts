@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterTasks, type FilterPill } from "./listFilter";
+import { filterTasks } from "./listFilter";
 import type { Task } from "../ipc/runtime";
 
 function t(over: Partial<Task>): Task {
