@@ -1,3 +1,7 @@
 //! runtime — the Runtime context. Owns the Task lifecycle state machine
 //! (Task aggregate), the WorkerPool (per-team tokio workers; second aggregate,
 //! joined to Task by reference), the Pipeline router, and the system brake.
+
+pub mod task;
+
+pub use task::*;
