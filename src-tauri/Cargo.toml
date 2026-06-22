@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app", "agent_bus_core", "workspace", "pipeline"]
+members = ["app", "agent_bus_core", "workspace", "pipeline", "runners", "runtime"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,6 +19,7 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

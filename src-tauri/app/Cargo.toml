@@ -25,4 +25,6 @@ tokio.workspace = true
 agent_bus_core = { path = "../agent_bus_core" }
 workspace = { path = "../workspace" }
 pipeline = { path = "../pipeline" }
+runners = { path = "../runners" }
+runtime = { path = "../runtime" }
 sqlx = { workspace = true }
