@@ -1,6 +1,7 @@
-//! pipeline — the Pipeline Authoring context. Owns the pipeline YAML schema,
-//! parsing, validation, the bundled DDD template, and the OHS api submodule.
+//! pipeline — the Pipeline Authoring context.
 
 pub mod model;
+pub mod parse;
 
 pub use model::*;
+pub use parse::*;
