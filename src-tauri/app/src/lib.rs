@@ -55,6 +55,11 @@ pub fn run() {
             workspace::api::workspace_create_project,
             workspace::api::workspace_list_projects,
             workspace::api::workspace_get_project,
+            workspace::api::workspace_set_active_pipeline,
+            pipeline::api::pipeline_list_templates,
+            pipeline::api::pipeline_list,
+            pipeline::api::pipeline_load,
+            pipeline::api::pipeline_instantiate_template,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
