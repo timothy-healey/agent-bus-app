@@ -2,10 +2,10 @@
   "schema_version": 1,
   "kernels": {
     "agent_bus_core": { "module": "agent_bus_core", "paths": ["src-tauri/agent_bus_core/**"] },
-    "workspace_paths": { "module": "workspace", "paths": [] }
+    "workspace_paths": { "module": "workspace", "paths": ["src-tauri/workspace/src/paths.rs"] }
   },
   "contexts": {
-    "pipeline-authoring":      { "module": "pipeline_authoring",   "paths": ["src-tauri/pipeline_authoring/**"], "publicModules": ["api"] },
+    "pipeline-authoring":      { "module": "pipeline",              "paths": ["src-tauri/pipeline/**"],           "publicModules": ["api"] },
     "runtime":                 { "module": "runtime",              "paths": ["src-tauri/runtime/**"],            "publicModules": ["api"] },
     "review":                  { "module": "review",               "paths": ["src-tauri/review/**"],             "publicModules": ["api"] },
     "usage-telemetry":         { "module": "usage_telemetry",      "paths": ["src-tauri/usage_telemetry/**"],    "publicModules": ["api"] },
