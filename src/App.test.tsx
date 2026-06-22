@@ -43,6 +43,10 @@ vi.mock("./ipc/review", () => ({
   deleteComment: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue({ on: false, reason: null }) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("./hooks/useUsage", () => ({ useUsage: () => ({ snapshot: null, reload: vi.fn() }) }));
+
 import App from "./App";
 
 describe("App board integration", () => {
