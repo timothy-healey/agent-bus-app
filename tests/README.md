@@ -11,6 +11,7 @@ By crate:
 ```bash
 cargo test -p agent_bus_core
 cargo test -p workspace
+cargo test -p pipeline
 ```
 
 ## Frontend (vitest)
