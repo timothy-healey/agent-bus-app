@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Revise flow — fixed</title>
+<style>
+  :root {
+    --bg: oklch(11% 0.005 60);
+    --bg-2: oklch(9% 0.004 60);
+    --surface: oklch(15% 0.005 60);
+    --surface-2: oklch(18% 0.006 60);
+    --surface-3: oklch(22% 0.008 60);
+    --border: oklch(24% 0.008 60);
+    --border-2: oklch(32% 0.010 60);
+    --text: oklch(92% 0.008 70);
+    --text-2: oklch(72% 0.008 70);
+    --text-3: oklch(55% 0.008 70);
+    --text-4: oklch(42% 0.008 70);
+    --accent: oklch(74% 0.13 55);
+    --accent-2: oklch(20% 0.040 55);
+    --accent-3: oklch(28% 0.060 55);
+    --accent-bd: oklch(48% 0.090 55);
+    --running: oklch(72% 0.08 145);
+    --running-2: oklch(22% 0.030 145);
+    --revise: oklch(70% 0.10 305);
+    --revise-2: oklch(20% 0.035 305);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'Berkeley Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .step {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 32px 28px;
+    position: relative;
+  }
+  .step-num {
+    position: absolute;
+    left: 8px;
+    top: 24px;
+    font-size: 10px;
+    color: var(--accent);
+    width: 18px;
+    text-align: center;
+  }
+  .step-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .step-desc {
+    color: var(--text-3);
+    font-size: 11.5px;
+    margin-bottom: 14px;
+    max-width: 80ch;
+  }
+
+  /* ============ THE DRAWER (used across steps 2-4) ============ */
+  .stage-frame {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .stage-frame .drawer-shell {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    min-height: 540px;
+  }
+  .stage-frame .board-bg {
+    background: var(--bg-2);
+    background-image: radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0);
+    background-size: 14px 14px;
+    color: var(--text-4);
+    font-size: 10px;
+    text-align: center;
+    padding-top: 60px;
+    border-right: 1px solid var(--border);
+  }
+  .drawer {
+    background: var(--surface);
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    max-height: 540px;
+  }
+  .drawer-head {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .drawer-head .top {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .drawer-id { color: var(--accent); font-size: 12px; }
+  .drawer-stage { color: var(--text-3); font-size: 11px; }
+  .drawer-title { font-size: 14.5px; color: var(--text); margin: 0; }
+
+  .drawer-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+  .drawer-tab {
+    padding: 9px 16px;
+    font-size: 11.5px;
+    color: var(--text-3);
+    border-right: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .drawer-tab.active {
+    color: var(--accent);
+    background: var(--surface);
+    border-bottom: 1px solid var(--surface);
+    margin-bottom: -1px;
+  }
+  .drawer-tab .badge {
+    background: var(--accent-3);
+    color: var(--accent);
+    padding: 0 5px;
+    border-radius: 6px;
+    font-size: 10px;
+    margin-left: 4px;
+  }
+
+  .drawer-body {
+    display: grid;
+    grid-template-columns: 1fr 230px;
+    overflow: hidden;
+  }
+  .artifact-scroll {
+    overflow-y: auto;
+    padding: 18px 22px;
+    font-family: ui-sans-serif, -apple-system, system-ui, sans-serif;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--text-2);
+  }
+  .artifact-scroll h1, .artifact-scroll h2, .artifact-scroll h3 {
+    font-family: inherit;
+    color: var(--text);
+    font-weight: 600;
+    line-height: 1.3;
+    margin-top: 0;
+  }
+  .artifact-scroll h1 { font-size: 19px; margin-bottom: 4px; letter-spacing: -0.005em; }
+  .artifact-scroll h2 { font-size: 16px; margin: 22px 0 8px; }
+  .artifact-scroll h3 { font-size: 14px; margin: 18px 0 6px; }
+  .artifact-scroll p { margin: 0 0 10px; }
+  .artifact-scroll ul { margin: 8px 0 12px; padding-left: 22px; }
+  .artifact-scroll li { margin: 3px 0; }
+  .artifact-scroll code {
+    font-family: 'Berkeley Mono', 'JetBrains Mono', monospace;
+    background: var(--bg-2);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .artifact-scroll pre {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 10px 12px;
+    font-family: 'Berkeley Mono', 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text-2);
+    overflow-x: auto;
+    margin: 8px 0 14px;
+  }
+  .artifact-scroll pre code { background: none; border: none; padding: 0; font-size: inherit; }
+  .artifact-scroll .frontmatter {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 10px 12px;
+    font-family: 'Berkeley Mono', monospace;
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 18px;
+  }
+  .artifact-scroll .frontmatter .key { color: var(--text-2); }
+
+  /* Comment annotation in the artifact body */
+  .comment-anchor {
+    background: var(--accent-2);
+    border-bottom: 1.5px solid var(--accent);
+    padding: 0 3px;
+    border-radius: 2px;
+    cursor: pointer;
+    position: relative;
+  }
+  .comment-anchor::after {
+    content: attr(data-marker);
+    display: inline-block;
+    background: var(--accent);
+    color: oklch(15% 0.04 55);
+    font-family: 'Berkeley Mono', monospace;
+    font-size: 9.5px;
+    font-weight: 700;
+    width: 14px;
+    height: 14px;
+    line-height: 14px;
+    text-align: center;
+    border-radius: 50%;
+    margin-left: 4px;
+    vertical-align: super;
+  }
+  .comment-anchor.active {
+    background: var(--accent-3);
+  }
+
+  /* Composing popover (used in step 3) */
+  .selection-popover {
+    position: absolute;
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-top: 8px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    width: 260px;
+    z-index: 10;
+    font-family: 'Berkeley Mono', monospace;
+    font-size: 11.5px;
+  }
+  .selection-popover::before {
+    content: '';
+    position: absolute;
+    top: -5px;
+    left: 14px;
+    width: 9px;
+    height: 9px;
+    background: var(--surface-3);
+    border-left: 1px solid var(--border-2);
+    border-top: 1px solid var(--border-2);
+    transform: rotate(45deg);
+  }
+  .selection-popover .label {
+    font-size: 10px;
+    color: var(--text-3);
+    margin-bottom: 6px;
+    text-transform: lowercase;
+  }
+  .selection-popover .quoted {
+    color: var(--text-3);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 11px;
+    padding: 4px 6px;
+    border-left: 2px solid var(--accent);
+    background: var(--bg-2);
+    margin-bottom: 8px;
+  }
+  .selection-popover textarea {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 11.5px;
+    padding: 6px 8px;
+    border-radius: 2px;
+    resize: vertical;
+    min-height: 50px;
+  }
+  .selection-popover .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .btn-sm {
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    color: oklch(15% 0.04 55);
+    padding: 4px 10px;
+    font-size: 10.5px;
+    border-radius: 2px;
+    font-family: inherit;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .btn-sm.ghost {
+    background: transparent;
+    color: var(--text-2);
+    border-color: var(--border);
+    font-weight: 400;
+  }
+
+  /* Right rail — comments list */
+  .comments-rail {
+    background: var(--bg-2);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    max-height: 540px;
+  }
+  .comments-rail .head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10.5px;
+    color: var(--text-3);
+    text-transform: lowercase;
+    letter-spacing: 0.03em;
+    display: flex;
+    justify-content: space-between;
+  }
+  .comments-rail .head .count { color: var(--accent); }
+  .comment {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .comment:hover { background: var(--surface); }
+  .comment.active { background: var(--accent-2); }
+  .comment .marker {
+    display: inline-block;
+    background: var(--accent);
+    color: oklch(15% 0.04 55);
+    font-family: 'Berkeley Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    text-align: center;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .comment .quote {
+    color: var(--text-3);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 11.5px;
+    font-style: italic;
+    margin: 6px 0 6px 22px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border);
+    line-height: 1.45;
+  }
+  .comment .note {
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 12px;
+    margin-left: 22px;
+    line-height: 1.45;
+  }
+  .comments-rail-empty {
+    padding: 14px;
+    color: var(--text-4);
+    font-size: 11px;
+    text-align: center;
+    font-style: italic;
+  }
+
+  /* Action bar (bottom of drawer) */
+  .drawer-actions {
+    border-top: 1px solid var(--border);
+    background: var(--bg-2);
+    padding: 12px 16px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+  .drawer-actions .left { margin-right: auto; color: var(--text-3); font-size: 11px; align-self: center; }
+  .drawer-actions button {
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    color: var(--text);
+    padding: 7px 14px;
+    font-family: inherit;
+    font-size: 11.5px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .drawer-actions button.primary {
+    background: var(--accent);
+    color: oklch(15% 0.04 55);
+    border-color: var(--accent);
+    font-weight: 500;
+  }
+  .drawer-actions button.danger { color: oklch(70% 0.13 25); border-color: oklch(35% 0.05 25); }
+
+  /* Revise expanded panel */
+  .revise-expanded {
+    border-top: 1px solid var(--border);
+    background: var(--surface-2);
+    padding: 14px 18px;
+  }
+  .revise-expanded h5 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    color: var(--text-3);
+    font-weight: 400;
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+  }
+  .revise-expanded .summary {
+    color: var(--text-2);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .revise-expanded .summary strong { color: var(--accent); }
+  .revise-expanded textarea {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 12.5px;
+    padding: 8px 10px;
+    border-radius: 3px;
+    resize: vertical;
+    min-height: 70px;
+    line-height: 1.5;
+  }
+  .revise-expanded .send-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  /* Step 1 notification */
+  .notif-bar {
+    padding: 12px 18px;
+    background: var(--accent-2);
+    border-bottom: 1px solid var(--accent-bd);
+    color: var(--accent);
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .notif-bar .pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: 8px;
+    display: inline-block;
+    animation: pulse 1.5s ease-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .mini-board {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    padding: 14px 18px;
+    gap: 8px;
+  }
+  .mini-lane {
+    border-right: 1px solid var(--border);
+    padding-right: 8px;
+    min-height: 70px;
+  }
+  .mini-lane:last-child { border-right: none; }
+  .mini-lane-name { font-size: 10px; color: var(--text-3); margin-bottom: 6px; }
+  .mini-lane.gate-active { background: var(--accent-2); padding: 6px 8px; }
+  .mini-lane.gate-active .mini-lane-name { color: var(--accent); }
+  .mini-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+  .mini-card .id { color: var(--text-3); font-size: 9.5px; }
+  .mini-card .ttl { color: var(--text); margin-top: 2px; line-height: 1.3; }
+  .mini-card.gate { border-color: var(--accent-bd); background: oklch(20% 0.025 55); }
+  .mini-card.bounced-back {
+    border-color: oklch(48% 0.10 305);
+    background: var(--revise-2);
+  }
+  .mini-card.bounced-back .id { color: var(--revise); }
+
+  /* Step 4 flash */
+  .result-flash {
+    padding: 12px 18px;
+    background: oklch(20% 0.04 145);
+    border-bottom: 1px solid oklch(35% 0.06 145);
+    color: var(--running);
+    font-size: 11.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .result-flash .icon {
+    background: var(--running);
+    color: oklch(15% 0.02 145);
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+  }
+</style>
+</head>
+<body>
+
+<div style="padding: 20px 32px 8px">
+  <div style="font-size: 12px; color: var(--text-3); margin-bottom: 4px">revise flow · fixed</div>
+  <div style="font-size: 14px; color: var(--text)">plan ready → read → comment → suggest direction → send back</div>
+</div>
+
+<!-- ============ STEP 1 ============ -->
+<div class="step">
+  <div class="step-num">01</div>
+  <div class="step-title">Plan lands at Gate 2</div>
+  <div class="step-desc">Subtle banner + card pulses in the gate lane. You finish what you're doing in your IDE; nothing's interrupting you.</div>
+  <div class="stage-frame">
+    <div class="notif-bar">
+      <span><span class="pulse"></span>1 plan waiting at gate 2 · T-040 · Scheduling bulk-write plan</span>
+      <span style="color: var(--text-3)">⌥G to focus</span>
+    </div>
+    <div class="mini-board">
+      <div class="mini-lane"><div class="mini-lane-name">research</div></div>
+      <div class="mini-lane"><div class="mini-lane-name">spec-w</div></div>
+      <div class="mini-lane"><div class="mini-lane-name">spec-r</div></div>
+      <div class="mini-lane"><div class="mini-lane-name">plan-w</div></div>
+      <div class="mini-lane"><div class="mini-lane-name">plan-r</div></div>
+      <div class="mini-lane gate-active">
+        <div class="mini-lane-name">gate 2 · plan</div>
+        <div class="mini-card gate">
+          <div class="id">T-040</div>
+          <div class="ttl">Scheduling bulk-write plan</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 2 — DRAWER WITH FULL PLAN ============ -->
+<div class="step">
+  <div class="step-num">02</div>
+  <div class="step-title">Click card → drawer opens with the full plan rendered, scrollable, no comments yet</div>
+  <div class="step-desc">Sans-serif body for sustained reading; mono code blocks; frontmatter shown as a small monospaced block. This is what you're actually reading — scroll to the end before deciding what to do.</div>
+  <div class="stage-frame">
+    <div class="drawer-shell">
+      <div class="board-bg">[ board dims; drawer overlays the right ]</div>
+      <div class="drawer">
+        <div class="drawer-head">
+          <div class="top">
+            <span class="drawer-id">T-040</span>
+            <span class="drawer-stage">plan-reviewers · v1 · 154k tok · 8m</span>
+          </div>
+          <div class="drawer-title">Scheduling bulk-write — plan v1</div>
+        </div>
+        <div class="drawer-tabs">
+          <div class="drawer-tab active">artifact</div>
+          <div class="drawer-tab">live log</div>
+          <div class="drawer-tab">review</div>
+          <div class="drawer-tab">lineage</div>
+        </div>
+        <div class="drawer-body">
+          <div class="artifact-scroll">
+            <h1>Scheduling bulk-write API — implementation plan</h1>
+            <div class="frontmatter">
+              <span class="key">id:</span> T-040<br>
+              <span class="key">parent_artifact:</span> artifacts/specs/T-040-v1.md<br>
+              <span class="key">target_repo:</span> ~/splose/splose-monorepo<br>
+              <span class="key">version:</span> 1
+            </div>
+
+            <h2>Goal</h2>
+            <p>Expose a bulk-write surface on Scheduling that Imports can call without bypassing domain rules. The surface must be idempotent, batch-friendly, and let callers opt out of side effects per request.</p>
+
+            <h2>Architecture</h2>
+            <p>One new controller <code>bulk-appointment.controller.ts</code> exposing <code>POST /api/bulk/appointments</code>. The controller validates the batch, then dispatches per-row through the existing <code>AppointmentService.create()</code>. Each record uses a single idempotency key at the batch level; the entire batch is wrapped in a database transaction. On any error, the whole batch is rolled back.</p>
+
+            <h2>Tasks</h2>
+            <h3>Task 1 — controller + endpoint scaffolding</h3>
+            <p>Files:</p>
+            <ul>
+              <li>Create: <code>packages/server/src/controllers/bulk-appointment.controller.ts</code></li>
+              <li>Test: <code>packages/server/src/controllers/bulk-appointment.controller.test.ts</code></li>
+            </ul>
+            <p>Step 1: Write failing test for empty batch — 400 expected.</p>
+            <pre><code>describe('POST /api/bulk/appointments', () =&gt; {
+  it('rejects empty batch', async () =&gt; {
+    const res = await api.post('/api/bulk/appointments')
+      .send({ idempotencyKey: 'k1', records: [] });
+    expect(res.status).toBe(400);
+  });
+});</code></pre>
+            <p>Step 2: Run, verify it fails. Step 3: implement controller with <code>@CanAccess('imports', 'write')</code> and minimal body.</p>
+
+            <h3>Task 2 — service-layer dispatch with side-effect opt-outs</h3>
+            <p>Files:</p>
+            <ul>
+              <li>Create: <code>packages/server/src/services/bulk-appointment.service.ts</code></li>
+              <li>Modify: <code>packages/server/src/services/appointment.service.ts</code> — add <code>BulkContext</code> parameter</li>
+            </ul>
+            <p>The endpoint accepts <code>?skip_welcome=true&amp;skip_reminders=true&amp;skip_analytics=true</code>. The service threads these through to <code>AppointmentService.create()</code> via a new <code>BulkContext</code> object so the existing single-record path stays unchanged.</p>
+
+            <h3>Task 3 — transactional rollback semantics</h3>
+            <p>On any per-row failure: roll back the entire transaction, return <code>409 Conflict</code> with the first failed row's index and reason. No partial-batch commits.</p>
+
+            <h3>Task 4 — idempotency table + uniqueness check</h3>
+            <p>New table <code>bulk_idempotency_keys</code> with <code>(organisationId, key)</code> unique. On request: if the key exists, return the cached response (200 with original payload). If new: insert + execute.</p>
+
+            <h3>Task 5 — observability</h3>
+            <p>Emit <code>BulkAppointmentsCreated</code> domain event per row, plus a single <code>BulkAppointmentBatchCompleted</code> at the end with row count, elapsed time, and the idempotency key.</p>
+          </div>
+
+          <div class="comments-rail">
+            <div class="head">
+              <span>comments</span>
+              <span class="count">0</span>
+            </div>
+            <div class="comments-rail-empty">none yet — select text to comment</div>
+          </div>
+        </div>
+        <div class="drawer-actions">
+          <span class="left">v1 · 154k · 8m at gate</span>
+          <button class="danger">reject</button>
+          <button>revise</button>
+          <button class="primary">approve</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 3 — COMPOSING A COMMENT ============ -->
+<div class="step">
+  <div class="step-num">03</div>
+  <div class="step-title">Select text to comment — composing popover appears in-place</div>
+  <div class="step-desc">You highlight a sentence; a popover opens anchored to the selection with the same visual style as saved comments use later. Type your note, hit add. The popover collapses into the right rail; an inline marker ① stays at the selection.</div>
+  <div class="stage-frame">
+    <div class="drawer-shell">
+      <div class="board-bg">[ board dims; drawer overlays the right ]</div>
+      <div class="drawer">
+        <div class="drawer-head">
+          <div class="top">
+            <span class="drawer-id">T-040</span>
+            <span class="drawer-stage">plan-reviewers · v1 · 154k tok · 8m</span>
+          </div>
+          <div class="drawer-title">Scheduling bulk-write — plan v1</div>
+        </div>
+        <div class="drawer-tabs">
+          <div class="drawer-tab active">artifact</div>
+          <div class="drawer-tab">live log</div>
+          <div class="drawer-tab">review</div>
+          <div class="drawer-tab">lineage</div>
+        </div>
+        <div class="drawer-body">
+          <div class="artifact-scroll" style="position: relative">
+            <h2 style="margin-top: 0">Architecture</h2>
+            <p>One new controller <code>bulk-appointment.controller.ts</code> exposing <code>POST /api/bulk/appointments</code>. The controller validates the batch, then dispatches per-row through the existing <code>AppointmentService.create()</code>. <span class="comment-anchor active">Each record uses a single idempotency key at the batch level<div class="selection-popover">
+              <div class="label">comment on selection</div>
+              <div class="quoted">"Each record uses a single idempotency key at the batch level"</div>
+              <textarea autofocus>Per-row key, not per-batch. A partial batch failure should leave the rest committed and let the caller retry just the failing rows. Batch-level keys mean one bad row poisons the whole import attempt.</textarea>
+              <div class="actions">
+                <button class="btn-sm ghost">cancel</button>
+                <button class="btn-sm">add comment</button>
+              </div>
+            </div></span>; the entire batch is wrapped in a database transaction. On any error, the whole batch is rolled back.</p>
+
+            <h3>Task 1 — controller + endpoint scaffolding</h3>
+            <p>Files:</p>
+            <ul>
+              <li>Create: <code>packages/server/src/controllers/bulk-appointment.controller.ts</code></li>
+              <li>Test: <code>packages/server/src/controllers/bulk-appointment.controller.test.ts</code></li>
+            </ul>
+            <p style="color: var(--text-4)">…</p>
+          </div>
+
+          <div class="comments-rail">
+            <div class="head">
+              <span>comments</span>
+              <span class="count">0</span>
+            </div>
+            <div class="comments-rail-empty">composing…</div>
+          </div>
+        </div>
+        <div class="drawer-actions">
+          <span class="left">v1 · 154k · 8m at gate</span>
+          <button class="danger">reject</button>
+          <button>revise</button>
+          <button class="primary">approve</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 4 — TWO COMMENTS SAVED ============ -->
+<div class="step">
+  <div class="step-num">04</div>
+  <div class="step-title">Two comments saved — markers inline, threads in the rail</div>
+  <div class="step-desc">Same visual language: ochre underline on the anchored span, numbered marker after, matching entry in the right rail. Click a marker to scroll to its anchor; click a rail entry to highlight its anchor. The <code>revise</code> button at the bottom is now primary (you have changes to send).</div>
+  <div class="stage-frame">
+    <div class="drawer-shell">
+      <div class="board-bg">[ board dims ]</div>
+      <div class="drawer">
+        <div class="drawer-head">
+          <div class="top">
+            <span class="drawer-id">T-040</span>
+            <span class="drawer-stage">plan-reviewers · v1 · 154k tok · 8m</span>
+          </div>
+          <div class="drawer-title">Scheduling bulk-write — plan v1</div>
+        </div>
+        <div class="drawer-tabs">
+          <div class="drawer-tab active">artifact <span class="badge">2</span></div>
+          <div class="drawer-tab">live log</div>
+          <div class="drawer-tab">review</div>
+          <div class="drawer-tab">lineage</div>
+        </div>
+        <div class="drawer-body">
+          <div class="artifact-scroll">
+            <h2 style="margin-top: 0">Architecture</h2>
+            <p>One new controller <code>bulk-appointment.controller.ts</code> exposing <code>POST /api/bulk/appointments</code>. The controller validates the batch, then dispatches per-row through the existing <code>AppointmentService.create()</code>. <span class="comment-anchor" data-marker="1">Each record uses a single idempotency key at the batch level</span>; the entire batch is wrapped in a database transaction. <span class="comment-anchor" data-marker="2">On any error, the whole batch is rolled back</span>.</p>
+
+            <h3>Task 3 — transactional rollback semantics</h3>
+            <p>On any per-row failure: roll back the entire transaction, return <code>409 Conflict</code> with the first failed row's index and reason. No partial-batch commits.</p>
+
+            <h3>Task 4 — idempotency table + uniqueness check</h3>
+            <p>New table <code>bulk_idempotency_keys</code> with <code>(organisationId, key)</code> unique. On request: if the key exists, return the cached response (200 with original payload). If new: insert + execute.</p>
+          </div>
+
+          <div class="comments-rail">
+            <div class="head">
+              <span>comments</span>
+              <span class="count">2</span>
+            </div>
+            <div class="comment active">
+              <div><span class="marker">1</span><span style="color: var(--text-3); font-size: 10.5px;">you · just now</span></div>
+              <div class="quote">"Each record uses a single idempotency key at the batch level"</div>
+              <div class="note">Per-row key, not per-batch. A partial failure should leave the rest committed and let the caller retry just the failing rows.</div>
+            </div>
+            <div class="comment">
+              <div><span class="marker">2</span><span style="color: var(--text-3); font-size: 10.5px;">you · just now</span></div>
+              <div class="quote">"On any error, the whole batch is rolled back"</div>
+              <div class="note">Remove rollback — record per-row failures in the response, commit the successes.</div>
+            </div>
+          </div>
+        </div>
+        <div class="drawer-actions">
+          <span class="left">2 comments · ready to send</span>
+          <button class="danger">reject</button>
+          <button class="primary">revise &amp; send back</button>
+          <button>approve anyway</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 5 — REVISE CONFIRMATION ============ -->
+<div class="step">
+  <div class="step-num">05</div>
+  <div class="step-title">Click revise → expand for optional overall direction → confirm</div>
+  <div class="step-desc">Comments alone are enough to send back. Optional textarea appears for an overall direction note (often empty; the comments speak for themselves). One more click sends.</div>
+  <div class="stage-frame">
+    <div class="drawer-shell">
+      <div class="board-bg">[ board dims ]</div>
+      <div class="drawer">
+        <div class="drawer-head">
+          <div class="top">
+            <span class="drawer-id">T-040</span>
+            <span class="drawer-stage">plan-reviewers · v1 · 154k tok</span>
+          </div>
+          <div class="drawer-title">Scheduling bulk-write — plan v1</div>
+        </div>
+        <div class="drawer-tabs">
+          <div class="drawer-tab active">artifact <span class="badge">2</span></div>
+          <div class="drawer-tab">live log</div>
+          <div class="drawer-tab">review</div>
+          <div class="drawer-tab">lineage</div>
+        </div>
+        <div class="drawer-body">
+          <div class="artifact-scroll" style="opacity: 0.5">
+            <h2 style="margin-top: 0">Architecture</h2>
+            <p>One new controller… <span class="comment-anchor" data-marker="1">Each record uses a single idempotency key at the batch level</span>; <span class="comment-anchor" data-marker="2">On any error, the whole batch is rolled back</span>.</p>
+            <p style="color: var(--text-4)">…</p>
+          </div>
+          <div class="comments-rail">
+            <div class="head"><span>comments</span><span class="count">2</span></div>
+            <div class="comment"><div><span class="marker">1</span></div></div>
+            <div class="comment"><div><span class="marker">2</span></div></div>
+          </div>
+        </div>
+        <div class="revise-expanded">
+          <h5>send back to plan-writers</h5>
+          <div class="summary">2 inline comments will be bundled with this version. Plan-writers' worker will read them as the basis for <strong>v2</strong>. Attempts after: <strong>2/3</strong>.</div>
+          <h5>overall direction (optional)</h5>
+          <textarea placeholder="anything plan-writers should know beyond the inline comments?">Idempotency model is the only structural change. Tasks 1, 2, 4 stay; task 3 needs rewrite per comment 2. Keep observability (task 5) as-is.</textarea>
+          <div class="send-row">
+            <button class="btn-sm ghost">cancel</button>
+            <button class="btn-sm">send back to plan-writers</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 6 — BOUNCED ============ -->
+<div class="step">
+  <div class="step-num">06</div>
+  <div class="step-title">Card returns to plan-writers — attempts 2/3</div>
+  <div class="step-desc">Same flash as before; the card is now in plan-writers lane with a revise treatment so you can see at a glance it came back. The next plan-writers worker that's idle will claim it and read your two comments + overall direction before writing v2.</div>
+  <div class="stage-frame">
+    <div class="result-flash">
+      <span class="icon">✓</span>
+      sent back to plan-writers · 2 inline comments + overall direction · v2 will reference both
+    </div>
+    <div class="mini-board">
+      <div class="mini-lane"><div class="mini-lane-name">research</div></div>
+      <div class="mini-lane"><div class="mini-lane-name">spec-w</div></div>
+      <div class="mini-lane"><div class="mini-lane-name">spec-r</div></div>
+      <div class="mini-lane">
+        <div class="mini-lane-name">plan-w</div>
+        <div class="mini-card bounced-back">
+          <div class="id">T-040 ↩</div>
+          <div class="ttl">Scheduling plan</div>
+        </div>
+      </div>
+      <div class="mini-lane"><div class="mini-lane-name">plan-r</div></div>
+      <div class="mini-lane">
+        <div class="mini-lane-name">gate 2 · plan</div>
+        <div style="color: var(--text-4); font-size: 10px; padding-top: 8px">empty</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Style directions</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px; background: #f5f5f5; font-family: ui-sans-serif, -apple-system, sans-serif; }
+  .page-title { max-width: 1100px; margin: 0 auto 24px; color: #111; }
+  .page-title h1 { font-size: 22px; margin: 0; }
+  .page-title p { color: #666; margin: 6px 0 0; font-size: 14px; }
+  .grid { max-width: 1100px; margin: 0 auto; display: grid; grid-template-columns: 1fr; gap: 24px; }
+  .option {
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+  }
+  .option-label {
+    background: #fff;
+    padding: 12px 18px;
+    font-size: 13px;
+    color: #111;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .option-label .name { font-weight: 600; }
+  .option-label .vibe { color: #888; font-size: 12px; }
+  .option-body { padding: 28px; min-height: 320px; }
+
+  /* ============================================================
+     OPTION A — EDITORIAL / CRAFT
+     Soft serif headings, warm neutral palette, generous space.
+     ============================================================ */
+  .opt-a {
+    background: #faf8f4;
+    color: #1a1410;
+    font-family: ui-sans-serif, sans-serif;
+  }
+  .opt-a .head { font-family: 'Iowan Old Style', 'Palatino', Georgia, serif; }
+  .opt-a h2 { font-family: 'Iowan Old Style', 'Palatino', Georgia, serif; font-weight: 500; font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .opt-a .subtitle { color: #6e6555; font-size: 13px; margin-bottom: 28px; }
+  .opt-a .kanban { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .opt-a .col { background: rgba(0,0,0,0.025); border: 1px solid rgba(0,0,0,0.07); border-radius: 8px; padding: 14px; }
+  .opt-a .col-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #8a7d62; margin-bottom: 10px; font-weight: 600; }
+  .opt-a .card {
+    background: #fff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 8px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .opt-a .card-id { font-family: 'JetBrains Mono', ui-monospace, monospace; color: #b8612b; font-size: 11px; }
+  .opt-a .card-title { font-family: 'Iowan Old Style', 'Palatino', Georgia, serif; font-size: 15px; margin: 4px 0 0; line-height: 1.3; }
+  .opt-a .card-meta { color: #8a7d62; font-size: 11px; margin-top: 8px; display: flex; gap: 10px; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  .opt-a .pill-running { background: #f0e5d0; color: #8a5b0a; padding: 1px 8px; border-radius: 99px; font-size: 10px; }
+  .opt-a .pill-gate { background: #e8d5c4; color: #7a3e10; padding: 1px 8px; border-radius: 99px; font-size: 10px; }
+  .opt-a .gate-col { background: #f7e9d5; border-color: #d9b88a; }
+
+  /* ============================================================
+     OPTION B — LINEAR / MODERN SAAS
+     Vibrant indigo, generous radius, subtle gradient backgrounds.
+     ============================================================ */
+  .opt-b {
+    background: #0e0e1a;
+    color: #e8e8f0;
+    font-family: 'Inter', ui-sans-serif, sans-serif;
+  }
+  .opt-b h2 { font-size: 20px; margin: 0 0 4px; font-weight: 600; letter-spacing: -0.01em; }
+  .opt-b .subtitle { color: #7a7a92; font-size: 13px; margin-bottom: 28px; }
+  .opt-b .kanban { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .opt-b .col {
+    background: linear-gradient(180deg, #16162a 0%, #12121f 100%);
+    border: 1px solid #25253a;
+    border-radius: 12px;
+    padding: 14px;
+  }
+  .opt-b .col-head { font-size: 11px; color: #9b9bbd; margin-bottom: 12px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+  .opt-b .col-head .count { background: #25253a; color: #c5c5e0; padding: 1px 7px; border-radius: 99px; font-size: 10px; }
+  .opt-b .card {
+    background: #1c1c30;
+    border: 1px solid #2a2a44;
+    border-radius: 8px;
+    padding: 11px 12px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: transform 0.1s;
+  }
+  .opt-b .card:hover { transform: translateY(-1px); border-color: #4a4ae0; }
+  .opt-b .card-id { color: #8a8aff; font-size: 10px; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  .opt-b .card-title { font-size: 13px; margin: 3px 0 8px; font-weight: 500; line-height: 1.3; }
+  .opt-b .card-meta { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #7a7a92; }
+  .opt-b .pill-running { background: linear-gradient(90deg, #5b5be0, #7a4ad9); color: #fff; padding: 2px 8px; border-radius: 99px; font-size: 9px; font-weight: 500; }
+  .opt-b .pill-gate { background: linear-gradient(90deg, #ea8a3b, #d96a4a); color: #fff; padding: 2px 8px; border-radius: 99px; font-size: 9px; font-weight: 500; }
+  .opt-b .gate-col { background: linear-gradient(180deg, #2a1f12 0%, #1f1610 100%); border-color: #5a3a1f; }
+  .opt-b .live-dot { display: inline-block; width: 6px; height: 6px; background: #4ad9a3; border-radius: 50%; margin-right: 4px; box-shadow: 0 0 6px #4ad9a3; }
+
+  /* ============================================================
+     OPTION C — LIGHT OPS DASHBOARD
+     Pure light, sharp colors, dense, business-feel.
+     ============================================================ */
+  .opt-c {
+    background: #fafbfc;
+    color: #1a1f2e;
+    font-family: 'Inter', ui-sans-serif, sans-serif;
+  }
+  .opt-c h2 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  .opt-c .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 24px; }
+  .opt-c .kanban { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .opt-c .col { background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; }
+  .opt-c .col-head { font-size: 11px; color: #4b5563; font-weight: 600; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; text-transform: uppercase; letter-spacing: 0.04em; }
+  .opt-c .col-head .count { background: #e5e7eb; color: #374151; padding: 0 6px; border-radius: 4px; font-size: 10px; font-weight: 500; }
+  .opt-c .card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    border-left: 3px solid #3b82f6;
+  }
+  .opt-c .card.gate { border-left-color: #f59e0b; }
+  .opt-c .card-id { color: #4b5563; font-size: 10px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 500; }
+  .opt-c .card-title { font-size: 13px; font-weight: 500; margin: 2px 0 6px; line-height: 1.3; color: #1a1f2e; }
+  .opt-c .card-meta { display: flex; gap: 8px; font-size: 10px; color: #6b7280; align-items: center; }
+  .opt-c .pill-running { background: #dbeafe; color: #1e40af; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .opt-c .pill-gate { background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .opt-c .gate-col { background: #fffbeb; border-color: #fde68a; }
+  .opt-c .tokens { color: #92400e; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+</style>
+</head>
+<body>
+
+<div class="page-title">
+  <h1>Style direction — same Kanban, three aesthetics</h1>
+  <p>The previous mockups felt generic "GitHub dark." These are three meaningfully different directions. Same card content (T-042 running, T-041 at Gate 1) so you can compare apples-to-apples.</p>
+</div>
+
+<div class="grid">
+
+  <!-- OPTION A -->
+  <div class="option">
+    <div class="option-label">
+      <span class="name">A · Editorial / Craft</span>
+      <span class="vibe">warm neutrals · serif headings · feels handmade</span>
+    </div>
+    <div class="option-body opt-a">
+      <h2 class="head">Agent Bus</h2>
+      <div class="subtitle">A quieter, more deliberate aesthetic. Light cream background, serif headings, warm orange/clay accents. Feels like Craft or iA Writer — focused, calm, type-led.</div>
+      <div class="kanban">
+        <div class="col">
+          <div class="col-head">Research</div>
+          <div class="card">
+            <div class="card-id">T-042</div>
+            <div class="card-title">Patient Records bulk-write</div>
+            <div class="card-meta"><span class="pill-running">running</span><span>4m 23s</span><span>47k</span></div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="col-head">Spec writers</div>
+        </div>
+        <div class="col">
+          <div class="col-head">Spec reviewers</div>
+        </div>
+        <div class="col gate-col">
+          <div class="col-head">Gate 1 — Spec approval</div>
+          <div class="card">
+            <div class="card-id">T-041</div>
+            <div class="card-title">Patient Records bulk-write · spec v1</div>
+            <div class="card-meta"><span class="pill-gate">needs you</span><span>2m</span><span>82k</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPTION B -->
+  <div class="option">
+    <div class="option-label">
+      <span class="name">B · Linear / Modern SaaS</span>
+      <span class="vibe">deep indigo · gradient accents · familiar product feel</span>
+    </div>
+    <div class="option-body opt-b">
+      <h2>Agent Bus</h2>
+      <div class="subtitle">Linear's design language: deep blue-black backgrounds, vibrant indigo and warm orange accents, subtle gradients, generous rounded corners. Feels current, polished, and familiar to anyone who's used a modern dev tool.</div>
+      <div class="kanban">
+        <div class="col">
+          <div class="col-head">Research <span class="count">1</span></div>
+          <div class="card">
+            <div class="card-id">T-042</div>
+            <div class="card-title">Patient Records bulk-write</div>
+            <div class="card-meta">
+              <span><span class="live-dot"></span><span class="pill-running">running</span></span>
+              <span>4m 23s · 47k</span>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="col-head">Spec writers <span class="count">0</span></div>
+        </div>
+        <div class="col">
+          <div class="col-head">Spec reviewers <span class="count">0</span></div>
+        </div>
+        <div class="col gate-col">
+          <div class="col-head">Gate 1 <span class="count">1</span></div>
+          <div class="card">
+            <div class="card-id">T-041</div>
+            <div class="card-title">Patient Records bulk-write spec v1</div>
+            <div class="card-meta">
+              <span class="pill-gate">needs you</span>
+              <span>2m · 82k</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPTION C -->
+  <div class="option">
+    <div class="option-label">
+      <span class="name">C · Light Ops Dashboard</span>
+      <span class="vibe">pure light · sharp pills · business-feel · dense</span>
+    </div>
+    <div class="option-body opt-c">
+      <h2>Agent Bus</h2>
+      <div class="subtitle">Light-mode operations dashboard — Linear/Notion/Datadog territory. Information-dense, sharp coloured borders for state, uppercase status pills. Feels like a serious tool you use during the workday.</div>
+      <div class="kanban">
+        <div class="col">
+          <div class="col-head">Research <span class="count">1</span></div>
+          <div class="card">
+            <div class="card-id">T-042</div>
+            <div class="card-title">Patient Records bulk-write</div>
+            <div class="card-meta">
+              <span class="pill-running">running</span>
+              <span>4m 23s</span>
+              <span class="tokens">47k</span>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="col-head">Spec writers <span class="count">0</span></div>
+        </div>
+        <div class="col">
+          <div class="col-head">Spec reviewers <span class="count">0</span></div>
+        </div>
+        <div class="col gate-col">
+          <div class="col-head">Gate 1 <span class="count">1</span></div>
+          <div class="card gate">
+            <div class="card-id">T-041</div>
+            <div class="card-title">Patient Records bulk-write spec v1</div>
+            <div class="card-meta">
+              <span class="pill-gate">needs you</span>
+              <span>2m</span>
+              <span class="tokens">82k</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="page-title" style="margin-top: 32px">
+  <p>Pick one (A / B / C), or describe what's still missing. I can also mash up — e.g. "B's colours, A's typography."</p>
+</div>
+
+</body>
+</html>

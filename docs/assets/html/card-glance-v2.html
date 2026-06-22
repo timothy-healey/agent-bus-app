@@ -1,0 +1,109 @@
+<h2>Card with per-card cost readout</h2>
+<p class="subtitle">Cumulative tokens consumed by all worker invocations on this card so far. Updates live while a worker is running.</p>
+
+<div class="section">
+  <h3>Updated card layout</h3>
+  <div class="mockup" style="max-width:280px">
+    <div class="mockup-header">A single card · with cost</div>
+    <div class="mockup-body" style="padding:14px;background:#161b22">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <code style="color:#58a6ff;font-size:11px;font-family:ui-monospace">T-042</code>
+        <span style="background:#1a3a24;color:#3fb950;border:1px solid #3fb950;border-radius:10px;padding:1px 8px;font-size:10px;font-weight:500;display:inline-flex;align-items:center;gap:4px">
+          <span style="background:#3fb950;width:6px;height:6px;border-radius:50%"></span>
+          running
+        </span>
+      </div>
+      <div style="margin-top:8px;color:#e6edf3;font-size:13px;line-height:1.35;font-weight:500">
+        Patient Records bulk-write
+      </div>
+      <div style="color:#8b949e;font-size:11px;margin-top:2px">
+        F3 · imports-followups/01
+      </div>
+      <!-- Bottom row: age · cost · worker · attempts -->
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:10px;color:#8b949e;font-family:ui-monospace;gap:8px">
+        <span>4m 23s</span>
+        <span style="color:#d29922">47k tok</span>
+        <span>w 1/2</span>
+        <span style="background:#0f2a52;color:#58a6ff;border:1px solid #1f6feb;border-radius:8px;padding:0 6px">a1</span>
+      </div>
+    </div>
+  </div>
+
+  <p class="subtitle" style="margin-top:14px;font-size:12px">Cost colour-codes by magnitude: <span style="color:#3fb950">green &lt; 20k</span>, <span style="color:#d29922">amber 20k–100k</span>, <span style="color:#f85149">red &gt; 100k</span> — so a glance picks out expensive cards.</p>
+</div>
+
+<div class="section" style="margin-top:32px">
+  <h3>States, with cost added</h3>
+
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:16px">
+
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <code style="color:#58a6ff;font-size:11px">T-042</code>
+        <span style="background:#161b22;color:#8b949e;border:1px solid #30363d;border-radius:10px;padding:1px 8px;font-size:10px">queued</span>
+      </div>
+      <div style="color:#e6edf3;font-size:12px;margin-top:6px">Patient Records bulk-write</div>
+      <div style="color:#8b949e;font-size:10px;margin-top:6px;font-family:ui-monospace">in inbox · 12s · <span style="color:#3fb950">0 tok</span></div>
+    </div>
+
+    <div style="background:#0f1f0e;border:1px solid #3fb950;border-radius:6px;padding:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <code style="color:#58a6ff;font-size:11px">T-042</code>
+        <span style="background:#1a3a24;color:#3fb950;border:1px solid #3fb950;border-radius:10px;padding:1px 8px;font-size:10px;display:inline-flex;align-items:center;gap:4px">
+          <span style="background:#3fb950;width:6px;height:6px;border-radius:50%"></span>running
+        </span>
+      </div>
+      <div style="color:#e6edf3;font-size:12px;margin-top:6px">Patient Records bulk-write</div>
+      <div style="color:#8b949e;font-size:10px;margin-top:6px;font-family:ui-monospace">live · 4m 23s · <span style="color:#d29922">47k tok</span> · w 1/2</div>
+    </div>
+
+    <div style="background:#221806;border:1px solid #d29922;border-radius:6px;padding:10px;box-shadow:0 0 0 1px rgba(210,153,34,0.2)">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <code style="color:#58a6ff;font-size:11px">T-041</code>
+        <span style="background:#3d2e0a;color:#d29922;border:1px solid #d29922;border-radius:10px;padding:1px 8px;font-size:10px">⏸ needs you</span>
+      </div>
+      <div style="color:#e6edf3;font-size:12px;margin-top:6px">Patient Records bulk-write spec v1</div>
+      <div style="color:#d29922;font-size:10px;margin-top:6px;font-family:ui-monospace">at Gate 1 · 2m · <span style="color:#d29922">82k tok</span></div>
+    </div>
+
+    <div style="background:#1a1326;border:1px solid #a371f7;border-radius:6px;padding:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <code style="color:#58a6ff;font-size:11px">T-040</code>
+        <span style="background:#2a1a45;color:#a371f7;border:1px solid #a371f7;border-radius:10px;padding:1px 8px;font-size:10px">↩ revise v2</span>
+      </div>
+      <div style="color:#e6edf3;font-size:12px;margin-top:6px">Scheduling bulk-write</div>
+      <div style="color:#a371f7;font-size:10px;margin-top:6px;font-family:ui-monospace">queued · a2/3 · <span style="color:#f85149">154k tok</span></div>
+    </div>
+
+    <div style="background:#291010;border:1px solid #f85149;border-radius:6px;padding:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <code style="color:#58a6ff;font-size:11px">T-038</code>
+        <span style="background:#3a1414;color:#f85149;border:1px solid #f85149;border-radius:10px;padding:1px 8px;font-size:10px">! needs human</span>
+      </div>
+      <div style="color:#e6edf3;font-size:12px;margin-top:6px">Communications bulk-write</div>
+      <div style="color:#f85149;font-size:10px;margin-top:6px;font-family:ui-monospace">canon Q · 8m · <span style="color:#d29922">31k tok</span></div>
+    </div>
+
+    <div style="background:#1a1a1a;border:1px solid #444;border-radius:6px;padding:10px;opacity:0.7">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <code style="color:#58a6ff;font-size:11px">T-039</code>
+        <span style="background:#262626;color:#888;border:1px solid #444;border-radius:10px;padding:1px 8px;font-size:10px">⏸ braked</span>
+      </div>
+      <div style="color:#bbb;font-size:12px;margin-top:6px">Tenancy/Org bulk-write</div>
+      <div style="color:#888;font-size:10px;margin-top:6px;font-family:ui-monospace">paused · usage limit · <span>23k tok</span></div>
+    </div>
+
+  </div>
+</div>
+
+<div class="section" style="margin-top:24px">
+  <h3>How it gets measured</h3>
+  <p style="font-size:13px;line-height:1.6;color:#e6edf3">
+    Workers invoke <code>claude --print --output-format stream-json</code>. Each response chunk carries an <code>usage</code> object with <code>input_tokens</code> + <code>output_tokens</code> + <code>cache_creation_input_tokens</code> + <code>cache_read_input_tokens</code>. The Rust backend tails the stream, sums them per-task across attempts, and persists into the task row in SQLite. Live updates flow to the frontend via WebSocket.
+  </p>
+  <p style="font-size:13px;line-height:1.6;color:#8b949e">
+    Card pill shows combined input + output (excluding cache reads to keep the number representative of what's being billed). Detail tab can break it down into input / output / cache / model and show USD using your configured pricing table.
+  </p>
+</div>
+
+<p class="subtitle" style="margin-top:20px">Cost added; thresholds (green/amber/red) propose 20k and 100k as the breakpoints. Adjust those, or accept and we move on?</p>

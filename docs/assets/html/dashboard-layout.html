@@ -1,0 +1,116 @@
+<h2>Which dashboard shape feels right for daily use?</h2>
+<p class="subtitle">The home screen — what you see when you open the app. Three layouts that all carry the same information differently.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup" style="margin:0">
+        <div class="mockup-header">A · Tmux-replicated</div>
+        <div class="mockup-body" style="padding:8px">
+          <div style="background:#0a0d12;padding:6px 8px;border-radius:4px;border:1px solid #30363d;color:#3fb950;font-family:ui-monospace;font-size:10px">TOPICS=2  GATE1=1  GATE2=0  NEEDS=0  BRAKE=off</div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:6px">
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">research<br/><span style="color:#8b949e">T-042 ▶</span></div>
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">spec-w<br/><span style="color:#8b949e">idle</span></div>
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">spec-r<br/><span style="color:#8b949e">idle</span></div>
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">plan-w<br/><span style="color:#8b949e">idle</span></div>
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">plan-r<br/><span style="color:#8b949e">idle</span></div>
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">impl<br/><span style="color:#8b949e">idle</span></div>
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">impl-r<br/><span style="color:#8b949e">idle</span></div>
+            <div style="background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:9px;color:#e6edf3">team-lead<br/><span style="color:#8b949e">routing…</span></div>
+          </div>
+          <div style="margin-top:6px;background:#0a0d12;padding:6px;border-radius:3px;border:1px solid #30363d;color:#8b949e;font-family:ui-monospace;font-size:9px;height:50px;overflow:hidden">
+            16:42:01 [research] picked T-042<br/>
+            16:42:14 [team-lead] routing…<br/>
+            16:42:30 [research] streaming output…<br/>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · Tmux-replicated</h3>
+      <p>Counters bar at top, 8 team tiles in the middle (each shows current task or "idle"), combined log stream at bottom. Click a tile to drill into that team's window. Familiar if you came from tmux.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup" style="margin:0">
+        <div class="mockup-header">B · Sidebar + Detail</div>
+        <div class="mockup-body" style="padding:8px;display:flex;gap:4px">
+          <div style="width:60px;background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:8px;color:#e6edf3">
+            <div style="color:#58a6ff;font-weight:600;margin-bottom:4px">Pipelines</div>
+            <div style="padding-left:6px;color:#8b949e">▸ DDD spec→plan</div>
+            <div style="color:#58a6ff;font-weight:600;margin:4px 0">Teams</div>
+            <div style="padding-left:6px">research</div>
+            <div style="padding-left:6px;color:#3fb950">spec-w ▶</div>
+            <div style="padding-left:6px">spec-r</div>
+            <div style="padding-left:6px;color:#8b949e">…</div>
+            <div style="color:#58a6ff;font-weight:600;margin:4px 0">Gates</div>
+            <div style="padding-left:6px;color:#d29922">⚠ spec(1)</div>
+          </div>
+          <div style="flex:1;background:#0a0d12;border:1px solid #30363d;border-radius:3px;padding:6px;color:#e6edf3;font-size:9px">
+            <div style="border-bottom:1px solid #30363d;padding-bottom:4px;color:#58a6ff">research · T-042</div>
+            <div style="color:#8b949e;font-family:ui-monospace;margin-top:4px">Streaming…</div>
+            <div style="color:#8b949e;font-family:ui-monospace">Reading patient.controller…</div>
+            <div style="color:#8b949e;font-family:ui-monospace">Running detector…</div>
+          </div>
+          <div style="width:55px;background:#161b22;border:1px solid #30363d;border-radius:3px;padding:6px;font-size:8px;color:#e6edf3">
+            <div style="color:#58a6ff;font-weight:600;margin-bottom:4px">Notify</div>
+            <div style="color:#d29922;padding:3px;background:#3d2e0a;border-radius:2px;margin-bottom:3px">⚠ Spec gate T-041</div>
+            <div style="color:#8b949e">research T-042</div>
+            <div style="color:#8b949e">brake=off</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · Sidebar + Detail</h3>
+      <p>Left: pipeline / team / gate tree. Center: detail of whatever's selected (live log, doc preview, settings). Right: live notifications feed (gates needing attention, brake state, canon questions). Standard app UX; lots of info at once.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup" style="margin:0">
+        <div class="mockup-header">C · Kanban pipeline</div>
+        <div class="mockup-body" style="padding:8px">
+          <div style="background:#0a0d12;padding:4px 8px;border-radius:3px;border:1px solid #30363d;color:#3fb950;font-family:ui-monospace;font-size:9px;margin-bottom:6px">TOPICS=2  GATES=1  NEEDS=0  BRAKE=off</div>
+          <div style="display:grid;grid-template-columns:repeat(8,1fr);gap:3px;font-size:8px;color:#e6edf3">
+            <div style="background:#0f2a52;border:1px solid #1f6feb;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">research</div>
+              <div style="background:#161b22;padding:3px;border-radius:2px;margin-top:3px;font-size:7px">T-042 ▶</div>
+            </div>
+            <div style="background:#0f2a52;border:1px solid #1f6feb;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">spec-w</div>
+            </div>
+            <div style="background:#2a1a45;border:1px solid #a371f7;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">spec-r</div>
+            </div>
+            <div style="background:#3d2e0a;border:1px solid #d29922;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">⚠ Gate 1</div>
+              <div style="background:#161b22;padding:3px;border-radius:2px;margin-top:3px;font-size:7px;border:1px solid #d29922">T-041 ⏸</div>
+            </div>
+            <div style="background:#0f2a52;border:1px solid #1f6feb;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">plan-w</div>
+            </div>
+            <div style="background:#2a1a45;border:1px solid #a371f7;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">plan-r</div>
+            </div>
+            <div style="background:#3d2e0a;border:1px solid #d29922;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">Gate 2</div>
+            </div>
+            <div style="background:#0f2a52;border:1px solid #1f6feb;border-radius:3px;padding:4px;min-height:80px">
+              <div style="font-weight:600;font-size:8px">impl→i-r</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C · Kanban pipeline</h3>
+      <p>Each team is a column. Task cards flow left-to-right through the pipeline. Gates appear as distinct columns with their queue. Clicking a card opens detail (log + artifact viewer). Worker count per team = card lane density. The pipeline shape is visible at a glance.</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:24px">My recommendation: <strong>C</strong>. It's the only one that visualises the pipeline as the pipeline. Status of work-in-flight reads at a glance — much easier than tmux. Gates are first-class columns, so they stop being a hidden side-channel. Click to drill into any card for logs + the artifact it produced.</p>

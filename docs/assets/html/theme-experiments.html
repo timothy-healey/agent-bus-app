@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Theme experiments — mono, slab, geometric</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; font-family: -apple-system, system-ui, sans-serif; }
+  .page-title { padding: 28px 32px 16px; background: #fafafa; }
+  .page-title h1 { font-size: 20px; margin: 0; color: #1a1a1a; }
+  .page-title p { margin: 6px 0 0; color: #666; font-size: 13px; }
+
+  .theme-block { border-bottom: 1px solid #e5e5e5; }
+  .theme-label {
+    padding: 16px 32px;
+    background: #fafafa;
+    font-size: 12px;
+    color: #1a1a1a;
+    border-top: 1px solid #e5e5e5;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .theme-label strong { font-weight: 600; }
+  .theme-label .meta { color: #888; font-weight: 400; }
+  .theme-body { display: grid; grid-template-columns: 1.4fr 1fr; gap: 0; }
+  .theme-board { padding: 20px 0; }
+  .theme-detail { padding: 20px; }
+
+  /* ============ THEME 1: FULL MONO (DARK) ============ */
+  .t1 {
+    background: oklch(11% 0.005 60);
+    color: oklch(92% 0.008 70);
+    font-family: 'Berkeley Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-feature-settings: 'ss01', 'ss02';
+  }
+  .t1 .lanes { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .t1 .lane {
+    padding: 0 14px 14px;
+    border-right: 1px solid oklch(24% 0.008 60);
+  }
+  .t1 .lane:last-child { border-right: none; }
+  .t1 .lane.gate { background: oklch(16% 0.025 55); }
+  .t1 .lane-head {
+    font-size: 11px;
+    color: oklch(60% 0.008 70);
+    text-transform: lowercase;
+    padding: 12px 0;
+    border-bottom: 1px solid oklch(24% 0.008 60);
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .t1 .lane-head.gate { color: oklch(70% 0.13 55); }
+  .t1 .card {
+    background: oklch(16% 0.005 60);
+    border: 1px solid oklch(26% 0.008 60);
+    padding: 9px 11px;
+    margin-bottom: 6px;
+    border-radius: 2px;
+  }
+  .t1 .card.gated {
+    border-color: oklch(50% 0.10 55);
+    background: oklch(18% 0.012 60);
+  }
+  .t1 .card-id { font-size: 11px; color: oklch(58% 0.008 70); }
+  .t1 .card-title { font-size: 12.5px; color: oklch(92% 0.008 70); margin: 4px 0 7px; line-height: 1.35; }
+  .t1 .card-meta { font-size: 10.5px; color: oklch(55% 0.008 70); display: flex; justify-content: space-between; }
+  .t1 .card-state-r { color: oklch(72% 0.08 145); }
+  .t1 .card-state-g { color: oklch(74% 0.13 55); }
+
+  .t1 .detail {
+    background: oklch(13% 0.005 60);
+    border-left: 1px solid oklch(24% 0.008 60);
+    height: 100%;
+    padding: 16px;
+  }
+  .t1 .detail-head {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid oklch(24% 0.008 60);
+  }
+  .t1 .detail-id { color: oklch(74% 0.13 55); font-size: 12px; }
+  .t1 .detail-stage { font-size: 11px; color: oklch(60% 0.008 70); }
+  .t1 .detail-title { font-size: 14px; margin-bottom: 16px; }
+  .t1 .detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .t1 .btn {
+    background: oklch(18% 0.005 60);
+    border: 1px solid oklch(28% 0.008 60);
+    color: oklch(85% 0.008 70);
+    padding: 7px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    border-radius: 2px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .t1 .btn:hover { border-color: oklch(40% 0.010 60); }
+  .t1 .btn.primary {
+    background: oklch(60% 0.13 55);
+    border-color: oklch(60% 0.13 55);
+    color: oklch(15% 0.01 55);
+    font-weight: 500;
+  }
+  .t1 .btn.danger { color: oklch(70% 0.12 25); border-color: oklch(35% 0.05 25); }
+  .t1 .terminal {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid oklch(24% 0.008 60);
+    font-size: 11.5px;
+  }
+  .t1 .term-line { padding: 2px 0; color: oklch(72% 0.008 70); }
+  .t1 .term-prompt { color: oklch(74% 0.13 55); }
+
+  /* ============ THEME 2: IBM PLEX SLAB (LIGHT) ============ */
+  .t2 {
+    background: oklch(97% 0.004 60);
+    color: oklch(20% 0.010 60);
+    font-family: 'IBM Plex Sans', 'Inter', system-ui, sans-serif;
+  }
+  .t2 .lanes { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .t2 .lane {
+    padding: 0 14px 14px;
+    border-right: 1px solid oklch(88% 0.005 60);
+  }
+  .t2 .lane:last-child { border-right: none; }
+  .t2 .lane.gate { background: oklch(95% 0.025 60); }
+  .t2 .lane-head {
+    font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: oklch(45% 0.008 60);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 12px 0;
+    border-bottom: 1px solid oklch(88% 0.005 60);
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .t2 .lane-head.gate { color: oklch(48% 0.13 55); }
+  .t2 .card {
+    background: white;
+    border: 1px solid oklch(89% 0.005 60);
+    padding: 11px 13px;
+    margin-bottom: 7px;
+    border-radius: 4px;
+    box-shadow: 0 1px 1px oklch(20% 0.01 60 / 0.04);
+  }
+  .t2 .card.gated {
+    border-color: oklch(70% 0.12 55);
+    box-shadow: 0 0 0 1px oklch(70% 0.12 55 / 0.15);
+  }
+  .t2 .card-id { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(45% 0.008 60); }
+  .t2 .card-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 14px; color: oklch(18% 0.010 60); margin: 3px 0 8px; line-height: 1.3; font-weight: 500; }
+  .t2 .card-meta { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(50% 0.008 60); display: flex; justify-content: space-between; }
+  .t2 .card-state-r { color: oklch(48% 0.10 145); }
+  .t2 .card-state-g { color: oklch(48% 0.13 55); }
+
+  .t2 .detail {
+    background: white;
+    border-left: 1px solid oklch(88% 0.005 60);
+    height: 100%;
+    padding: 18px;
+  }
+  .t2 .detail-head {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid oklch(88% 0.005 60);
+  }
+  .t2 .detail-id { font-family: 'IBM Plex Mono', monospace; color: oklch(48% 0.13 55); font-size: 12px; }
+  .t2 .detail-stage { font-size: 11px; color: oklch(45% 0.008 60); text-transform: uppercase; letter-spacing: 0.06em; }
+  .t2 .detail-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 17px; margin-bottom: 16px; font-weight: 500; }
+  .t2 .detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .t2 .btn {
+    background: white;
+    border: 1px solid oklch(85% 0.005 60);
+    color: oklch(25% 0.010 60);
+    padding: 8px 12px;
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    text-align: center;
+    font-weight: 500;
+  }
+  .t2 .btn:hover { border-color: oklch(75% 0.008 60); }
+  .t2 .btn.primary {
+    background: oklch(48% 0.13 55);
+    border-color: oklch(48% 0.13 55);
+    color: white;
+  }
+  .t2 .btn.danger { color: oklch(45% 0.15 25); border-color: oklch(80% 0.08 25); }
+  .t2 .terminal {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid oklch(88% 0.005 60);
+    font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .t2 .term-line { padding: 2px 0; color: oklch(35% 0.008 60); }
+  .t2 .term-prompt { color: oklch(48% 0.13 55); }
+
+  /* ============ THEME 3: GEOMETRIC GEIST (DARK, CONFIDENT) ============ */
+  .t3 {
+    background: oklch(15% 0.000 0);
+    color: oklch(96% 0.000 0);
+    font-family: 'Geist', 'Inter', -apple-system, system-ui, sans-serif;
+    letter-spacing: -0.005em;
+  }
+  .t3 .lanes { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .t3 .lane {
+    padding: 0 16px 16px;
+    border-right: 1px solid oklch(22% 0.000 0);
+  }
+  .t3 .lane:last-child { border-right: none; }
+  .t3 .lane.gate { background: oklch(18% 0.06 25); }
+  .t3 .lane-head {
+    font-size: 11px;
+    color: oklch(60% 0.000 0);
+    padding: 14px 0;
+    border-bottom: 1px solid oklch(22% 0.000 0);
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 500;
+  }
+  .t3 .lane-head.gate { color: oklch(75% 0.18 25); }
+  .t3 .lane-count {
+    font-family: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: oklch(55% 0.000 0);
+  }
+  .t3 .card {
+    background: oklch(19% 0.000 0);
+    border: 1px solid oklch(26% 0.000 0);
+    padding: 11px 14px;
+    margin-bottom: 8px;
+    border-radius: 8px;
+  }
+  .t3 .card.gated {
+    border-color: oklch(50% 0.15 25);
+    background: oklch(22% 0.04 25);
+  }
+  .t3 .card-id { font-family: 'Geist Mono', monospace; font-size: 11px; color: oklch(58% 0.000 0); }
+  .t3 .card-title { font-size: 13.5px; color: oklch(96% 0.000 0); margin: 4px 0 8px; line-height: 1.35; font-weight: 500; letter-spacing: -0.005em; }
+  .t3 .card-meta { font-family: 'Geist Mono', monospace; font-size: 11px; color: oklch(55% 0.000 0); display: flex; justify-content: space-between; }
+  .t3 .card-state-r { color: oklch(70% 0.18 145); }
+  .t3 .card-state-g { color: oklch(75% 0.18 25); }
+
+  .t3 .detail {
+    background: oklch(17% 0.000 0);
+    border-left: 1px solid oklch(22% 0.000 0);
+    height: 100%;
+    padding: 18px;
+  }
+  .t3 .detail-head {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid oklch(22% 0.000 0);
+  }
+  .t3 .detail-id { font-family: 'Geist Mono', monospace; color: oklch(75% 0.18 25); font-size: 12px; }
+  .t3 .detail-stage { font-size: 11px; color: oklch(58% 0.000 0); }
+  .t3 .detail-title { font-size: 16px; margin-bottom: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .t3 .detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+  .t3 .btn {
+    background: oklch(22% 0.000 0);
+    border: 1px solid oklch(30% 0.000 0);
+    color: oklch(92% 0.000 0);
+    padding: 8px 12px;
+    font-family: inherit;
+    font-size: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    text-align: center;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+  }
+  .t3 .btn:hover { border-color: oklch(40% 0.000 0); }
+  .t3 .btn.primary {
+    background: oklch(75% 0.18 25);
+    border-color: oklch(75% 0.18 25);
+    color: oklch(15% 0.05 25);
+  }
+  .t3 .btn.danger { color: oklch(70% 0.20 15); border-color: oklch(35% 0.10 15); }
+  .t3 .terminal {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid oklch(22% 0.000 0);
+    font-size: 12px;
+  }
+  .t3 .term-line { padding: 3px 0; color: oklch(75% 0.000 0); }
+  .t3 .term-prompt { color: oklch(75% 0.18 25); font-family: 'Geist Mono', monospace; }
+
+</style>
+</head>
+<body>
+
+<div class="page-title">
+  <h1>Three theme experiments</h1>
+  <p>Each shows a mini Kanban (left) + the card-detail drawer with buttons (right) + a terminal slice. Same content, different typographic and palette voice.</p>
+</div>
+
+<!-- =================== THEME 1 — FULL MONO DARK =================== -->
+<div class="theme-block">
+  <div class="theme-label">
+    <span><strong>T1 · Full mono, warm dark</strong></span>
+    <span class="meta">Berkeley Mono / JetBrains Mono everywhere · dark warm · sharp 2px radius · terminal lineage but elevated</span>
+  </div>
+  <div class="theme-body t1">
+    <div class="theme-board">
+      <div class="lanes">
+        <div class="lane">
+          <div class="lane-head"><span>research</span><span>1</span></div>
+          <div class="card">
+            <div class="card-id">T-042</div>
+            <div class="card-title">Patient Records bulk-write</div>
+            <div class="card-meta"><span class="card-state-r">● running</span><span>47k</span></div>
+          </div>
+        </div>
+        <div class="lane">
+          <div class="lane-head"><span>spec-writers</span><span>0</span></div>
+        </div>
+        <div class="lane">
+          <div class="lane-head"><span>spec-reviewers</span><span>0</span></div>
+        </div>
+        <div class="lane gate">
+          <div class="lane-head gate"><span>gate-1 · spec</span><span>1</span></div>
+          <div class="card gated">
+            <div class="card-id">T-041</div>
+            <div class="card-title">Patient Records spec v1</div>
+            <div class="card-meta"><span class="card-state-g">● needs you</span><span>82k</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="theme-detail">
+      <div class="detail">
+        <div class="detail-head">
+          <span class="detail-id">T-041</span>
+          <span class="detail-stage">spec-reviewers · v1 · 82k tok</span>
+        </div>
+        <div class="detail-title">Patient Records bulk-write — spec v1</div>
+        <div class="detail-actions">
+          <button class="btn primary">approve</button>
+          <button class="btn">revise</button>
+          <button class="btn danger">reject</button>
+          <button class="btn">view artifact</button>
+          <button class="btn">view logs</button>
+          <button class="btn">open in vscode</button>
+        </div>
+        <div class="terminal">
+          <div class="term-line">› <span style="color: oklch(92% 0.008 70)">why is this spec at gate, what did reviewer say</span></div>
+          <div class="term-line">claude: approve verdict. one resolved medium on idempotency.</div>
+          <div class="term-line"><span class="term-prompt">›</span> <span style="opacity: 0.5">_</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- =================== THEME 2 — IBM PLEX, LIGHT, INDUSTRIAL =================== -->
+<div class="theme-block">
+  <div class="theme-label">
+    <span><strong>T2 · IBM Plex (serif + sans + mono), light</strong></span>
+    <span class="meta">Plex Serif on titles · Plex Sans body · Plex Mono labels · industrial-technical · think Stripe Atlas + IBM</span>
+  </div>
+  <div class="theme-body t2">
+    <div class="theme-board">
+      <div class="lanes">
+        <div class="lane">
+          <div class="lane-head"><span>RESEARCH</span><span>1</span></div>
+          <div class="card">
+            <div class="card-id">T-042</div>
+            <div class="card-title">Patient Records bulk-write</div>
+            <div class="card-meta"><span class="card-state-r">● running</span><span>47k</span></div>
+          </div>
+        </div>
+        <div class="lane">
+          <div class="lane-head"><span>SPEC-WRITERS</span><span>0</span></div>
+        </div>
+        <div class="lane">
+          <div class="lane-head"><span>SPEC-REVIEWERS</span><span>0</span></div>
+        </div>
+        <div class="lane gate">
+          <div class="lane-head gate"><span>GATE 1 · SPEC</span><span>1</span></div>
+          <div class="card gated">
+            <div class="card-id">T-041</div>
+            <div class="card-title">Patient Records spec v1</div>
+            <div class="card-meta"><span class="card-state-g">● needs you</span><span>82k</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="theme-detail">
+      <div class="detail">
+        <div class="detail-head">
+          <span class="detail-id">T-041</span>
+          <span class="detail-stage">SPEC-REVIEWERS · V1 · 82K</span>
+        </div>
+        <div class="detail-title">Patient Records bulk-write — spec v1</div>
+        <div class="detail-actions">
+          <button class="btn primary">Approve</button>
+          <button class="btn">Revise</button>
+          <button class="btn danger">Reject</button>
+          <button class="btn">View artifact</button>
+          <button class="btn">View logs</button>
+          <button class="btn">Open in VS Code</button>
+        </div>
+        <div class="terminal">
+          <div class="term-line"><span class="term-prompt">›</span> why is this at gate</div>
+          <div class="term-line">claude: approve verdict. one resolved medium on idempotency.</div>
+          <div class="term-line"><span class="term-prompt">›</span> _</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- =================== THEME 3 — GEOMETRIC GEIST, DARK, CONFIDENT =================== -->
+<div class="theme-block">
+  <div class="theme-label">
+    <span><strong>T3 · Geist sans + Geist Mono, dark, confident</strong></span>
+    <span class="meta">Vercel's Geist · pure neutral dark · saturated coral accent · larger radius · feels like a new product, not a fork</span>
+  </div>
+  <div class="theme-body t3">
+    <div class="theme-board">
+      <div class="lanes">
+        <div class="lane">
+          <div class="lane-head"><span>research</span><span class="lane-count">1</span></div>
+          <div class="card">
+            <div class="card-id">T-042</div>
+            <div class="card-title">Patient Records bulk-write</div>
+            <div class="card-meta"><span class="card-state-r">● running</span><span>47k</span></div>
+          </div>
+        </div>
+        <div class="lane">
+          <div class="lane-head"><span>spec-writers</span><span class="lane-count">0</span></div>
+        </div>
+        <div class="lane">
+          <div class="lane-head"><span>spec-reviewers</span><span class="lane-count">0</span></div>
+        </div>
+        <div class="lane gate">
+          <div class="lane-head gate"><span>gate 1 · spec</span><span class="lane-count">1</span></div>
+          <div class="card gated">
+            <div class="card-id">T-041</div>
+            <div class="card-title">Patient Records spec v1</div>
+            <div class="card-meta"><span class="card-state-g">● needs you</span><span>82k</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="theme-detail">
+      <div class="detail">
+        <div class="detail-head">
+          <span class="detail-id">T-041</span>
+          <span class="detail-stage">spec-reviewers · v1 · 82k</span>
+        </div>
+        <div class="detail-title">Patient Records bulk-write — spec v1</div>
+        <div class="detail-actions">
+          <button class="btn primary">Approve</button>
+          <button class="btn">Revise</button>
+          <button class="btn danger">Reject</button>
+          <button class="btn">View artifact</button>
+          <button class="btn">View logs</button>
+          <button class="btn">Open in VS Code</button>
+        </div>
+        <div class="terminal">
+          <div class="term-line"><span class="term-prompt">›</span> why is this at gate</div>
+          <div class="term-line">claude: approve verdict. one resolved medium on idempotency.</div>
+          <div class="term-line"><span class="term-prompt">›</span> _</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

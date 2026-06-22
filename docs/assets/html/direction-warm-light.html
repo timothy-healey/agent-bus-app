@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agent Bus — warm light direction</title>
+<style>
+  :root {
+    /* Restrained palette — tinted warm neutrals + one ochre accent */
+    --bg:        oklch(98%  0.005 70);   /* page background — warm off-white */
+    --surface:   oklch(99.5% 0.003 70);  /* cards — slightly brighter than bg */
+    --surface-2: oklch(96%  0.006 70);   /* column lanes — slightly darker */
+    --border:    oklch(89%  0.008 70);
+    --border-2:  oklch(82%  0.008 70);
+    --text:      oklch(22%  0.012 70);
+    --text-2:    oklch(45%  0.010 70);
+    --text-3:    oklch(60%  0.008 70);
+    --accent:    oklch(58%  0.135 55);   /* ochre — the one accent */
+    --accent-2:  oklch(96%  0.030 70);   /* accent surface tint */
+    --accent-bd: oklch(80%  0.060 60);
+    --running:   oklch(48%  0.060 145);  /* muted sage — running state */
+    --running-2: oklch(95%  0.020 145);
+    --shadow:    0 1px 2px oklch(20% 0.01 70 / 0.04),
+                 0 4px 12px oklch(20% 0.01 70 / 0.03);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+  }
+  code, .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+
+  /* ============ TOP BAR ============ */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .brand {
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--text);
+    font-size: 14px;
+  }
+  .brand .dot { color: var(--accent); }
+  .pipeline-name {
+    color: var(--text-2);
+    font-size: 13px;
+    padding: 2px 10px;
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    background: var(--bg);
+  }
+  .brake-state {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-3);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .brake-state .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--running);
+    box-shadow: 0 0 0 2px var(--running-2);
+  }
+  .controls {
+    display: flex;
+    gap: 8px;
+  }
+  .controls button {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .controls button:hover { border-color: var(--border-2); }
+  .controls .primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+
+  /* ============ KANBAN ============ */
+  .board {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(180px, 1fr));
+    gap: 0;
+    padding: 20px 0 0;
+    overflow-x: auto;
+  }
+  .lane {
+    padding: 0 12px 16px;
+    border-right: 1px solid var(--border);
+    min-height: 380px;
+    background: var(--bg);
+  }
+  .lane:last-child { border-right: none; }
+  .lane.gate { background: var(--accent-2); }
+  .lane-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 0 14px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  .lane-name {
+    font-weight: 500;
+    font-size: 12px;
+    color: var(--text);
+    letter-spacing: 0.005em;
+  }
+  .lane-name.gate { color: var(--accent); }
+  .lane-count {
+    font-size: 11px;
+    color: var(--text-3);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ============ CARD ============ */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    box-shadow: var(--shadow);
+    cursor: pointer;
+    transition: border-color 150ms ease-out, transform 150ms ease-out;
+  }
+  .card:hover {
+    border-color: var(--border-2);
+    transform: translateY(-1px);
+  }
+  .card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .card-id {
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .card-state {
+    font-size: 10.5px;
+    text-transform: lowercase;
+    letter-spacing: 0;
+    color: var(--text-2);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .card-state .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-3);
+  }
+  .card-state.running { color: var(--running); }
+  .card-state.running .dot { background: var(--running); box-shadow: 0 0 0 2px var(--running-2); animation: pulse 1.8s ease-out infinite; }
+  .card-state.gated { color: var(--accent); }
+  .card-state.gated .dot { background: var(--accent); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+  .card-title {
+    font-size: 13px;
+    font-weight: 450;
+    color: var(--text);
+    line-height: 1.35;
+    margin: 0 0 8px;
+  }
+  .card-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .card-cost { color: var(--text-2); }
+
+  .card.needs-you {
+    border-color: var(--accent-bd);
+    background: var(--surface);
+    box-shadow: 0 1px 2px oklch(58% 0.135 55 / 0.10),
+                0 6px 16px oklch(58% 0.135 55 / 0.08);
+  }
+  .card.needs-you .card-title {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  /* ============ PAGE WRAP ============ */
+  .page-wrap { min-height: 100vh; display: flex; flex-direction: column; }
+  .description-note {
+    padding: 14px 24px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-2);
+    font-size: 13px;
+  }
+  .description-note strong { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div class="page-wrap">
+
+  <div class="topbar">
+    <div class="brand"><span class="dot">●</span>&nbsp;agent bus</div>
+    <div class="pipeline-name mono">ddd / spec → plan → impl</div>
+    <div class="brake-state">
+      <span class="dot"></span> brake off &middot; 3 workers idle &middot; 1 running
+    </div>
+    <div class="controls">
+      <button>brake</button>
+      <button>logs</button>
+      <button class="primary">inject topic</button>
+    </div>
+  </div>
+
+  <div class="description-note">
+    <strong>Restrained, warm light, one accent.</strong> Ochre is reserved for &ldquo;needs you&rdquo; gates and primary actions. Everything else lives in tinted warm neutrals. Running is a muted sage dot, not a green pill. State reads from position + weight + that one accent, not from six different colours.
+  </div>
+
+  <div class="board">
+
+    <div class="lane">
+      <div class="lane-head"><span class="lane-name">research</span><span class="lane-count">1</span></div>
+      <div class="card">
+        <div class="card-top">
+          <span class="card-id mono">T-042</span>
+          <span class="card-state running"><span class="dot"></span>running</span>
+        </div>
+        <div class="card-title">Patient Records bulk-write</div>
+        <div class="card-meta">
+          <span class="mono">4m 23s &middot; <span class="card-cost">47k</span></span>
+          <span class="mono">a1</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-head"><span class="lane-name">spec-writers</span><span class="lane-count">0</span></div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-head"><span class="lane-name">spec-reviewers</span><span class="lane-count">0</span></div>
+    </div>
+
+    <div class="lane gate">
+      <div class="lane-head"><span class="lane-name gate">gate 1 &middot; spec</span><span class="lane-count">1</span></div>
+      <div class="card needs-you">
+        <div class="card-top">
+          <span class="card-id mono">T-041</span>
+          <span class="card-state gated"><span class="dot"></span>needs you</span>
+        </div>
+        <div class="card-title">Patient Records bulk-write spec v1</div>
+        <div class="card-meta">
+          <span class="mono">2m &middot; <span class="card-cost">82k</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-head"><span class="lane-name">plan-writers</span><span class="lane-count">0</span></div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-head"><span class="lane-name">plan-reviewers</span><span class="lane-count">0</span></div>
+    </div>
+
+    <div class="lane gate">
+      <div class="lane-head"><span class="lane-name gate">gate 2 &middot; plan</span><span class="lane-count">0</span></div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-head"><span class="lane-name">implementers</span><span class="lane-count">0</span></div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

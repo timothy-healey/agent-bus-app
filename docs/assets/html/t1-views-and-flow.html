@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>T1 — other views + revise flow</title>
+<style>
+  :root {
+    --bg: oklch(11% 0.005 60);
+    --bg-2: oklch(9% 0.004 60);
+    --surface: oklch(15% 0.005 60);
+    --surface-2: oklch(18% 0.006 60);
+    --surface-3: oklch(22% 0.008 60);
+    --border: oklch(24% 0.008 60);
+    --border-2: oklch(32% 0.010 60);
+    --text: oklch(92% 0.008 70);
+    --text-2: oklch(70% 0.008 70);
+    --text-3: oklch(55% 0.008 70);
+    --text-4: oklch(42% 0.008 70);
+    --accent: oklch(74% 0.13 55);
+    --accent-2: oklch(20% 0.040 55);
+    --accent-bd: oklch(48% 0.090 55);
+    --running: oklch(72% 0.08 145);
+    --running-2: oklch(22% 0.030 145);
+    --danger: oklch(70% 0.12 25);
+    --danger-2: oklch(22% 0.04 25);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'Berkeley Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+    font-feature-settings: 'ss01', 'ss02';
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Page chrome */
+  .page-section {
+    border-bottom: 1px solid var(--border);
+  }
+  .section-label {
+    padding: 20px 32px 12px;
+    font-size: 11px;
+    color: var(--text-3);
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .section-label strong { color: var(--text); font-weight: 500; font-size: 13px; }
+  .section-label .meta { color: var(--text-4); }
+
+  /* Top nav (shared across the views) */
+  .nav {
+    display: flex;
+    gap: 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+  .nav-tab {
+    padding: 10px 18px;
+    font-size: 12px;
+    color: var(--text-3);
+    cursor: pointer;
+    border-right: 1px solid var(--border);
+  }
+  .nav-tab.active {
+    color: var(--accent);
+    background: var(--bg);
+    border-bottom: 1px solid var(--bg);
+    margin-bottom: -1px;
+  }
+  .nav-tab:hover { color: var(--text-2); }
+
+  /* =========================================
+     A · LIST VIEW
+     ========================================= */
+  .listview { padding: 16px 0; }
+  .filters {
+    display: flex;
+    gap: 8px;
+    padding: 0 32px 14px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0;
+    align-items: center;
+  }
+  .filter-pill {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-2);
+    padding: 4px 10px;
+    font-size: 11px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .filter-pill.active {
+    border-color: var(--accent-bd);
+    color: var(--accent);
+    background: var(--accent-2);
+  }
+  .filter-search {
+    flex: 1;
+    margin-left: 8px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 10px;
+    font-family: inherit;
+    font-size: 12px;
+    border-radius: 3px;
+  }
+  .filter-search::placeholder { color: var(--text-4); }
+
+  table.tasks {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  table.tasks th {
+    text-align: left;
+    padding: 10px 16px;
+    font-weight: 400;
+    color: var(--text-3);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-2);
+    font-size: 11px;
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+  }
+  table.tasks th:first-child { padding-left: 32px; }
+  table.tasks th:last-child { padding-right: 32px; }
+  table.tasks td {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-2);
+  }
+  table.tasks td:first-child { padding-left: 32px; }
+  table.tasks td:last-child { padding-right: 32px; }
+  table.tasks tr:hover td { background: var(--surface); cursor: pointer; }
+  table.tasks .col-id { color: var(--text-3); font-size: 11px; }
+  table.tasks .col-title { color: var(--text); }
+  table.tasks .state-r { color: var(--running); }
+  table.tasks .state-g { color: var(--accent); }
+  table.tasks .state-q { color: var(--text-3); }
+  table.tasks .state-rev { color: oklch(70% 0.10 305); }
+  table.tasks .num { font-variant-numeric: tabular-nums; }
+  table.tasks tr.needs-you { background: oklch(18% 0.025 55); }
+  table.tasks tr.needs-you td:first-child { border-left: 2px solid var(--accent); padding-left: 30px; }
+
+  /* =========================================
+     B · PIPELINE EDITOR (NODE GRAPH)
+     ========================================= */
+  .editor { padding: 24px 32px; min-height: 420px; }
+  .editor-canvas {
+    position: relative;
+    height: 380px;
+    background:
+      radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0);
+    background-size: 16px 16px;
+    background-color: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .node {
+    position: absolute;
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    min-width: 100px;
+    cursor: grab;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  }
+  .node.writer { border-color: oklch(40% 0.07 240); }
+  .node.reviewer { border-color: oklch(45% 0.09 300); }
+  .node.gate { border-color: var(--accent-bd); background: var(--accent-2); color: var(--accent); }
+  .node.impl { border-color: oklch(45% 0.10 50); }
+  .node-name { font-weight: 500; color: var(--text); }
+  .node-kind { font-size: 10px; color: var(--text-3); margin-top: 2px; }
+  .node.gate .node-name { color: var(--accent); }
+
+  .edge-label {
+    position: absolute;
+    font-size: 10px;
+    color: var(--text-3);
+    background: var(--bg-2);
+    padding: 1px 5px;
+    border-radius: 2px;
+  }
+  .edge-label.revise { color: oklch(70% 0.10 305); }
+  .edge-label.escalate { color: var(--danger); }
+
+  .editor-sidebar {
+    position: absolute;
+    right: 32px;
+    top: 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 14px 16px;
+    border-radius: 4px;
+    width: 220px;
+    font-size: 11.5px;
+  }
+  .editor-sidebar h4 { margin: 0 0 8px; color: var(--text); font-size: 12px; font-weight: 500; }
+  .editor-sidebar .palette-item {
+    padding: 4px 8px;
+    border: 1px dashed var(--border-2);
+    border-radius: 3px;
+    margin-bottom: 4px;
+    color: var(--text-2);
+    cursor: grab;
+    font-size: 11px;
+  }
+
+  /* =========================================
+     C · REVISE FLOW (4 STEPS)
+     ========================================= */
+  .flow { padding: 20px 0; }
+  .step {
+    padding: 18px 32px 28px;
+    border-bottom: 1px dashed var(--border);
+    position: relative;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-num {
+    position: absolute;
+    left: 8px;
+    top: 24px;
+    font-size: 10px;
+    color: var(--accent);
+    width: 18px;
+    text-align: center;
+  }
+  .step-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .step-desc {
+    color: var(--text-3);
+    font-size: 11.5px;
+    margin-bottom: 14px;
+  }
+  .step-frame {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  /* Step 1: notification */
+  .notif-bar {
+    padding: 12px 18px;
+    background: var(--accent-2);
+    border-bottom: 1px solid var(--accent-bd);
+    color: var(--accent);
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .notif-bar .pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: 8px;
+    display: inline-block;
+    animation: pulse 1.5s ease-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .mini-board {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    padding: 14px 18px;
+    gap: 8px;
+  }
+  .mini-lane {
+    border-right: 1px solid var(--border);
+    padding-right: 8px;
+    font-size: 10.5px;
+    color: var(--text-3);
+    min-height: 70px;
+  }
+  .mini-lane:last-child { border-right: none; }
+  .mini-lane-name { font-size: 10px; color: var(--text-3); margin-bottom: 6px; }
+  .mini-lane.gate-active { background: var(--accent-2); padding: 0 8px; margin: -8px 0; padding-top: 8px; padding-bottom: 8px; }
+  .mini-lane.gate-active .mini-lane-name { color: var(--accent); }
+  .mini-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+  .mini-card .id { color: var(--text-3); font-size: 9.5px; }
+  .mini-card .ttl { color: var(--text); margin-top: 2px; }
+  .mini-card.gate {
+    border-color: var(--accent-bd);
+    background: oklch(20% 0.025 55);
+  }
+  .mini-card.gate .ttl { color: var(--text); }
+
+  /* Step 2: drawer with artifact */
+  .drawer-shell { display: grid; grid-template-columns: 1fr 460px; min-height: 320px; }
+  .drawer-board-bg {
+    background: var(--bg-2);
+    background-image:
+      radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0);
+    background-size: 16px 16px;
+    padding: 14px;
+    color: var(--text-4);
+    font-size: 10px;
+    text-align: center;
+    padding-top: 80px;
+  }
+  .drawer-panel {
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    padding: 16px 18px;
+    overflow-y: auto;
+    max-height: 420px;
+  }
+  .drawer-head {
+    display: flex;
+    justify-content: space-between;
+    padding-bottom: 10px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .drawer-id { color: var(--accent); font-size: 12px; }
+  .drawer-stage { color: var(--text-3); font-size: 11px; }
+  .drawer-title { font-size: 14px; color: var(--text); margin-bottom: 16px; }
+  .drawer-tabs { display: flex; gap: 14px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+  .drawer-tab { padding-bottom: 8px; font-size: 11.5px; color: var(--text-3); }
+  .drawer-tab.active { color: var(--accent); border-bottom: 1px solid var(--accent); margin-bottom: -1px; }
+
+  .artifact-body {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.55;
+  }
+  .artifact-body h3 { font-family: inherit; color: var(--text); font-size: 15px; margin: 16px 0 8px; font-weight: 600; }
+  .artifact-body p { margin: 0 0 10px; }
+  .artifact-body code { font-family: 'Berkeley Mono', 'JetBrains Mono', monospace; background: var(--bg-2); padding: 1px 5px; border-radius: 3px; font-size: 12px; color: var(--text); }
+  .artifact-body ul { margin: 8px 0; padding-left: 20px; }
+
+  .selectable {
+    background: oklch(22% 0.040 55);
+    padding: 2px 4px;
+    border-radius: 2px;
+    border-bottom: 1.5px solid var(--accent);
+    cursor: text;
+    position: relative;
+  }
+  .selection-popover {
+    position: absolute;
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-top: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    width: 220px;
+    z-index: 10;
+    font-family: 'Berkeley Mono', monospace;
+  }
+  .selection-popover .label {
+    font-size: 10px;
+    color: var(--text-3);
+    margin-bottom: 6px;
+  }
+  .selection-popover textarea {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 5px 8px;
+    border-radius: 2px;
+    resize: vertical;
+    min-height: 38px;
+  }
+  .selection-popover .actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+  .selection-popover .btn-sm {
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    color: oklch(15% 0.04 55);
+    padding: 3px 8px;
+    font-size: 10px;
+    border-radius: 2px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .selection-popover .btn-sm.ghost {
+    background: transparent;
+    color: var(--text-2);
+    border-color: var(--border);
+  }
+
+  /* Step 3: revise compose */
+  .revise-frame {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    min-height: 280px;
+  }
+  .revise-context {
+    background: var(--bg-2);
+    padding: 16px 18px;
+    border-right: 1px solid var(--border);
+  }
+  .revise-context h5 { margin: 0 0 6px; font-size: 11px; color: var(--text-3); font-weight: 400; letter-spacing: 0.04em; }
+  .revise-context .quoted {
+    background: var(--surface);
+    border-left: 2px solid var(--accent);
+    padding: 8px 12px;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 12px;
+    color: var(--text-2);
+    margin: 6px 0 14px;
+    line-height: 1.5;
+  }
+  .revise-form {
+    padding: 16px 18px;
+    background: var(--surface);
+  }
+  .revise-form h5 { margin: 0 0 8px; font-size: 11px; color: var(--text-3); font-weight: 400; }
+  .revise-form textarea {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 3px;
+    resize: vertical;
+    min-height: 90px;
+  }
+  .revise-form .actions {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 12px;
+  }
+  .revise-form .btn {
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    color: var(--text);
+    padding: 7px 14px;
+    font-family: inherit;
+    font-size: 11.5px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .revise-form .btn.primary { background: var(--accent); color: oklch(15% 0.04 55); border-color: var(--accent); font-weight: 500; }
+  .revise-form .btn.ghost { background: transparent; }
+
+  /* Step 4: result */
+  .result {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .result-flash {
+    padding: 12px 18px;
+    background: oklch(20% 0.04 145);
+    border-bottom: 1px solid oklch(35% 0.06 145);
+    color: var(--running);
+    font-size: 11.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .result-flash .icon {
+    background: var(--running);
+    color: oklch(15% 0.02 145);
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .mini-card.bounced-back {
+    border-color: oklch(50% 0.10 305);
+    background: oklch(20% 0.035 305);
+  }
+  .mini-card.bounced-back .ttl { color: var(--text); }
+  .mini-card.bounced-back .id { color: oklch(70% 0.10 305); }
+  .mini-card.bounced-back .meta { color: oklch(65% 0.08 305); font-size: 9.5px; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     VIEW SWITCHER (nav)
+     ============================================================ -->
+<div class="nav">
+  <div class="nav-tab">board</div>
+  <div class="nav-tab active">list</div>
+  <div class="nav-tab">pipeline</div>
+  <div class="nav-tab" style="margin-left:auto">settings</div>
+</div>
+
+<!-- ============================================================
+     A · LIST VIEW
+     ============================================================ -->
+<div class="page-section">
+  <div class="section-label">
+    <strong>list view</strong>
+    <span class="meta">power-user surface · filter across all tasks · same actions as cards</span>
+  </div>
+  <div class="listview">
+    <div class="filters">
+      <span class="filter-pill active">all</span>
+      <span class="filter-pill">needs you</span>
+      <span class="filter-pill">running</span>
+      <span class="filter-pill">revising</span>
+      <span class="filter-pill">braked</span>
+      <span class="filter-pill">cost &gt; 100k</span>
+      <input class="filter-search" placeholder="filter tasks…" />
+    </div>
+    <table class="tasks">
+      <thead>
+        <tr>
+          <th>id</th>
+          <th>topic</th>
+          <th>stage</th>
+          <th>state</th>
+          <th>age</th>
+          <th class="num">tokens</th>
+          <th>att</th>
+          <th>last</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="needs-you">
+          <td class="col-id">T-041</td>
+          <td class="col-title">Patient Records bulk-write spec v1</td>
+          <td>gate-1 · spec</td>
+          <td class="state-g">● needs you</td>
+          <td>2m</td>
+          <td class="num">82k</td>
+          <td>1</td>
+          <td>09:42</td>
+        </tr>
+        <tr>
+          <td class="col-id">T-042</td>
+          <td class="col-title">Patient Records bulk-write</td>
+          <td>research</td>
+          <td class="state-r">● running</td>
+          <td>4m 23s</td>
+          <td class="num">47k</td>
+          <td>1</td>
+          <td>09:44</td>
+        </tr>
+        <tr>
+          <td class="col-id">T-040</td>
+          <td class="col-title">Scheduling bulk-write plan</td>
+          <td>plan-writers</td>
+          <td class="state-rev">↩ revise v2</td>
+          <td>queued</td>
+          <td class="num">154k</td>
+          <td>2</td>
+          <td>09:39</td>
+        </tr>
+        <tr>
+          <td class="col-id">T-038</td>
+          <td class="col-title">Communications bulk-write</td>
+          <td>gates/needs-human</td>
+          <td class="state-g">! canon q</td>
+          <td>8m</td>
+          <td class="num">31k</td>
+          <td>1</td>
+          <td>09:36</td>
+        </tr>
+        <tr>
+          <td class="col-id">T-039</td>
+          <td class="col-title">Tenancy/Org bulk-write</td>
+          <td>research</td>
+          <td class="state-q">⏸ braked</td>
+          <td>paused</td>
+          <td class="num">23k</td>
+          <td>1</td>
+          <td>09:34</td>
+        </tr>
+        <tr>
+          <td class="col-id">T-037</td>
+          <td class="col-title">Schema kernel declaration</td>
+          <td>gates/done</td>
+          <td class="state-q">✓ done</td>
+          <td>1h 12m</td>
+          <td class="num">62k</td>
+          <td>1</td>
+          <td>08:28</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ============================================================
+     B · PIPELINE EDITOR (NODE GRAPH)
+     ============================================================ -->
+<div class="page-section">
+  <div class="section-label">
+    <strong>pipeline editor</strong>
+    <span class="meta">edit the pipeline shape · only used when defining or customising · live runs use the board</span>
+  </div>
+  <div class="editor">
+    <div class="editor-canvas">
+
+      <!-- Nodes laid out left-to-right with revise edges curving back -->
+      <div class="node writer" style="left: 32px; top: 130px">
+        <div class="node-name">research</div>
+        <div class="node-kind">/ddd-council critique</div>
+      </div>
+      <div class="node writer" style="left: 180px; top: 130px">
+        <div class="node-name">spec-writers</div>
+        <div class="node-kind">brainstorming</div>
+      </div>
+      <div class="node reviewer" style="left: 330px; top: 130px">
+        <div class="node-name">spec-reviewers</div>
+        <div class="node-kind">/ddd-council vet</div>
+      </div>
+      <div class="node gate" style="left: 490px; top: 130px">
+        <div class="node-name">gate 1</div>
+        <div class="node-kind">you approve</div>
+      </div>
+      <div class="node writer" style="left: 620px; top: 130px">
+        <div class="node-name">plan-writers</div>
+        <div class="node-kind">writing-plans</div>
+      </div>
+      <div class="node reviewer" style="left: 770px; top: 130px">
+        <div class="node-name">plan-reviewers</div>
+        <div class="node-kind">/ddd-council vet</div>
+      </div>
+      <div class="node gate" style="left: 930px; top: 130px">
+        <div class="node-name">gate 2</div>
+        <div class="node-kind">you approve</div>
+      </div>
+      <div class="node impl" style="left: 1060px; top: 130px">
+        <div class="node-name">implementers</div>
+        <div class="node-kind">executing-plans</div>
+      </div>
+
+      <!-- Edges drawn via SVG overlay -->
+      <svg style="position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none" viewBox="0 0 1200 380" preserveAspectRatio="none">
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#9b9b8a" />
+          </marker>
+          <marker id="arrow-revise" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="oklch(70% 0.10 305)" />
+          </marker>
+        </defs>
+
+        <!-- Forward edges (straight) -->
+        <line x1="138" y1="152" x2="180" y2="152" stroke="oklch(40% 0.008 60)" stroke-width="1.5" marker-end="url(#arrow)" />
+        <line x1="290" y1="152" x2="330" y2="152" stroke="oklch(40% 0.008 60)" stroke-width="1.5" marker-end="url(#arrow)" />
+        <line x1="450" y1="152" x2="490" y2="152" stroke="oklch(40% 0.008 60)" stroke-width="1.5" marker-end="url(#arrow)" />
+        <line x1="580" y1="152" x2="620" y2="152" stroke="oklch(40% 0.008 60)" stroke-width="1.5" marker-end="url(#arrow)" />
+        <line x1="730" y1="152" x2="770" y2="152" stroke="oklch(40% 0.008 60)" stroke-width="1.5" marker-end="url(#arrow)" />
+        <line x1="890" y1="152" x2="930" y2="152" stroke="oklch(40% 0.008 60)" stroke-width="1.5" marker-end="url(#arrow)" />
+        <line x1="1020" y1="152" x2="1060" y2="152" stroke="oklch(40% 0.008 60)" stroke-width="1.5" marker-end="url(#arrow)" />
+
+        <!-- Revise edges (curved, dashed) -->
+        <path d="M 365 175 Q 280 250 215 175" fill="none" stroke="oklch(60% 0.10 305)" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-revise)" />
+        <path d="M 805 175 Q 720 250 655 175" fill="none" stroke="oklch(60% 0.10 305)" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-revise)" />
+      </svg>
+
+      <div class="edge-label revise" style="left: 240px; top: 230px">revise (attempts &lt; 3)</div>
+      <div class="edge-label revise" style="left: 690px; top: 230px">revise (attempts &lt; 3)</div>
+
+      <!-- Sidebar palette -->
+      <div class="editor-sidebar">
+        <h4>add node</h4>
+        <div class="palette-item">writer team</div>
+        <div class="palette-item">reviewer team</div>
+        <div class="palette-item">human gate</div>
+        <div class="palette-item">conditional split</div>
+        <div class="palette-item">escalation route</div>
+        <h4 style="margin-top: 14px">selected: spec-reviewers</h4>
+        <div style="font-size: 10.5px; color: var(--text-3); line-height: 1.6">
+          team prompt: <span style="color: var(--text)">prompts/spec-reviewers.md</span><br>
+          skill: <span style="color: var(--accent)">/ddd-council vet</span><br>
+          on approve → gate 1<br>
+          on revise → spec-writers<br>
+          on reject → needs-human
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     C · REVISE FLOW: plan ready → I review → I suggest edits → back into planning
+     ============================================================ -->
+<div class="page-section">
+  <div class="section-label">
+    <strong>revise flow · four steps</strong>
+    <span class="meta">plan lands at gate 2 → you review → you suggest inline edits → it bounces back to plan-writers</span>
+  </div>
+
+  <div class="flow">
+
+    <!-- STEP 1 -->
+    <div class="step">
+      <div class="step-num">01</div>
+      <div class="step-title">Plan lands at Gate 2 — notification surfaces</div>
+      <div class="step-desc">A subtle banner appears at the top of the board. The card has the "needs you" treatment in its lane. No interruption; you finish what you're doing in your IDE and come over when ready.</div>
+      <div class="step-frame">
+        <div class="notif-bar">
+          <span><span class="pulse"></span>1 plan waiting at gate 2 · T-040 · Scheduling bulk-write plan</span>
+          <span style="color: var(--text-3)">⌥G to focus</span>
+        </div>
+        <div class="mini-board">
+          <div class="mini-lane">
+            <div class="mini-lane-name">research</div>
+          </div>
+          <div class="mini-lane">
+            <div class="mini-lane-name">spec-w</div>
+          </div>
+          <div class="mini-lane">
+            <div class="mini-lane-name">spec-r</div>
+          </div>
+          <div class="mini-lane">
+            <div class="mini-lane-name">plan-w</div>
+          </div>
+          <div class="mini-lane">
+            <div class="mini-lane-name">plan-r</div>
+          </div>
+          <div class="mini-lane gate-active">
+            <div class="mini-lane-name">gate 2 · plan</div>
+            <div class="mini-card gate">
+              <div class="id">T-040</div>
+              <div class="ttl">Scheduling bulk-write plan</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 2 -->
+    <div class="step">
+      <div class="step-num">02</div>
+      <div class="step-title">Click card → drawer opens with rendered plan</div>
+      <div class="step-desc">Artifact tab is the default for cards at a gate. Markdown is rendered; the plan reads naturally; mono code blocks stay mono. Select any text inline to comment.</div>
+      <div class="step-frame">
+        <div class="drawer-shell">
+          <div class="drawer-board-bg">[ board dims; drawer overlays the right side ]</div>
+          <div class="drawer-panel">
+            <div class="drawer-head">
+              <span class="drawer-id">T-040</span>
+              <span class="drawer-stage">plan-reviewers · v1 · 154k · 8m</span>
+            </div>
+            <div class="drawer-title">Scheduling bulk-write — plan v1</div>
+            <div class="drawer-tabs">
+              <div class="drawer-tab active">artifact</div>
+              <div class="drawer-tab">live log</div>
+              <div class="drawer-tab">review</div>
+              <div class="drawer-tab">lineage</div>
+            </div>
+            <div class="artifact-body">
+              <h3>Task 1: bulk-write endpoint</h3>
+              <p>Add <code>POST /api/bulk/appointments</code> accepting an array of up to 1000 records per call.</p>
+              <p><span class="selectable">Each record uses a single idempotency key at the batch level.<span class="selection-popover">
+                <div class="label">comment on this section</div>
+                <textarea placeholder="why this needs to change…"></textarea>
+                <div class="actions">
+                  <button class="btn-sm ghost">cancel</button>
+                  <button class="btn-sm">add comment</button>
+                </div>
+              </span></span> The handler validates the batch, then dispatches in parallel to <code>AppointmentService.create()</code>.</p>
+              <p>On error: rollback the batch, return the first row that failed plus its index.</p>
+              <h3>Task 2: side-effect opt-outs</h3>
+              <p>The endpoint accepts <code>?skip_welcome=true&amp;skip_reminders=true</code> query params; …</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 3 -->
+    <div class="step">
+      <div class="step-num">03</div>
+      <div class="step-title">Suggest edits — inline comment + revise compose</div>
+      <div class="step-desc">Left: the comment you just added is captured against the quoted text. Right: the revise form lets you add overall direction for the plan-writers; the inline comments are bundled in automatically. Hit <code>send back</code>.</div>
+      <div class="step-frame">
+        <div class="revise-frame">
+          <div class="revise-context">
+            <h5>comments on this version</h5>
+            <div class="quoted">
+              "Each record uses a single idempotency key at the batch level."
+              <div style="margin-top: 6px; color: var(--text-3); font-size: 11px;">→ per-row key, not per-batch. partial-batch failure should leave the rest committed.</div>
+            </div>
+            <h5>also</h5>
+            <div class="quoted">
+              "On error: rollback the batch…"
+              <div style="margin-top: 6px; color: var(--text-3); font-size: 11px;">→ remove rollback (see above); record per-row failures in the response.</div>
+            </div>
+          </div>
+          <div class="revise-form">
+            <h5>overall direction for plan-writers</h5>
+            <textarea>Plan got the endpoint right but treated idempotency as batch-level. Imports needs per-row keys so a partial failure can be retried per-row. Rewrite tasks 1 and 2 with per-row semantics; everything else (auth, validation, opt-out flags) is fine.</textarea>
+            <div class="actions">
+              <button class="btn ghost">cancel</button>
+              <button class="btn primary">send back to plan-writers</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 4 -->
+    <div class="step">
+      <div class="step-num">04</div>
+      <div class="step-title">Bounces back — card returns to plan-writers, attempts increments</div>
+      <div class="step-desc">A muted flash confirms the action. The card animates from the gate column back to plan-writers. Attempts counter is now 2/3. Plan-writers' worker will claim it and read both the comments and the overall direction as the basis for v2.</div>
+      <div class="step-frame">
+        <div class="result-flash">
+          <span class="icon">✓</span>
+          sent back to plan-writers · attempts now 2/3 · v2 will reference 2 inline comments + 1 overall direction
+        </div>
+        <div class="mini-board">
+          <div class="mini-lane"><div class="mini-lane-name">research</div></div>
+          <div class="mini-lane"><div class="mini-lane-name">spec-w</div></div>
+          <div class="mini-lane"><div class="mini-lane-name">spec-r</div></div>
+          <div class="mini-lane">
+            <div class="mini-lane-name">plan-w</div>
+            <div class="mini-card bounced-back">
+              <div class="id">T-040 ↩</div>
+              <div class="ttl">Scheduling plan</div>
+              <div class="meta">queued · v2 · a 2/3</div>
+            </div>
+          </div>
+          <div class="mini-lane"><div class="mini-lane-name">plan-r</div></div>
+          <div class="mini-lane">
+            <div class="mini-lane-name">gate 2 · plan</div>
+            <div style="color: var(--text-4); font-size: 10px; padding-top: 8px">empty</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

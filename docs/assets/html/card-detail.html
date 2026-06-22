@@ -1,0 +1,113 @@
+<h2>Card detail — what you see when you click a card</h2>
+<p class="subtitle">Slides over from the right; Kanban stays visible behind. Tab between live log and the artifact the card produced.</p>
+
+<div class="mockup">
+  <div class="mockup-header">Card detail · slide-over drawer</div>
+  <div class="mockup-body" style="padding:0;background:#0d1117">
+    <div style="display:grid;grid-template-columns:180px 1fr;background:#0d1117;color:#e6edf3;font-size:11px;min-height:340px">
+      <!-- LEFT COLUMN: metadata + actions -->
+      <div style="border-right:1px solid #30363d;padding:12px 14px;background:#0a0d12">
+        <div style="font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:0.05em">Task</div>
+        <div style="font-family:ui-monospace;font-size:11px;margin-top:2px;color:#58a6ff">T-042</div>
+        <div style="font-size:11px;margin-top:1px">Patient Records bulk-write</div>
+
+        <div style="font-size:10px;color:#8b949e;text-transform:uppercase;margin-top:14px">Stage</div>
+        <div style="background:#0f2a52;border:1px solid #1f6feb;border-radius:3px;padding:3px 6px;display:inline-block;margin-top:4px;font-size:10px">research ▶</div>
+
+        <div style="font-size:10px;color:#8b949e;text-transform:uppercase;margin-top:14px">Attempts</div>
+        <div style="margin-top:4px">
+          <span style="background:#1f6feb;color:white;border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;font-size:10px">1</span>
+          <span style="color:#8b949e;font-size:10px;margin-left:4px">of 3</span>
+        </div>
+
+        <div style="font-size:10px;color:#8b949e;text-transform:uppercase;margin-top:14px">Age</div>
+        <div style="margin-top:4px;font-size:11px">4m 23s</div>
+
+        <div style="font-size:10px;color:#8b949e;text-transform:uppercase;margin-top:14px">Lineage</div>
+        <div style="margin-top:6px;font-size:10px;line-height:1.6">
+          <div style="color:#8b949e">topic.md</div>
+          <div style="color:#8b949e;padding-left:8px">↓ research (this)</div>
+          <div style="color:#404040;padding-left:8px">↓ spec-writers</div>
+          <div style="color:#404040;padding-left:8px">↓ spec-reviewers</div>
+          <div style="color:#404040;padding-left:8px">↓ Gate 1 (you)</div>
+          <div style="color:#404040;padding-left:8px">↓ plan-writers</div>
+          <div style="color:#404040;padding-left:8px">↓ …</div>
+        </div>
+
+        <div style="font-size:10px;color:#8b949e;text-transform:uppercase;margin-top:14px">Actions</div>
+        <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">
+          <button class="mock-button" style="font-size:10px;padding:4px 8px;text-align:left">⏸ Brake this worker</button>
+          <button class="mock-button" style="font-size:10px;padding:4px 8px;text-align:left">↻ Retry from start</button>
+          <button class="mock-button" style="font-size:10px;padding:4px 8px;text-align:left">✗ Cancel task</button>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN: tabs + content -->
+      <div style="padding:0">
+        <!-- Tab bar -->
+        <div style="display:flex;border-bottom:1px solid #30363d;background:#0a0d12">
+          <div style="padding:8px 14px;border-bottom:2px solid #58a6ff;color:#e6edf3;font-size:11px;font-weight:500">Live log</div>
+          <div style="padding:8px 14px;color:#8b949e;font-size:11px">Artifact</div>
+          <div style="padding:8px 14px;color:#8b949e;font-size:11px">Parent docs (3)</div>
+          <div style="padding:8px 14px;color:#8b949e;font-size:11px">Review</div>
+          <div style="margin-left:auto;padding:8px 14px;color:#3fb950;font-size:10px;display:flex;align-items:center;gap:4px">
+            <span style="background:#3fb950;width:6px;height:6px;border-radius:50%;animation:pulse 1s infinite"></span> streaming
+          </div>
+        </div>
+        <!-- Live log content -->
+        <div style="padding:12px 14px;font-family:ui-monospace;font-size:10px;line-height:1.7;color:#8b949e">
+          <div><span style="color:#3fb950">[16:39:58]</span> ▶ picked T-042</div>
+          <div><span style="color:#3fb950">[16:39:59]</span> reading DOMAIN.md…</div>
+          <div><span style="color:#3fb950">[16:40:02]</span> reading patient.controller.ts (147 lines)…</div>
+          <div><span style="color:#3fb950">[16:40:05]</span> reading patient.service.ts (892 lines)…</div>
+          <div><span style="color:#3fb950">[16:40:14]</span> running detector against scope…</div>
+          <div><span style="color:#3fb950">[16:40:22]</span> detector: 12 leaky-boundary findings</div>
+          <div><span style="color:#3fb950">[16:41:01]</span> convening room…</div>
+          <div><span style="color:#3fb950">[16:42:30]</span> <span style="color:#e6edf3">Architect: "the patient.service is 892 lines doing 14 distinct things…"</span></div>
+          <div><span style="color:#3fb950">[16:43:14]</span> <span style="color:#e6edf3">Engineer: "before any bulk-write API can land, this aggregate needs to be split…"</span></div>
+          <div style="color:#404040;margin-top:6px">▌</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:20px">
+  <h3>What changes per tab</h3>
+  <div class="pros-cons">
+    <div class="pros" style="background:#0a1a2e;border:1px solid #58a6ff">
+      <h4 style="color:#58a6ff">Live log</h4>
+      <ul style="font-size:12px">
+        <li>Streaming Claude output as it works</li>
+        <li>Auto-scrolls; pin to top to read earlier</li>
+        <li>Goes static once task is done</li>
+      </ul>
+    </div>
+    <div class="pros" style="background:#1a3a24;border:1px solid #3fb950">
+      <h4 style="color:#3fb950">Artifact</h4>
+      <ul style="font-size:12px">
+        <li>Rendered markdown of the spec/plan/critique this card produced</li>
+        <li>Read-only by default; "edit" button for operator to fix typos before next stage picks it up</li>
+        <li>Version dropdown for revise loops (v1, v2, v3)</li>
+      </ul>
+    </div>
+    <div class="pros" style="background:#3d2e0a;border:1px solid #d29922">
+      <h4 style="color:#d29922">Parent docs</h4>
+      <ul style="font-size:12px">
+        <li>The artifacts upstream of this card (topic → analysis → spec → plan)</li>
+        <li>Click to open any in a side-by-side view</li>
+        <li>Helps reviewers see context without leaving the card</li>
+      </ul>
+    </div>
+    <div class="pros" style="background:#2a1a45;border:1px solid #a371f7">
+      <h4 style="color:#a371f7">Review</h4>
+      <ul style="font-size:12px">
+        <li>Only present for cards that have gone through a reviewer</li>
+        <li>Findings list with status (open / resolved / deferred)</li>
+        <li>For Gate cards: <strong>approve / revise / reject buttons live here</strong></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:20px">Look right? Any tab missing, any wrong, anything you'd cut?</p>

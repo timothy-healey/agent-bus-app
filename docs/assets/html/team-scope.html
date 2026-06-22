@@ -1,0 +1,175 @@
+<h2>Team scope — per-worker folder access</h2>
+<p class="subtitle">How each team's worker is granted (and denied) filesystem and tool access. Configured per team, applied per worker invocation.</p>
+
+<div class="section">
+  <h3>The scope editor</h3>
+  <div class="mockup">
+    <div class="mockup-header">Settings · Teams · research · Scope</div>
+    <div class="mockup-body" style="padding:14px;background:#0d1117;color:#e6edf3;font-size:12px">
+
+      <div style="display:grid;grid-template-columns:140px 1fr;gap:14px;align-items:start">
+
+        <div style="font-size:11px;color:#8b949e;text-transform:uppercase;padding-top:6px">Working dir</div>
+        <div>
+          <code style="font-family:ui-monospace;font-size:11px;background:#0a0d12;padding:4px 8px;border-radius:3px;border:1px solid #30363d;display:inline-block">${agent_bus}/teams/research/working/</code>
+          <div style="color:#8b949e;font-size:10px;margin-top:4px">Where the worker process starts. Variables resolve at launch.</div>
+        </div>
+
+        <div style="font-size:11px;color:#58a6ff;text-transform:uppercase;padding-top:6px">📖 Read access</div>
+        <div>
+          <div style="background:#0a1a2e;border:1px solid #1f6feb;border-radius:4px;padding:8px;font-family:ui-monospace;font-size:11px;line-height:1.7">
+            <div>${target_repo}/**</div>
+            <div>${target_repo}/DOMAIN.md</div>
+            <div>${agent_bus}/artifacts/analyses/**</div>
+            <div>${agent_bus}/teams/research/**</div>
+            <div style="color:#8b949e;font-style:italic">+ click to add row</div>
+          </div>
+        </div>
+
+        <div style="font-size:11px;color:#3fb950;text-transform:uppercase;padding-top:6px">✏️ Write access</div>
+        <div>
+          <div style="background:#0f1f0e;border:1px solid #3fb950;border-radius:4px;padding:8px;font-family:ui-monospace;font-size:11px;line-height:1.7">
+            <div>${agent_bus}/teams/research/outbox/**</div>
+            <div>${agent_bus}/artifacts/analyses/**</div>
+            <div>${agent_bus}/gates/needs-human/**</div>
+            <div>${target_repo}/docs/critique-*.md</div>
+            <div>${agent_bus}/logs/research.log</div>
+          </div>
+        </div>
+
+        <div style="font-size:11px;color:#f85149;text-transform:uppercase;padding-top:6px">🚫 Denied</div>
+        <div>
+          <div style="background:#291010;border:1px solid #f85149;border-radius:4px;padding:8px;font-family:ui-monospace;font-size:11px;line-height:1.7">
+            <div>${target_repo}/** <span style="color:#8b949e">(write)</span></div>
+            <div>~/.aws/**</div>
+            <div>~/.ssh/**</div>
+            <div>${target_repo}/.env*</div>
+            <div style="color:#8b949e;font-style:italic">+ user can add</div>
+          </div>
+        </div>
+
+        <div style="font-size:11px;color:#a371f7;text-transform:uppercase;padding-top:6px">🧰 Tools</div>
+        <div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" checked> Read</label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" checked> Write</label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" checked> Edit</label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" checked> Glob</label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" checked> Grep</label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" checked> Bash <span style="font-size:9px;color:#8b949e">(rules…)</span></label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox"> WebFetch</label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox"> WebSearch</label>
+            <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" checked> Skill <span style="font-size:9px;color:#8b949e">(allowlist)</span></label>
+          </div>
+        </div>
+
+        <div style="font-size:11px;color:#d29922;text-transform:uppercase;padding-top:6px">⚙️ Mode</div>
+        <div>
+          <select style="background:#0a0d12;border:1px solid #30363d;color:#e6edf3;padding:4px 8px;border-radius:3px;font-size:11px">
+            <option>acceptEdits</option>
+            <option>ask</option>
+            <option>bypassPermissions</option>
+            <option>plan</option>
+          </select>
+          <div style="color:#8b949e;font-size:10px;margin-top:4px">acceptEdits = let claude write within the scope above without prompting; falls back to <em>ask</em> for anything outside.</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:24px">
+  <h3>What this generates at launch</h3>
+  <p class="subtitle">When this worker spawns, the Rust backend writes a per-invocation settings file and constructs the claude args:</p>
+  <pre style="background:#0a0d12;color:#e6edf3;padding:14px;border-radius:4px;font-family:ui-monospace;font-size:11px;line-height:1.6;border:1px solid #30363d;overflow-x:auto">
+# ${runtime}/research-T-042.settings.json (generated, ephemeral)
+{
+  "permissions": {
+    "allow": [
+      "Read(/Users/tim/splose/splose-monorepo/**)",
+      "Read(/Users/tim/agent-bus/artifacts/analyses/**)",
+      "Write(/Users/tim/agent-bus/teams/research/outbox/**)",
+      "Write(/Users/tim/agent-bus/artifacts/analyses/**)",
+      "Write(/Users/tim/agent-bus/gates/needs-human/**)",
+      "Write(/Users/tim/splose/splose-monorepo/docs/critique-*.md)",
+      "Skill(ddd-council:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(rg:*)"
+    ],
+    "deny": [
+      "Write(/Users/tim/splose/splose-monorepo/**)",
+      "Read(/Users/tim/.aws/**)",
+      "Read(/Users/tim/.ssh/**)",
+      "Read(/Users/tim/splose/splose-monorepo/.env*)",
+      "Bash(git push:*)",
+      "Bash(rm -rf:*)"
+    ]
+  }
+}
+
+# command line
+claude --print \
+  --settings ${runtime}/research-T-042.settings.json \
+  --add-dir /Users/tim/splose/splose-monorepo \
+  --add-dir /Users/tim/agent-bus/artifacts/analyses \
+  --add-dir /Users/tim/agent-bus/gates/needs-human \
+  --permission-mode acceptEdits \
+  --output-format stream-json \
+  --verbose \
+  --cwd /Users/tim/agent-bus/teams/research/working/ \
+  "Process the task file at: T-042-imports-followups-01.md"
+  </pre>
+</div>
+
+<div class="section" style="margin-top:24px">
+  <h3>Default scopes per shipped team</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;color:#e6edf3">
+    <tr style="border-bottom:1px solid #30363d;background:#0a0d12">
+      <th style="padding:6px;text-align:left">Team</th>
+      <th style="padding:6px;text-align:left">Read</th>
+      <th style="padding:6px;text-align:left">Write</th>
+      <th style="padding:6px;text-align:left">Tools</th>
+    </tr>
+    <tr style="border-bottom:1px solid #30363d">
+      <td style="padding:6px;color:#58a6ff">research</td>
+      <td style="padding:6px">target_repo, parent_artifacts</td>
+      <td style="padding:6px">artifacts/analyses, target/docs/critique-*</td>
+      <td style="padding:6px">Read/Write/Edit/Grep/Bash(ro)</td>
+    </tr>
+    <tr style="border-bottom:1px solid #30363d">
+      <td style="padding:6px;color:#58a6ff">spec-writers</td>
+      <td style="padding:6px">artifacts/analyses, target_repo (ro)</td>
+      <td style="padding:6px">artifacts/specs</td>
+      <td style="padding:6px">Read/Write/Edit/Grep</td>
+    </tr>
+    <tr style="border-bottom:1px solid #30363d">
+      <td style="padding:6px;color:#a371f7">spec-reviewers</td>
+      <td style="padding:6px">artifacts/specs, target_repo (ro)</td>
+      <td style="padding:6px">artifacts/reviews, target/docs/vet-*</td>
+      <td style="padding:6px">Read/Write/Edit/Grep</td>
+    </tr>
+    <tr style="border-bottom:1px solid #30363d">
+      <td style="padding:6px;color:#f0883e">implementers</td>
+      <td style="padding:6px">artifacts/plans, target_repo</td>
+      <td style="padding:6px"><strong>worktrees/&lt;id&gt;/** only</strong></td>
+      <td style="padding:6px">Read/Write/Edit/Bash(git:*; pnpm:*; test:*); <strong>deny git push</strong></td>
+    </tr>
+    <tr>
+      <td style="padding:6px;color:#a371f7">impl-reviewers</td>
+      <td style="padding:6px">worktrees/&lt;id&gt;, artifacts/plans</td>
+      <td style="padding:6px">artifacts/reviews</td>
+      <td style="padding:6px">Read/Grep/Bash(git diff/log:*)</td>
+    </tr>
+  </table>
+  <p style="color:#8b949e;font-size:11px;margin-top:8px">Implementer is the only team with target_repo write — and only into its worktree, never the main checkout. <code>git push</code> is denied at the tool level so even an off-script claude can't reach the remote.</p>
+</div>
+
+<div class="section" style="margin-top:20px">
+  <h3>Optional v2: OS-level sandbox</h3>
+  <p style="font-size:12px">For belt-and-braces beyond Claude's permission system, wrap each <code>claude --print</code> invocation in <code>sandbox-exec</code> (macOS) or <code>bubblewrap</code> (Linux). The Rust backend generates the sandbox profile from the same scope config. Defense-in-depth: if Claude's permissions are bypassed somehow, the OS kernel stops the worker reaching outside its sandbox.</p>
+  <p style="color:#8b949e;font-size:11px">Not v1. Mention it in the spec as a hardening path.</p>
+</div>
+
+<p class="subtitle" style="margin-top:20px">Look right? Specifically — are the default scopes per team correct, or do they need adjusting?</p>
