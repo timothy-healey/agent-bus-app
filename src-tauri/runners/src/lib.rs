@@ -3,3 +3,7 @@
 //! Claude's responses back into Runtime's idiom (verdict, artifact, usage).
 //! The `Runner` trait is the seam: real subprocess spawning lives only in
 //! ClaudeCliRunner; everything else is pure and fixture-tested.
+
+pub mod output;
+
+pub use output::*;
