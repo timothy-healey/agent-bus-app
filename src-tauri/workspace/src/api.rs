@@ -47,6 +47,21 @@ pub async fn workspace_get_project(
     })
 }
 
+#[tauri::command]
+pub async fn workspace_set_active_pipeline(
+    state: tauri::State<'_, WorkspaceState>,
+    id: String,
+    pipeline_id: Option<String>,
+) -> Result<(), String> {
+    use agent_bus_core::PipelineId;
+    let pid = pipeline_id.map(PipelineId);
+    state
+        .store
+        .set_active_pipeline(&ProjectId(id), pid.as_ref(), now_unix())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// OHS contract: the union of these is what Conversational Control will
 /// expose to the god terminal in Plan 6.
 pub fn tools() -> Vec<ToolSpec> {
@@ -68,6 +83,19 @@ pub fn tools() -> Vec<ToolSpec> {
             name: "workspace_list_projects".into(),
             description: "List all known projects, newest first.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
+            supplier_context: "workspace".into(),
+        },
+        ToolSpec {
+            name: "workspace_set_active_pipeline".into(),
+            description: "Set (or clear) a project's active pipeline.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "pipeline_id": { "type": ["string", "null"] }
+                },
+                "required": ["id"]
+            }),
             supplier_context: "workspace".into(),
         },
     ]

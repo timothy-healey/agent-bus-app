@@ -75,6 +75,27 @@ impl ProjectStore {
             None => Err(ProjectStoreError::NotFound(id.clone())),
         }
     }
+
+    pub async fn set_active_pipeline(
+        &self,
+        id: &ProjectId,
+        pipeline_id: Option<&PipelineId>,
+        now_unix: i64,
+    ) -> Result<(), ProjectStoreError> {
+        let result = sqlx::query(
+            "UPDATE projects SET active_pipeline_id = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(pipeline_id.map(|p| &p.0))
+        .bind(now_unix)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(ProjectStoreError::NotFound(id.clone()));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -130,5 +151,36 @@ mod tests {
         let listed = store.list().await.unwrap();
         assert_eq!(listed[0].name, "Second");
         assert_eq!(listed[1].name, "First");
+    }
+
+    #[tokio::test]
+    async fn set_active_pipeline_updates_the_column() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+
+        let p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
+        store.insert(&p).await.unwrap();
+
+        store
+            .set_active_pipeline(&p.id, Some(&PipelineId("ddd-spec-plan-impl".into())), 200)
+            .await
+            .unwrap();
+
+        let reloaded = store.get(&p.id).await.unwrap();
+        assert_eq!(
+            reloaded.active_pipeline_id,
+            Some(PipelineId("ddd-spec-plan-impl".into()))
+        );
+        assert_eq!(reloaded.updated_at, 200);
+    }
+
+    #[tokio::test]
+    async fn set_active_pipeline_on_missing_project_is_not_found() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let result = store
+            .set_active_pipeline(&ProjectId("nope".into()), None, 1)
+            .await;
+        assert!(matches!(result, Err(ProjectStoreError::NotFound(_))));
     }
 }
