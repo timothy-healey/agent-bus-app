@@ -182,6 +182,7 @@ fn spawn_worker_loops(
                         .unwrap_or_default()
                 }
             }),
+            usage_sink: None,
         };
         let handle = handle.clone();
         let team = team.clone();

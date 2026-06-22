@@ -7,6 +7,7 @@ use crate::brake::Brake;
 use crate::router::{route, RouteError};
 use crate::task::{Task, TaskState};
 use crate::task_store::{TaskStore, TaskStoreError};
+use agent_bus_core::{UsageEvent, UsageSink};
 use pipeline::model::{Pipeline, Team};
 use runners::output::{InvocationRequest, Runner};
 use runners::scope::{cleanup, prepare, ScopeError};
@@ -53,6 +54,9 @@ pub struct PoolContext {
     /// Reads the team's prompt file content. Injected so tests don't touch disk
     /// for prompts. Production passes a closure that reads <root>/<team.prompt>.
     pub read_prompt: Arc<dyn Fn(&Team) -> String + Send + Sync>,
+    /// Where settled usage is published (the kernel seam, D2). None = drop usage
+    /// (the no-op case, e.g. before a project is open / in runtime-only tests).
+    pub usage_sink: Option<Arc<dyn UsageSink>>,
 }
 
 fn now_unix() -> i64 {
@@ -131,6 +135,25 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         task.parent_artifact = Some(ap.clone());
     }
 
+    // Publish usage to Telemetry (Customer-Supplier via the kernel UsageSink
+    // seam). Best-effort; a sink failure never blocks the settle.
+    // NOTE on the newtype boundary: `pipeline::model::Team.id` is a plain
+    // `String` (so is `InvocationRequest.team_id`), but the kernel
+    // `UsageEvent.team_id` is the `TeamId` newtype — wrap it explicitly with
+    // `TeamId(...)`. `task.id` is already a `TaskId`, so it passes through.
+    if let Some(sink) = &ctx.usage_sink {
+        sink.record(UsageEvent {
+            ts: now_unix(),
+            team_id: agent_bus_core::TeamId(team.id.clone()),
+            task_id: Some(task.id.clone()),
+            model: output.usage.model.clone(),
+            input_tokens: output.usage.input_tokens,
+            output_tokens: output.usage.output_tokens,
+            cache_creation: output.usage.cache_creation,
+            cache_read: output.usage.cache_read,
+        });
+    }
+
     // 6. ROUTE per verdict.
     settle_and_route(ctx, &mut task, output.verdict).await?;
     let reloaded = ctx.tasks.get(&task.id).await?;
@@ -182,6 +205,7 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use sqlx::SqlitePool;
     use std::str::FromStr;
+    use std::sync::Mutex;
 
     async fn fresh_pool() -> SqlitePool {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:").unwrap().foreign_keys(false);
@@ -214,6 +238,7 @@ mod tests {
             brake: Arc::new(Brake::new()),
             project_root: root,
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
+            usage_sink: None,
         }
     }
 
@@ -308,5 +333,55 @@ mod tests {
         let reloaded = ctx.tasks.get(&t.id).await.unwrap();
         assert_eq!(reloaded.state, TaskState::Queued);
         assert_eq!(reloaded.attempts, 1);
+    }
+
+    /// A test sink that records every event it receives.
+    struct RecordingSink(Mutex<Vec<UsageEvent>>);
+    impl UsageSink for RecordingSink {
+        fn record(&self, e: UsageEvent) {
+            self.0.lock().unwrap().push(e);
+        }
+    }
+
+    #[tokio::test]
+    async fn settle_emits_a_usage_event_to_the_sink() {
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("gate-1"), None)],
+            vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "research".into() }]);
+        let out = RunnerOutput {
+            verdict: Verdict::Approve,
+            artifact_path: Some("artifacts/analyses/a.md".into()),
+            final_text: "VERDICT: approve".into(),
+            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3 },
+        };
+        let mut ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(out)), temp_root());
+        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        ctx.usage_sink = Some(sink.clone());
+        let t = Task::injected("proj".into(), "p".into(), "research".into(), "topic".into(), None, 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].team_id.0, "research");
+        assert_eq!(events[0].task_id.as_ref().unwrap().0, t.id.0);
+        assert_eq!(events[0].input_tokens, 100);
+        assert_eq!(events[0].output_tokens, 20);
+        assert_eq!(events[0].model, "claude-opus-4-7");
+    }
+
+    #[tokio::test]
+    async fn no_usage_event_on_rate_limit() {
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("done"), None)], vec![]);
+        let runner = Arc::new(FakeRunner::new(vec![Err(RunnerError::RateLimited("429".into()))]));
+        let mut ctx = ctx_with(pool.clone(), p.clone(), runner, temp_root());
+        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        ctx.usage_sink = Some(sink.clone());
+        let t = Task::injected("proj".into(), "p".into(), "research".into(), "topic".into(), None, 100);
+        ctx.tasks.insert(&t).await.unwrap();
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 }
