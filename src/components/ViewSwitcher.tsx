@@ -1,13 +1,15 @@
-export type View = "board" | "pipeline";
+export type View = "board" | "list" | "pipeline" | "settings";
 
 export interface ViewSwitcherProps {
   active: View;
   onChange: (v: View) => void;
 }
 
-const tabs: { id: View; label: string }[] = [
+const tabs: { id: View; label: string; right?: boolean }[] = [
   { id: "board", label: "board" },
+  { id: "list", label: "list" },
   { id: "pipeline", label: "pipeline" },
+  { id: "settings", label: "settings", right: true },
 ];
 
 export function ViewSwitcher({ active, onChange }: ViewSwitcherProps) {
@@ -31,6 +33,7 @@ export function ViewSwitcher({ active, onChange }: ViewSwitcherProps) {
             aria-selected={selected}
             onClick={() => onChange(t.id)}
             style={{
+              marginLeft: t.right ? "auto" : undefined,
               background: selected ? "var(--surface-2)" : "transparent",
               border: "1px solid",
               borderColor: selected ? "var(--border-2)" : "transparent",
