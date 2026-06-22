@@ -23,3 +23,5 @@ tauri.workspace = true
 tauri-plugin-sql.workspace = true
 tokio.workspace = true
 agent_bus_core = { path = "../agent_bus_core" }
+workspace = { path = "../workspace" }
+sqlx = { workspace = true }
