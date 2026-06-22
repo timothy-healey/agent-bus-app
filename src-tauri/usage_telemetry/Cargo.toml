@@ -1,0 +1,18 @@
+[package]
+name = "usage_telemetry"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agent_bus_core = { path = "../agent_bus_core" }
+workspace = { path = "../workspace" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tauri = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

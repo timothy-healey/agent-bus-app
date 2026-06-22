@@ -28,4 +28,5 @@ pipeline = { path = "../pipeline" }
 runners = { path = "../runners" }
 runtime = { path = "../runtime" }
 review = { path = "../review" }
+usage_telemetry = { path = "../usage_telemetry" }
 sqlx = { workspace = true }

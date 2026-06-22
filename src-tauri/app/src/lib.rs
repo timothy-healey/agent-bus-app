@@ -68,6 +68,12 @@ pub fn run() {
             sql: include_str!("../migrations/004_comments_kind.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            description: "usage telemetry — worker_usage_log + cc_usage_log + usage_config",
+            sql: include_str!("../migrations/005_usage.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -115,10 +121,56 @@ pub fn run() {
                 };
                 handle.manage(review_state);
 
+                // Usage Telemetry (Plan 5). The WorkerUsageStore is the concrete
+                // UsageSink (kernel seam); the brake-state callback lets Telemetry
+                // read Runtime's brake without depending on the runtime crate.
+                use usage_telemetry::cc_log::CcUsageStore;
+                use usage_telemetry::worker_log::WorkerUsageStore;
+                let cc_store = Arc::new(CcUsageStore::new(pool.clone()));
+                let worker_usage = Arc::new(WorkerUsageStore::new(pool.clone()));
+                let usage_sink: Arc<dyn agent_bus_core::UsageSink> = worker_usage.clone();
+                let brake_for_cb = brake.clone();
+                handle.manage(usage_telemetry::api::UsageState {
+                    cc: cc_store.clone(),
+                    worker: worker_usage.clone(),
+                    pool: pool.clone(),
+                    is_braked: Arc::new(move || brake_for_cb.is_on()),
+                });
+
                 // Spawn one continuous worker loop per team. Each loop calls
                 // process_one_claim and emits task.changed on a settle.
                 if !pipe.teams.is_empty() {
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root);
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()));
+                }
+
+                // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
+                // decide() returns NoChange and nothing happens; when v1.1 flips
+                // the flag this trips/releases Runtime's brake by reason.
+                {
+                    let cc = cc_store.clone();
+                    let worker = worker_usage.clone();
+                    let brake = brake.clone();
+                    let pool = pool.clone();
+                    let handle = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        use usage_telemetry::api::load_config;
+                        use usage_telemetry::brake_policy::{BrakeDecision, AUTO_METER_REASON};
+                        use usage_telemetry::snapshot::{auto_brake_decision, compute_snapshot};
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                            let cfg = load_config(&pool).await;
+                            if !cfg.auto_meter_enabled { continue; }
+                            let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
+                            let now = now_unix();
+                            if let Ok(snap) = compute_snapshot(&cc, &worker, &cfg, brake.is_on(), now).await {
+                                match auto_brake_decision(&snap, &cfg, auto_on) {
+                                    BrakeDecision::SetOn(reason) => { brake.set_on(reason); let _ = handle.emit("usage.changed", ()); }
+                                    BrakeDecision::Release => { brake.set_off(); let _ = handle.emit("usage.changed", ()); }
+                                    BrakeDecision::NoChange => {}
+                                }
+                            }
+                        }
+                    });
                 }
             });
             Ok(())
@@ -146,6 +198,8 @@ pub fn run() {
             review::api::list_comments,
             review::api::delete_comment,
             review::api::record_verdict,
+            usage_telemetry::api::usage_snapshot,
+            usage_telemetry::api::usage_set_budget,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -160,6 +214,7 @@ fn spawn_worker_loops(
     tasks: Arc<TaskStore>,
     brake: Arc<Brake>,
     project_root: String,
+    usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
 ) {
     let runner: Arc<dyn runners::output::Runner> = Arc::new(ClaudeCliRunner::new());
     for team in pipeline.teams.clone() {
@@ -176,6 +231,7 @@ fn spawn_worker_loops(
                         .unwrap_or_default()
                 }
             }),
+            usage_sink: usage_sink.clone(),
         };
         let handle = handle.clone();
         let team = team.clone();
@@ -184,10 +240,15 @@ fn spawn_worker_loops(
                 match process_one_claim(&ctx, &team).await {
                     Ok(runtime::pool::ClaimOutcome::Settled { task_id, .. }) => {
                         let _ = handle.emit("task.changed", task_id);
+                        // A settle recorded worker usage; tell the meter to refresh.
+                        let _ = handle.emit("usage.changed", ());
                     }
                     Ok(runtime::pool::ClaimOutcome::RateLimited { .. }) => {
+                        // Reactive brake (spec) — already the behaviour; reason
+                        // surfaces on the meter via brake_state.
                         ctx.brake.set_on("rate-limit");
                         let _ = handle.emit("task.changed", "rate-limited");
+                        let _ = handle.emit("usage.changed", ());
                     }
                     _ => {}
                 }

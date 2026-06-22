@@ -10,9 +10,10 @@ import { BoardView } from "./components/BoardView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
 import { readArtifact, type Project } from "./ipc/workspace";
-import { approveGate, reviseGate, rejectGate, type Task } from "./ipc/runtime";
+import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
 import { instantiateTemplate, listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
+import { useUsage } from "./hooks/useUsage";
 
 export default function App() {
   const { projects, reload } = useProjects();
@@ -27,6 +28,21 @@ export default function App() {
 
   const openTask: Task | null =
     openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
+
+  const { snapshot: usage } = useUsage();
+  const [brake, setBrake] = useState<{ on: boolean; reason: string | null }>({ on: false, reason: null });
+
+  useEffect(() => {
+    brakeStateCmd().then(setBrake).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (usage) brakeStateCmd().then(setBrake).catch(() => {});
+  }, [usage?.braked]);
+
+  async function toggleBrake(next: boolean) {
+    const s = next ? await brakeOnCmd("manual") : await brakeOffCmd();
+    setBrake(s);
+  }
 
   // Load the open task's artifact body via the Workspace read_artifact OHS
   // command (D10). Empty until loaded / when the task has no artifact path.
@@ -124,7 +140,14 @@ export default function App() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      <Topbar activeProject={activeProject} onNewProject={() => setWizardOpen(true)} />
+      <Topbar
+        activeProject={activeProject}
+        onNewProject={() => setWizardOpen(true)}
+        usage={usage}
+        brakeOn={brake.on}
+        brakeReason={brake.reason ?? undefined}
+        onToggleBrake={toggleBrake}
+      />
       <ViewSwitcher active={view} onChange={setView} />
       <main style={{ flex: 1, overflow: "auto" }}>
         {view === "pipeline" ? (
@@ -135,6 +158,7 @@ export default function App() {
           <BoardView
             pipeline={pipeline}
             tasks={tasks}
+            tokensByTask={usage?.tokens_by_task ?? {}}
             onOpenCard={setOpenTaskId}
           />
         )}

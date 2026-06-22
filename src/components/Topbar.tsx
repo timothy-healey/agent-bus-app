@@ -1,12 +1,18 @@
 import { type Project } from "../ipc/workspace";
+import type { UsageSnapshot } from "../ipc/usage";
 import { ThemeToggle } from "./ThemeToggle";
+import { UsageMeter } from "./UsageMeter";
 
 export interface TopbarProps {
   activeProject: Project | null;
   onNewProject: () => void;
+  usage: UsageSnapshot | null;
+  brakeOn: boolean;
+  brakeReason?: string;
+  onToggleBrake: (next: boolean) => void;
 }
 
-export function Topbar({ activeProject, onNewProject }: TopbarProps) {
+export function Topbar({ activeProject, onNewProject, usage, brakeOn, brakeReason, onToggleBrake }: TopbarProps) {
   return (
     <header
       style={{
@@ -36,7 +42,40 @@ export function Topbar({ activeProject, onNewProject }: TopbarProps) {
         {activeProject ? activeProject.name : "No project"}
       </div>
 
-      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "var(--sp-4)" }}>
+        <UsageMeter snapshot={usage} />
+
+        <button
+          onClick={() => onToggleBrake(!brakeOn)}
+          title={brakeOn && brakeReason ? `reason: ${brakeReason}` : undefined}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            background: "transparent",
+            border: "1px solid var(--border)",
+            color: brakeOn ? "var(--danger)" : "var(--text-3)",
+            padding: "4px 10px",
+            fontFamily: "inherit",
+            fontSize: 12,
+            borderRadius: "var(--r-sm)",
+            cursor: "pointer",
+          }}
+        >
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: brakeOn ? "var(--danger)" : "var(--running)",
+            }}
+          />
+          {brakeOn ? "brake on" : "brake off"}
+          {brakeOn && brakeReason ? (
+            <span style={{ color: "var(--text-3)", fontSize: 11 }}>(reason: {brakeReason})</span>
+          ) : null}
+        </button>
+
         <button
           onClick={onNewProject}
           style={{
