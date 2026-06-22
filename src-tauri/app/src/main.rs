@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    agent_bus_app_scaffold_lib::run()
+    agent_bus_app_lib::run()
 }
