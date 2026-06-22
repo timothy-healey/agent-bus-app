@@ -4,7 +4,9 @@
 //! The `Runner` trait is the seam: real subprocess spawning lives only in
 //! ClaudeCliRunner; everything else is pure and fixture-tested.
 
+pub mod claude_cli;
 pub mod command;
+pub mod fake;
 pub mod output;
 pub mod scope;
 pub mod stream_json;
