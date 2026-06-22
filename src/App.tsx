@@ -7,6 +7,8 @@ import { PipelineView } from "./components/PipelineView";
 import { useProjects } from "./hooks/useProjects";
 import { useTasks } from "./hooks/useTasks";
 import { BoardView } from "./components/BoardView";
+import { ListView } from "./components/ListView";
+import { SettingsView } from "./components/SettingsView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
 import { readArtifact, type Project } from "./ipc/workspace";
@@ -14,6 +16,7 @@ import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as
 import { recordVerdict, addComment } from "./ipc/review";
 import { instantiateTemplate, listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
+import { setBudget } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
 import { useConversation } from "./hooks/useConversation";
 
@@ -27,6 +30,9 @@ export default function App() {
 
   const { tasks, reload: reloadTasks } = useTasks();
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  // A lineage click overrides which artifact the pane shows (D5: single pane).
+  const [lineagePath, setLineagePath] = useState<string | null>(null);
+  useEffect(() => setLineagePath(null), [openTaskId]);
 
   const openTask: Task | null =
     openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
@@ -55,7 +61,7 @@ export default function App() {
   const [artifactMarkdown, setArtifactMarkdown] = useState("");
   useEffect(() => {
     let cancelled = false;
-    const path = openTask?.review_artifact ?? openTask?.parent_artifact ?? null;
+    const path = lineagePath ?? openTask?.review_artifact ?? openTask?.parent_artifact ?? null;
     if (!openTask || !activeProject || !path) {
       setArtifactMarkdown("");
       return;
@@ -71,7 +77,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [openTask, activeProject]);
+  }, [openTask, activeProject, lineagePath]);
 
   // The upstream writer a gate's revise routes back to: the team whose
   // on_approve points at this gate (best-effort; falls back to a label).
@@ -158,8 +164,17 @@ export default function App() {
       <main style={{ flex: 1, overflow: "auto" }}>
         {view === "pipeline" ? (
           <PipelineView pipeline={pipeline} />
+        ) : view === "settings" ? (
+          <SettingsView usage={usage} onSetBudget={setBudget} />
         ) : activeProject == null ? (
           <ProjectList />
+        ) : view === "list" ? (
+          <ListView
+            tasks={tasks}
+            tokensByTask={usage?.tokens_by_task ?? {}}
+            now={Math.floor(Date.now() / 1000)}
+            onOpenCard={setOpenTaskId}
+          />
         ) : (
           <BoardView
             pipeline={pipeline}
@@ -176,6 +191,7 @@ export default function App() {
             task={openTask}
             artifactMarkdown={artifactMarkdown}
             reviseTarget={reviseTargetFor(openTask)}
+            onOpenArtifact={setLineagePath}
             onApprove={handleApprove}
             onRevise={handleRevise}
             onReject={handleReject}

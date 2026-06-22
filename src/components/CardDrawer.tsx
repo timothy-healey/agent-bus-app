@@ -4,9 +4,10 @@ import { useComments } from "../hooks/useComments";
 import { ArtifactView } from "./ArtifactView";
 import { CommentRail } from "./CommentRail";
 import { ReviseComposePanel } from "./ReviseComposePanel";
+import { LineageTab } from "./LineageTab";
 import { Button } from "./ui/Button";
 
-type Tab = "artifact" | "live log" | "review";
+type Tab = "artifact" | "live log" | "review" | "lineage";
 
 export interface CardDrawerProps {
   task: Task;
@@ -15,6 +16,9 @@ export interface CardDrawerProps {
   logText?: string;
   /// upstream writer the revise routes back to (for the panel summary).
   reviseTarget?: string;
+  /// Open an upstream artifact from the lineage tab (D5). When omitted, clicking
+  /// a lineage entry just switches to the artifact tab showing the current body.
+  onOpenArtifact?: (path: string) => void;
   onApprove: (taskId: string) => void;
   onRevise: (taskId: string, direction: string) => void;
   onReject: (taskId: string) => void;
@@ -25,6 +29,7 @@ export function CardDrawer({
   artifactMarkdown,
   logText,
   reviseTarget = "the writer",
+  onOpenArtifact,
   onApprove,
   onRevise,
   onReject,
@@ -90,6 +95,9 @@ export function CardDrawer({
         <button role="tab" aria-selected={tab === "review"} style={tabStyle("review")} onClick={() => setTab("review")}>
           review
         </button>
+        <button role="tab" aria-selected={tab === "lineage"} style={tabStyle("lineage")} onClick={() => setTab("lineage")}>
+          lineage
+        </button>
       </div>
 
       <div style={bodyWrap}>
@@ -135,6 +143,15 @@ export function CardDrawer({
               ? `review artifact: ${task.review_artifact}`
               : "no review artifact yet. gate actions are in the bar below."}
           </div>
+        )}
+        {tab === "lineage" && (
+          <LineageTab
+            task={task}
+            onOpenArtifact={(path) => {
+              onOpenArtifact?.(path);
+              setTab("artifact");
+            }}
+          />
         )}
       </div>
 
