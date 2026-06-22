@@ -46,6 +46,13 @@ vi.mock("./ipc/review", () => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue({ on: false, reason: null }) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("./hooks/useUsage", () => ({ useUsage: () => ({ snapshot: null, reload: vi.fn() }) }));
+vi.mock("./ipc/terminal", () => ({
+  getConversation: vi.fn().mockResolvedValue(null),
+  sendMessage: vi.fn().mockResolvedValue({
+    project_id: "p", session_id: "s", started_at: 0, last_message_at: 0,
+    turns: [], summary_of_prior_sessions: null, history_budget_tokens: 8000,
+  }),
+}));
 
 import App from "./App";
 
@@ -71,5 +78,11 @@ describe("App board integration", () => {
     await waitFor(() =>
       expect(screen.getAllByText("T-40").length).toBeGreaterThan(1),
     );
+  });
+
+  it("docks the god terminal at the bottom", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByText(/claude/i)).toBeInTheDocument());
+    expect(screen.getByPlaceholderText(/ask, inject, approve/i)).toBeInTheDocument();
   });
 });

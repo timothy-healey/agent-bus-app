@@ -41,6 +41,16 @@ pub async fn inject_topic(
     topic: String,
     target_repo: Option<String>,
 ) -> Result<Task, String> {
+    inject_topic_inner(&state, topic, target_repo).await
+}
+
+/// Reusable inner body for inject_topic — callable from the terminal dispatcher
+/// at the composition root (Plan 6) without a Tauri State wrapper.
+pub async fn inject_topic_inner(
+    state: &RuntimeState,
+    topic: String,
+    target_repo: Option<String>,
+) -> Result<Task, String> {
     let stage = entry_stage(&state.pipeline)?;
     let task = Task::injected(
         state.project_id.clone(),
@@ -59,7 +69,7 @@ pub async fn approve_gate(
     state: tauri::State<'_, RuntimeState>,
     task_id: String,
 ) -> Result<Task, String> {
-    apply_gate_verdict(&state, &task_id, Verdict::Approve).await
+    apply_gate_verdict_inner(&state, &task_id, Verdict::Approve).await
 }
 
 #[tauri::command]
@@ -67,7 +77,7 @@ pub async fn reject_gate(
     state: tauri::State<'_, RuntimeState>,
     task_id: String,
 ) -> Result<Task, String> {
-    apply_gate_verdict(&state, &task_id, Verdict::Reject).await
+    apply_gate_verdict_inner(&state, &task_id, Verdict::Reject).await
 }
 
 #[tauri::command]
@@ -75,13 +85,13 @@ pub async fn revise_gate(
     state: tauri::State<'_, RuntimeState>,
     task_id: String,
 ) -> Result<Task, String> {
-    apply_gate_verdict(&state, &task_id, Verdict::Revise).await
+    apply_gate_verdict_inner(&state, &task_id, Verdict::Revise).await
 }
 
 /// Apply an operator verdict at a gate: route to the gate's downstream (approve)
 /// or back to the upstream writer (revise) / escalate (reject). For revise we
 /// route to the team whose on_approve pointed at this gate.
-async fn apply_gate_verdict(
+pub async fn apply_gate_verdict_inner(
     state: &RuntimeState,
     task_id: &str,
     verdict: Verdict,
@@ -169,6 +179,11 @@ pub fn brake_state(state: tauri::State<'_, RuntimeState>) -> BrakeState {
 /// surface stable for Plan 6 without overbuilding worker concurrency in v1.
 #[tauri::command]
 pub fn scale_team(state: tauri::State<'_, RuntimeState>, team_id: String) -> Result<u32, String> {
+    scale_team_inner(&state, team_id)
+}
+
+/// Reusable inner body for scale_team — callable from the terminal dispatcher.
+pub fn scale_team_inner(state: &RuntimeState, team_id: String) -> Result<u32, String> {
     state
         .pipeline
         .teams
