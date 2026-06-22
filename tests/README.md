@@ -12,6 +12,8 @@ By crate:
 cargo test -p agent_bus_core
 cargo test -p workspace
 cargo test -p pipeline
+cargo test -p runners
+cargo test -p runtime
 ```
 
 ## Frontend (vitest)
