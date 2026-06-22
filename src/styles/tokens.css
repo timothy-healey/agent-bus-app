@@ -1,0 +1,62 @@
+/* OKLCH design tokens from DESIGN.md. Two themes via data-theme. */
+
+:root[data-theme="dark"] {
+  --bg:         oklch(11%  0.005 60);
+  --bg-2:       oklch(9%   0.004 60);
+  --surface:    oklch(15%  0.005 60);
+  --surface-2: oklch(18%  0.006 60);
+  --surface-3: oklch(22%  0.008 60);
+  --border:    oklch(24%  0.008 60);
+  --border-2:  oklch(32%  0.010 60);
+  --text:      oklch(92%  0.008 70);
+  --text-2:    oklch(72%  0.008 70);
+  --text-3:    oklch(55%  0.008 70);
+  --text-4:    oklch(42%  0.008 70);
+  --accent:    oklch(74%  0.13  55);
+  --accent-2:  oklch(20%  0.040 55);
+  --accent-3:  oklch(28%  0.060 55);
+  --accent-bd: oklch(48%  0.090 55);
+  --running:   oklch(72%  0.08  145);
+  --running-2: oklch(22%  0.030 145);
+  --revise:    oklch(70%  0.10  305);
+  --revise-2:  oklch(20%  0.035 305);
+  --danger:    oklch(70%  0.12  25);
+  --danger-2:  oklch(22%  0.04  25);
+  --shadow-card: 0 1px 2px oklch(0% 0.01 70 / 0.20),
+                 0 4px 12px oklch(0% 0.01 70 / 0.30);
+}
+
+:root[data-theme="light"] {
+  --bg:        oklch(98%  0.005 70);
+  --bg-2:      oklch(96%  0.006 70);
+  --surface:   oklch(99.5% 0.003 70);
+  --surface-2: oklch(96%  0.006 70);
+  --surface-3: oklch(93%  0.008 70);
+  --border:    oklch(89%  0.008 70);
+  --border-2:  oklch(82%  0.008 70);
+  --text:      oklch(22%  0.012 70);
+  --text-2:    oklch(45%  0.010 70);
+  --text-3:    oklch(60%  0.008 70);
+  --text-4:    oklch(72%  0.006 70);
+  --accent:    oklch(58%  0.135 55);
+  --accent-2:  oklch(96%  0.030 70);
+  --accent-3:  oklch(92%  0.050 60);
+  --accent-bd: oklch(80%  0.060 60);
+  --running:   oklch(48%  0.060 145);
+  --running-2: oklch(92%  0.020 145);
+  --revise:    oklch(48%  0.090 305);
+  --revise-2:  oklch(96%  0.020 305);
+  --danger:    oklch(48%  0.13  25);
+  --danger-2:  oklch(96%  0.02  25);
+  --shadow-card: 0 1px 2px oklch(20% 0.01 70 / 0.04),
+                 0 4px 12px oklch(20% 0.01 70 / 0.03);
+}
+
+/* spacing scale */
+:root {
+  --sp-1: 4px;   --sp-2: 8px;   --sp-3: 12px;  --sp-4: 14px;
+  --sp-5: 16px;  --sp-6: 18px;  --sp-7: 20px;  --sp-8: 24px;
+  --sp-9: 28px;  --sp-10: 32px; --sp-12: 48px; --sp-14: 64px;
+  --r-xs: 2px;   --r-sm: 3px;   --r-md: 4px;   --r-lg: 6px;
+  --r-pill: 999px;
+}

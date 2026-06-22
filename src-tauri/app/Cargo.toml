@@ -1,0 +1,27 @@
+[package]
+name = "agent-bus-app"
+version = "0.1.0"
+edition = "2021"
+default-run = "agent-bus-app"
+
+[[bin]]
+name = "agent-bus-app"
+path = "src/main.rs"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name (Windows).
+name = "agent_bus_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-sql.workspace = true
+tokio.workspace = true
+agent_bus_core = { path = "../agent_bus_core" }
+workspace = { path = "../workspace" }
+sqlx = { workspace = true }
