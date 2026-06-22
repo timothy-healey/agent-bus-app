@@ -4,6 +4,7 @@
 //! composition root) just calls process_one_claim repeatedly per team.
 
 use crate::brake::Brake;
+use crate::revision::{compose_invocation_message, RevisionBundleReader};
 use crate::router::{route, RouteError};
 use crate::task::{Task, TaskState};
 use crate::task_store::{TaskStore, TaskStoreError};
@@ -57,6 +58,10 @@ pub struct PoolContext {
     /// Where settled usage is published (the kernel seam, D2). None = drop usage
     /// (the no-op case, e.g. before a project is open / in runtime-only tests).
     pub usage_sink: Option<Arc<dyn UsageSink>>,
+    /// Reads a task's persisted revise bundle (Plan 4 vet F1 consumer). None =
+    /// topic-only invocations (the no-op case / runtime-only tests). Concrete
+    /// reader is wired at the composition root over the comments table.
+    pub revision_reader: Option<Arc<dyn RevisionBundleReader>>,
 }
 
 fn now_unix() -> i64 {
@@ -90,7 +95,13 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         model: team.runner.model.clone(),
         thinking_budget: team.runner.effort.budget_tokens(),
         system_prompt: (ctx.read_prompt)(team),
-        user_message: invocation_message(&task),
+        user_message: compose_invocation_message(
+            &task.topic,
+            task.attempts,
+            ctx.revision_reader.as_deref(),
+            &task.id.0,
+        )
+        .await,
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
     };
@@ -164,11 +175,6 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
     })
 }
 
-/// Build the user message handed to the model. v1: the topic for a fresh run.
-fn invocation_message(task: &Task) -> String {
-    task.topic.clone()
-}
-
 /// Settle the task (DOMAIN.md canon verb **Settle** — "the worker finishing;
 /// emits a verdict event"): apply the router decision to the task and persist
 /// it. This is the named home of the spec's lifecycle step 5 (SETTLE) + step 6
@@ -239,6 +245,7 @@ mod tests {
             project_root: root,
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
             usage_sink: None,
+            revision_reader: None,
         }
     }
 
@@ -383,5 +390,47 @@ mod tests {
         ctx.tasks.insert(&t).await.unwrap();
         process_one_claim(&ctx, &p.teams[0]).await.unwrap();
         assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reclaim_includes_revise_bundle_in_invocation_message() {
+        use crate::revision::{FakeRevisionReader, RevisionBundle, RevisionNote};
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("done"), None)], vec![]);
+        let recorder = Arc::new(RecordingRunner::new(approve_output()));
+        let mut ctx = ctx_with(pool.clone(), p.clone(), recorder.clone(), temp_root());
+        ctx.revision_reader = Some(Arc::new(FakeRevisionReader {
+            bundle: RevisionBundle {
+                notes: vec![RevisionNote {
+                    anchor_text: Some("batch key".into()),
+                    note: "use per-row keys".into(),
+                    kind: "inline".into(),
+                }],
+            },
+        }));
+        let mut t = Task::injected("proj".into(), "p".into(), "research".into(), "Bulk write".into(), None, 100);
+        t.attempts = 2;
+        ctx.tasks.insert(&t).await.unwrap();
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+        let seen = recorder.last_message();
+        assert!(seen.starts_with("Bulk write"));
+        assert!(seen.contains("REVISION REQUEST (attempt 2)"));
+        assert!(seen.contains("use per-row keys"));
+    }
+
+    struct RecordingRunner {
+        out: RunnerOutput,
+        last: Mutex<String>,
+    }
+    impl RecordingRunner {
+        fn new(out: RunnerOutput) -> Self { Self { out, last: Mutex::new(String::new()) } }
+        fn last_message(&self) -> String { self.last.lock().unwrap().clone() }
+    }
+    #[async_trait::async_trait]
+    impl Runner for RecordingRunner {
+        async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError> {
+            *self.last.lock().unwrap() = req.user_message.clone();
+            Ok(self.out.clone())
+        }
     }
 }
