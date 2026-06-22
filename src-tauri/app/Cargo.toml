@@ -14,10 +14,12 @@ name = "agent_bus_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build.workspace = true
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-sql.workspace = true
+tokio.workspace = true
+agent_bus_core = { path = "../agent_bus_core" }
