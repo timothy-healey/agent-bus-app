@@ -1,7 +1,7 @@
-//! workspace — the Workspace context. Owns Project state + path resolution
-//! (path resolution lands in a later task; this file initially exposes only
-//! the Project type and store).
+//! workspace — the Workspace context.
 
 pub mod project;
+pub mod store;
 
 pub use project::*;
+pub use store::*;
