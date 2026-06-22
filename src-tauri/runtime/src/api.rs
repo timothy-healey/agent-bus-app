@@ -1,0 +1,246 @@
+//! Runtime OHS — the context's Tauri commands. These are the canonical
+//! operator actions (inject/approve/revise/reject/brake/scale) and the
+//! god-terminal app-tools (Plan 6 consumes tools()). The router decides where
+//! a gate verdict sends a task; these commands apply it + persist.
+
+use crate::brake::{Brake, BrakeState};
+use crate::router::route;
+use crate::task::{Task, TaskState};
+use crate::task_store::TaskStore;
+use agent_bus_core::{ToolSpec, Verdict};
+use pipeline::model::Pipeline;
+use serde_json::json;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Shared Runtime state held by Tauri's state manager.
+pub struct RuntimeState {
+    pub tasks: Arc<TaskStore>,
+    pub brake: Arc<Brake>,
+    /// The active pipeline, kept in memory for routing. Set at the composition
+    /// root once a project + pipeline are active.
+    pub pipeline: Arc<Pipeline>,
+    /// The active project id (one project open at a time in v1).
+    pub project_id: String,
+    /// The active project root path (for scope/worktree resolution).
+    pub project_root: String,
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// The pipeline's entry stage: the first declared team (spec/Plan 2 D5).
+fn entry_stage(p: &Pipeline) -> Result<String, String> {
+    p.teams.first().map(|t| t.id.clone()).ok_or_else(|| "pipeline has no teams".to_string())
+}
+
+#[tauri::command]
+pub async fn inject_topic(
+    state: tauri::State<'_, RuntimeState>,
+    topic: String,
+    target_repo: Option<String>,
+) -> Result<Task, String> {
+    let stage = entry_stage(&state.pipeline)?;
+    let task = Task::injected(
+        state.project_id.clone(),
+        state.pipeline.id.clone(),
+        stage,
+        topic,
+        target_repo,
+        now_unix(),
+    );
+    state.tasks.insert(&task).await.map_err(|e| e.to_string())?;
+    Ok(task)
+}
+
+#[tauri::command]
+pub async fn approve_gate(
+    state: tauri::State<'_, RuntimeState>,
+    task_id: String,
+) -> Result<Task, String> {
+    apply_gate_verdict(&state, &task_id, Verdict::Approve).await
+}
+
+#[tauri::command]
+pub async fn reject_gate(
+    state: tauri::State<'_, RuntimeState>,
+    task_id: String,
+) -> Result<Task, String> {
+    apply_gate_verdict(&state, &task_id, Verdict::Reject).await
+}
+
+#[tauri::command]
+pub async fn revise_gate(
+    state: tauri::State<'_, RuntimeState>,
+    task_id: String,
+) -> Result<Task, String> {
+    apply_gate_verdict(&state, &task_id, Verdict::Revise).await
+}
+
+/// Apply an operator verdict at a gate: route to the gate's downstream (approve)
+/// or back to the upstream writer (revise) / escalate (reject). For revise we
+/// route to the team whose on_approve pointed at this gate.
+async fn apply_gate_verdict(
+    state: &RuntimeState,
+    task_id: &str,
+    verdict: Verdict,
+) -> Result<Task, String> {
+    use agent_bus_core::TaskId;
+    let mut task = state.tasks.get(&TaskId(task_id.to_string())).await.map_err(|e| e.to_string())?;
+    if task.state != TaskState::Gated {
+        return Err(format!("task {task_id} is not gated"));
+    }
+    let now = now_unix();
+
+    match verdict {
+        Verdict::Approve => {
+            let routed = route(&state.pipeline, &task.current_stage, Verdict::Approve, task.attempts)
+                .map_err(|e| format!("{e:?}"))?;
+            task.state = routed.next_state;
+            task.current_stage = routed.next_stage;
+            task.updated_at = now;
+        }
+        Verdict::Revise => {
+            // Send back to the team whose on_approve targets this gate.
+            let upstream = state
+                .pipeline
+                .teams
+                .iter()
+                .find(|t| t.outputs.on_approve.as_deref() == Some(task.current_stage.as_str()))
+                .map(|t| t.id.clone());
+            match upstream {
+                Some(team_id) if task.attempts < crate::task::MAX_ATTEMPTS => {
+                    let _ = task.bump_attempts();
+                    task.current_stage = team_id;
+                    task.state = TaskState::Queued;
+                    task.updated_at = now;
+                }
+                _ => {
+                    task.current_stage = "needs-human".into();
+                    task.state = TaskState::NeedsHuman;
+                    task.updated_at = now;
+                }
+            }
+        }
+        Verdict::Reject => {
+            task.current_stage = "needs-human".into();
+            task.state = TaskState::NeedsHuman;
+            task.updated_at = now;
+        }
+    }
+    state.tasks.update(&task).await.map_err(|e| e.to_string())?;
+    Ok(task)
+}
+
+#[tauri::command]
+pub async fn list_tasks(
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<Vec<Task>, String> {
+    // Union of every state, ordered by creation; the board groups client-side.
+    let mut all = Vec::new();
+    for s in [TaskState::Queued, TaskState::Running, TaskState::Gated, TaskState::Revising,
+              TaskState::NeedsHuman, TaskState::Done, TaskState::Braked] {
+        all.extend(state.tasks.list_by_state(s).await.map_err(|e| e.to_string())?);
+    }
+    Ok(all)
+}
+
+#[tauri::command]
+pub fn brake_on(state: tauri::State<'_, RuntimeState>, reason: Option<String>) -> BrakeState {
+    state.brake.set_on(reason.unwrap_or_else(|| "manual".to_string()));
+    state.brake.state()
+}
+
+#[tauri::command]
+pub fn brake_off(state: tauri::State<'_, RuntimeState>) -> BrakeState {
+    state.brake.set_off();
+    state.brake.state()
+}
+
+#[tauri::command]
+pub fn brake_state(state: tauri::State<'_, RuntimeState>) -> BrakeState {
+    state.brake.state()
+}
+
+/// scale_team is acknowledged in v1 (worker spawn is fixed at one loop per team
+/// in Plan 3; manual scaling of concurrent workers is v1.1). Returns the team's
+/// configured max so the terminal can report the ceiling. This keeps the OHS
+/// surface stable for Plan 6 without overbuilding worker concurrency in v1.
+#[tauri::command]
+pub fn scale_team(state: tauri::State<'_, RuntimeState>, team_id: String) -> Result<u32, String> {
+    state
+        .pipeline
+        .teams
+        .iter()
+        .find(|t| t.id == team_id)
+        .map(|t| t.workers.max)
+        .ok_or_else(|| format!("unknown team: {team_id}"))
+}
+
+/// OHS contract — consumed by Conversational Control (Plan 6).
+pub fn tools() -> Vec<ToolSpec> {
+    let ctx = "runtime";
+    vec![
+        ToolSpec {
+            name: "inject_topic".into(),
+            description: "Inject a new topic into the pipeline's entry team inbox.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "topic": { "type": "string" }, "target_repo": { "type": ["string","null"] } },
+                "required": ["topic"]
+            }),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "approve_gate".into(),
+            description: "Approve a gated task, routing it to the gate's downstream.".into(),
+            input_schema: json!({ "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "reject_gate".into(),
+            description: "Reject a gated task (escalates to needs-human).".into(),
+            input_schema: json!({ "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "revise_gate".into(),
+            description: "Send a gated task back to its writer for revision.".into(),
+            input_schema: json!({ "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "brake_on".into(),
+            description: "Halt new claims (in-flight workers complete).".into(),
+            input_schema: json!({ "type": "object", "properties": { "reason": { "type": ["string","null"] } } }),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "brake_off".into(),
+            description: "Release the brake.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "scale_team".into(),
+            description: "Report a team's configured worker ceiling (v1).".into(),
+            input_schema: json!({ "type": "object", "properties": { "team_id": { "type": "string" } }, "required": ["team_id"] }),
+            supplier_context: ctx.into(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tools_are_all_runtime_slug_and_cover_canonical_actions() {
+        let t = tools();
+        assert!(t.iter().all(|s| s.supplier_context == "runtime"));
+        for name in ["inject_topic", "approve_gate", "reject_gate", "revise_gate", "brake_on", "brake_off", "scale_team"] {
+            assert!(t.iter().any(|s| s.name == name), "missing tool {name}");
+        }
+    }
+}
