@@ -62,6 +62,12 @@ pub fn run() {
             sql: include_str!("../migrations/003_runtime.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "review — comments.kind column",
+            sql: include_str!("../migrations/004_comments_kind.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -103,6 +109,12 @@ pub fn run() {
                     project_root: project_root.clone(),
                 });
 
+                // Review state (Plan 4).
+                let review_state = review::api::ReviewState {
+                    comments: std::sync::Arc::new(review::store::CommentStore::new(pool.clone())),
+                };
+                handle.manage(review_state);
+
                 // Spawn one continuous worker loop per team. Each loop calls
                 // process_one_claim and emits task.changed on a settle.
                 if !pipe.teams.is_empty() {
@@ -129,6 +141,10 @@ pub fn run() {
             runtime::api::brake_off,
             runtime::api::brake_state,
             runtime::api::scale_team,
+            review::api::add_comment,
+            review::api::list_comments,
+            review::api::delete_comment,
+            review::api::record_verdict,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
