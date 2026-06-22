@@ -17,3 +17,6 @@ code, .mono {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
+
+.usage-tooltip { display: none; }
+.usage-meter-hoverable:hover .usage-tooltip { display: block; }
