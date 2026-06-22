@@ -352,6 +352,7 @@ fn spawn_worker_loops(
                 }
             }),
             usage_sink: usage_sink.clone(),
+            revision_reader: None,
         };
         let handle = handle.clone();
         let team = team.clone();

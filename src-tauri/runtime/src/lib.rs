@@ -24,4 +24,6 @@ pub mod pool;
 
 pub use pool::*;
 
+pub mod revision;
+
 pub mod api;
