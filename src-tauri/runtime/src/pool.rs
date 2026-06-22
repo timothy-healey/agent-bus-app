@@ -8,7 +8,7 @@ use crate::router::{route, RouteError};
 use crate::task::{Task, TaskState};
 use crate::task_store::{TaskStore, TaskStoreError};
 use pipeline::model::{Pipeline, Team};
-use runners::output::{InvocationRequest, Runner, RunnerError};
+use runners::output::{InvocationRequest, Runner};
 use runners::scope::{cleanup, prepare, ScopeError};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -178,7 +178,7 @@ mod tests {
     use pipeline::model::{Gate, Routes, RunnerConfig, Scope, Workers};
     use agent_bus_core::{EffortMode, RunnerKind};
     use runners::fake::FakeRunner;
-    use runners::output::{RunnerOutput, RunnerUsage};
+    use runners::output::{RunnerError, RunnerOutput, RunnerUsage};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use sqlx::SqlitePool;
     use std::str::FromStr;
