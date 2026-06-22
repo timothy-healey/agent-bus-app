@@ -15,7 +15,7 @@ export interface CreateProjectArgs {
 }
 
 export async function createProject(args: CreateProjectArgs): Promise<Project> {
-  return await invoke<Project>("workspace_create_project", args);
+  return await invoke<Project>("workspace_create_project", { ...args });
 }
 
 export async function listProjects(): Promise<Project[]> {
