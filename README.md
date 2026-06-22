@@ -6,18 +6,21 @@ The predecessor system was a tmux + bash-supervised file-queue (see `~/agent-bus
 
 ## Status
 
-**Plan 2 complete** — Pipeline Authoring context. YAML pipeline schema (parse +
-validate), the bundled DDD spec→plan→impl template, the Workspace
-path-resolution kernel, and a read-only pipeline viewer reachable from the view
-switcher. Plan 1 (foundation: project wizard + persistence + theme) remains.
-Runtime/Review/Telemetry/Conversational Control are Plans 3–6.
+**Plan 3 complete** — Runtime + Runners. Task lifecycle state machine,
+atomic-claim TaskStore, WorkerPool (one tokio loop per team driving
+claim→invoke→settle→route), the pipeline router, the system brake, and the
+Runners ACL (Runner trait, fixture-tested claude-cli runner + Scope policy).
+Migration 003 adds tasks/workers/comments. The frontend has typed runtime IPC
++ a task.changed event hook. Plans 1–2 (foundation + Pipeline Authoring)
+remain. Review UI/board, Telemetry, and Conversational Control are Plans 4–6.
 
 - ✅ Brainstorm + spec
 - ✅ DDD model (7 bounded contexts, aggregates with invariants, relationships)
 - ✅ Vet pass (8 findings, all resolved)
 - ✅ Plan 1 (Foundation) — 17 tasks, implemented
 - ✅ Plan 2 (Pipeline Authoring) — 13 tasks, implemented
-- ⬜ Plans 3–7
+- ✅ Plan 3 (Runtime + Runners) — 17 tasks, implemented
+- ⬜ Plans 4–7
 
 ## Source-of-truth documents
 
@@ -69,7 +72,9 @@ src-tauri/
 ├── agent_bus_core/        shared kernel — ID newtypes, enums, OHS protocol
 ├── workspace/             Workspace context — projects + path-resolution kernel
 ├── pipeline/              Pipeline Authoring context — YAML schema, validation, templates
-└── app/                   composition root — Tauri runtime + migrations
+├── runners/               Runners ACL — Runner trait, claude-cli runner, Scope policy
+├── runtime/               Runtime context — Task + WorkerPool aggregates, router, brake
+└── app/                   composition root — Tauri runtime + migrations + worker loops
 ```
 
 Frontend:
