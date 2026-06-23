@@ -21,6 +21,8 @@ const pipeline: Pipeline = {
   ],
   gates: [{ id: "gate-1-spec", label: "Gate 1 — Spec Approval", downstream: "planners" }],
   escalations: [{ id: "needs-human", triggers: ["attempts >= 3"] }],
+  forks: [],
+  joins: [],
 };
 
 describe("PipelineView", () => {
@@ -56,5 +58,24 @@ describe("PipelineView", () => {
   it("shows an empty-state when pipeline is null", () => {
     render(<PipelineView pipeline={null} />);
     expect(screen.getByText(/no pipeline/i)).toBeInTheDocument();
+  });
+
+  it("renders fork lanes and join downstream", () => {
+    const p: Pipeline = {
+      id: "p",
+      name: "Parallel",
+      description: "",
+      schema_version: 2,
+      teams: [],
+      gates: [],
+      escalations: [],
+      forks: [{ id: "fork-1", lanes: ["lane-a", "lane-b"] }],
+      joins: [{ id: "join-1", waits_for: ["lane-a", "lane-b"], downstream: "after" }],
+    };
+    render(<PipelineView pipeline={p} />);
+    expect(screen.getByText(/fork-1/)).toBeInTheDocument();
+    expect(screen.getByText(/lanes: lane-a, lane-b/)).toBeInTheDocument();
+    expect(screen.getByText(/join-1/)).toBeInTheDocument();
+    expect(screen.getByText(/→ after/)).toBeInTheDocument();
   });
 });

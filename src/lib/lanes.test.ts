@@ -16,6 +16,8 @@ function pipeline(): Pipeline {
     ],
     gates: [{ id: "gate-1-spec", label: "Gate 1 — Spec", downstream: "plan-writers" }],
     escalations: [{ id: "needs-human", triggers: [] }],
+    forks: [],
+    joins: [],
   };
 }
 
