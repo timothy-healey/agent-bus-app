@@ -14,12 +14,77 @@ body {
 }
 
 code, .mono {
-  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
+.reading-body {
+  font-family: var(--font-reading);
+}
+
+/* Global focus ring (DESIGN.md §States / §a11y). Inline styles cannot express
+   :focus-visible, so this single rule restores a visible accent ring app-wide. */
+:where(button, input, textarea, select, [role="tab"], a, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Tooltip is shown on hover OR keyboard focus-within (a11y A5). */
 .usage-tooltip { display: none; }
-.usage-meter-hoverable:hover .usage-tooltip { display: block; }
+.usage-meter-hoverable:hover .usage-tooltip,
+.usage-meter-hoverable:focus-within .usage-tooltip { display: block; }
+
+/* ── ui/* primitives as CSS classes (Decision 1, option B) ─────────────────
+   Inline styles can't express :hover/:focus/:active. These modifier classes
+   carry the per-variant pseudo-states the inline objects could not. */
+
+.abp-btn {
+  font-family: inherit;
+  border-radius: var(--r-sm);
+  border: 1px solid;
+  cursor: pointer;
+  font-size: var(--ts-sm);
+  padding: 7px 14px;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+.abp-btn-sm { padding: 4px 10px; }
+.abp-btn:active:not(:disabled) { transform: translateY(0.5px); }
+.abp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.abp-btn-default {
+  background: var(--surface-3);
+  border-color: var(--border-2);
+  color: var(--text);
+}
+.abp-btn-default:hover:not(:disabled) { border-color: var(--text-3); background: var(--surface-2); }
+
+.abp-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: oklch(15% 0.04 55);
+  font-weight: 500;
+}
+.abp-btn-primary:hover:not(:disabled) { background: var(--accent-3); border-color: var(--accent-3); }
+
+.abp-btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-2);
+}
+.abp-btn-ghost:hover:not(:disabled) { border-color: var(--border-2); color: var(--text); }
+
+.abp-btn-danger {
+  background: transparent;
+  border-color: oklch(35% 0.05 25);
+  color: var(--danger);
+}
+.abp-btn-danger:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-2); }
+
+/* Drawer tab / capsule tab hover + active (CardDrawer, PipelineEditor) */
+.abp-tab { transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out); }
+.abp-tab:hover { color: var(--text-2); }
 
 /* Motion — DESIGN.md §Motion. State, never decoration. */
 @keyframes abp-pulse {

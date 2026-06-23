@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 export type ButtonVariant = "default" | "primary" | "ghost" | "danger";
 
@@ -9,40 +9,13 @@ export interface ButtonProps {
   disabled?: boolean;
   onClick?: () => void;
   title?: string;
+  "aria-label"?: string;
+  "aria-expanded"?: boolean;
 }
 
-const base: CSSProperties = {
-  fontFamily: "inherit",
-  borderRadius: "var(--r-sm)",
-  border: "1px solid",
-  cursor: "pointer",
-  fontSize: 11.5,
-};
-
-const variants: Record<ButtonVariant, CSSProperties> = {
-  default: {
-    background: "var(--surface-3)",
-    borderColor: "var(--border-2)",
-    color: "var(--text)",
-  },
-  primary: {
-    background: "var(--accent)",
-    borderColor: "var(--accent)",
-    color: "oklch(15% 0.04 55)",
-    fontWeight: 500,
-  },
-  ghost: {
-    background: "transparent",
-    borderColor: "var(--border)",
-    color: "var(--text-2)",
-  },
-  danger: {
-    background: "transparent",
-    borderColor: "oklch(35% 0.05 25)",
-    color: "var(--danger)",
-  },
-};
-
+/// Button primitive. Styling lives in CSS classes (global.css) so hover/focus/
+/// active pseudo-states work — inline style objects cannot express them
+/// (DESIGN.md §States, audit Decision 1 / C2).
 export function Button({
   children,
   variant = "default",
@@ -50,22 +23,25 @@ export function Button({
   disabled = false,
   onClick,
   title,
+  "aria-label": ariaLabel,
+  "aria-expanded": ariaExpanded,
 }: ButtonProps) {
-  const sizing: CSSProperties =
-    size === "sm" ? { padding: "4px 10px" } : { padding: "7px 14px" };
+  const className = [
+    "abp-btn",
+    `abp-btn-${variant}`,
+    size === "sm" ? "abp-btn-sm" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <button
       type="button"
+      className={className}
       title={title}
+      aria-label={ariaLabel}
+      aria-expanded={ariaExpanded}
       disabled={disabled}
       onClick={disabled ? undefined : onClick}
-      style={{
-        ...base,
-        ...sizing,
-        ...variants[variant],
-        opacity: disabled ? 0.5 : 1,
-        cursor: disabled ? "not-allowed" : "pointer",
-      }}
     >
       {children}
     </button>

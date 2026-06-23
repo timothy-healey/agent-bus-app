@@ -1,15 +1,20 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useModalA11y } from "../../hooks/useModalA11y";
 
 export interface DrawerProps {
   open: boolean;
   onClose: () => void;
   children: ReactNode;
+  /// Accessible name for the dialog. Defaults to a generic label.
+  label?: string;
 }
 
-export function Drawer({ open, onClose, children }: DrawerProps) {
+export function Drawer({ open, onClose, children, label = "detail" }: DrawerProps) {
   // Slide the panel in from the right on mount (DESIGN.md §Motion). Reduced
   // motion is honoured by the .abp-drawer-enter-active class (global.css guard).
   const [entered, setEntered] = useState(false);
+  // Focus trap + Escape-to-close + restore-focus (audit A1).
+  const panelRef = useModalA11y<HTMLElement>(open, onClose);
   useEffect(() => {
     if (!open) {
       setEntered(false);
@@ -24,7 +29,7 @@ export function Drawer({ open, onClose, children }: DrawerProps) {
   const backdrop: CSSProperties = {
     position: "fixed",
     inset: 0,
-    background: "oklch(0% 0 0 / 0.4)",
+    background: "var(--scrim)",
     zIndex: 40,
   };
   const panel: CSSProperties = {
@@ -59,7 +64,14 @@ export function Drawer({ open, onClose, children }: DrawerProps) {
   return (
     <>
       <div data-testid="drawer-backdrop" style={backdrop} onClick={onClose} />
-      <aside className="abp-drawer-enter-active" style={panel}>
+      <aside
+        ref={panelRef}
+        className="abp-drawer-enter-active"
+        style={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+      >
         <button
           type="button"
           aria-label="close"
