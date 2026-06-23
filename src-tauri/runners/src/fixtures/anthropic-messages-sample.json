@@ -1,0 +1,17 @@
+{
+  "id": "msg_01ABC",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-7",
+  "content": [
+    { "type": "text", "text": "Analysing the repository.\n" },
+    { "type": "text", "text": "VERDICT: approve\nARTIFACT: artifacts/analyses/T-1-v1.md" }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 1200,
+    "output_tokens": 32,
+    "cache_creation_input_tokens": 300,
+    "cache_read_input_tokens": 50
+  }
+}
