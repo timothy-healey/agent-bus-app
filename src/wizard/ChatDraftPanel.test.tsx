@@ -83,7 +83,7 @@ describe("ChatDraftPanel", () => {
         step="prompts"
         draft={addTeam(emptyDraft(), "research", "Research")}
         onDraftChange={() => {}}
-        renderDraft={(d, onChange) => {
+        renderDraft={(_d, onChange) => {
           captured = onChange;
           return <div />;
         }}
