@@ -9,6 +9,7 @@
 
 use crate::api::VerdictMarker;
 use crate::comment::{Comment, CommentKind};
+use crate::reanchor::{reanchor_comments, CommentStatus};
 use agent_bus_core::Verdict;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -90,4 +91,54 @@ fn verdict_marker_key_set_matches_ts() {
     assert_eq!(keys(&v), set(&["task_id", "verdict", "comment_count"]));
     assert_eq!(v["verdict"], Value::String("revise".into()));
     assert!(v["comment_count"].is_number());
+}
+
+/// Locks the `ReanchoredComment` wire shape (B1): a flattened `Comment` plus
+/// `status` (open/addressed) and `effective_offset` (number | null). Matches
+/// `src/ipc/review.ts` `interface ReanchoredComment`.
+#[test]
+fn reanchored_comment_key_set_matches_ts() {
+    let c = Comment {
+        id: "c1".into(),
+        task_id: "T-1".into(),
+        artifact_path: "artifacts/specs/T-1-v1.md".into(),
+        anchor_text: Some("quote".into()),
+        anchor_offset: Some(5),
+        note: "note".into(),
+        kind: CommentKind::Inline,
+        created_at: 1000,
+    };
+    let md = "<!-- addressed: c1 -->";
+    let out = reanchor_comments(std::slice::from_ref(&c), md);
+    let v = serde_json::to_value(&out[0]).unwrap();
+    assert_eq!(
+        keys(&v),
+        set(&[
+            "id",
+            "task_id",
+            "artifact_path",
+            "anchor_text",
+            "anchor_offset",
+            "note",
+            "kind",
+            "created_at",
+            "status",
+            "effective_offset",
+        ]),
+    );
+    assert_eq!(v["status"], Value::String("addressed".into()));
+    assert!(v["effective_offset"].is_number());
+}
+
+/// Locks `src/ipc/review.ts` `type CommentStatus = "open" | "addressed"`.
+#[test]
+fn comment_status_matches_ts_string_union() {
+    assert_eq!(
+        serde_json::to_value(CommentStatus::Open).unwrap(),
+        Value::String("open".into())
+    );
+    assert_eq!(
+        serde_json::to_value(CommentStatus::Addressed).unwrap(),
+        Value::String("addressed".into())
+    );
 }

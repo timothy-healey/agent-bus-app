@@ -972,6 +972,7 @@ pub fn run() {
             runtime::api::scale_team,
             review::api::add_comment,
             review::api::list_comments,
+            review::api::reanchor_comments,
             review::api::delete_comment,
             review::api::record_verdict,
             usage_telemetry::api::usage_snapshot,

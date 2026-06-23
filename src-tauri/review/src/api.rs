@@ -1,5 +1,6 @@
 use crate::comment::Comment;
 use crate::comment::{CommentKind, NewComment};
+use crate::reanchor::{reanchor_comments as reanchor_project, ReanchoredComment};
 use crate::store::CommentStore;
 use agent_bus_core::tool_protocol::ToolSpec;
 use agent_bus_core::Verdict;
@@ -72,6 +73,25 @@ pub async fn list_comments(
         .map_err(|e| e.to_string())
 }
 
+/// Re-anchor a task's comments onto a viewed artifact version (B1). Pure,
+/// read-derived: lists the stored comments, parses `addressed: <id>` markers
+/// from `version_markdown`, and returns each comment with its derived status
+/// (`open`/`addressed`) and effective offset. Persists nothing; the Conformist
+/// seam to Runtime is untouched (no verdict, no Task-state change).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn reanchor_comments(
+    state: tauri::State<'_, ReviewState>,
+    task_id: String,
+    version_markdown: String,
+) -> Result<Vec<ReanchoredComment>, String> {
+    let comments = state
+        .comments
+        .list_for_task(&task_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(reanchor_project(&comments, &version_markdown))
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn delete_comment(
     state: tauri::State<'_, ReviewState>,
@@ -136,6 +156,22 @@ pub fn tools() -> Vec<ToolSpec> {
             supplier_context: "review".into(),
         },
         ToolSpec {
+            name: "reanchor_comments".into(),
+            description: "Re-anchor a task's comments onto a viewed artifact version using \
+                          <!-- addressed: <comment-id> --> markers; returns each comment with \
+                          a derived status (open/addressed) and effective offset."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "version_markdown": {"type": "string"}
+                },
+                "required": ["task_id", "version_markdown"]
+            }),
+            supplier_context: "review".into(),
+        },
+        ToolSpec {
             name: "record_verdict".into(),
             description: "Record a review verdict (approve/revise/reject) for a task.".into(),
             input_schema: json!({
@@ -162,6 +198,7 @@ mod tests {
         assert!(names.contains(&"add_comment"));
         assert!(names.contains(&"list_comments"));
         assert!(names.contains(&"record_verdict"));
+        assert!(names.contains(&"reanchor_comments"));
         assert!(specs.iter().all(|s| s.supplier_context == "review"));
     }
 

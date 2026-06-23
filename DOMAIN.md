@@ -91,6 +91,10 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Artifact** — a markdown document produced by a team (spec, plan, critique, review report). Versioned (`v1`, `v2`, …); immutable per version
 - **Comment** — a note anchored to a span in a specific artifact version
 - **Thread** — a comment + its resolutions across versions
+- **Addressed marker** — `<!-- addressed: <comment-id> -->`, an HTML comment a writer embeds into a later artifact version to signal it has resolved that comment (B1). Review's ubiquitous-language convention; an addressed marker is a **Thread** resolution made concrete in the artifact text.
+- **Re-anchoring** — the read-derived projection (no persistence) that computes a **Thread**'s "resolutions across versions" for a viewed version: it overlays that version's `addressed` markers onto the stored comments — a marked comment is re-anchored to the marker's position with status `addressed`; an unmarked prior comment carries over with status `open`. Distinct from B2's display-only line-diff (which classifies line identity and never touches comment identity).
+- **Comment status** — the per-version read of a **Thread**: `open` (carried over, not yet addressed in the viewed version) or `addressed` (a marker re-anchored it here). Derived per viewed version, never stored; the Conformist seam to Runtime (verdicts) is untouched.
+- **Re-anchored (effective) offset** — a comment's anchor position *in the viewed version*: the `addressed` marker's offset when addressed, else the stored `anchor_offset`. Surfaced on the wire as `effective_offset`; derived, never stored.
 - **Send back** — the act of bundling comments + optional direction and emitting a `revise` verdict
 
 ### Usage Telemetry
