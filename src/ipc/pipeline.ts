@@ -82,6 +82,11 @@ export interface Join {
   id: string;
   waits_for: string[];
   downstream: string;
+  /** Early-cancel policy (P2). When true, the join resolves to needs-human the
+   *  moment one lane fails, cancelling the outstanding lanes. Optional; absent =
+   *  the full-barrier default. Backend field is `cancel_on_reject` (serde default
+   *  false). */
+  cancel_on_reject?: boolean;
 }
 
 export interface Pipeline {
