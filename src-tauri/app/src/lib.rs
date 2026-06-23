@@ -1214,6 +1214,12 @@ fn spawn_worker_loops(
             revision_reader: revision_reader.clone(),
             log_sink: log_sink.clone(),
             audit: audit.clone(),
+            // S3: OS sandbox confinement is EXPERIMENTAL, macOS-only, Apple-
+            // deprecated, and OFF by default. Only the SBPL profile generation +
+            // argv-wrapping are verified; the live boundary is unproven here.
+            // TODO(s3): surface a config/Settings toggle once the live
+            // sandbox-exec boundary has been validated on macOS.
+            sandbox: false,
         };
         let handle = handle.clone();
         let team = team.clone();

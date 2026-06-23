@@ -110,7 +110,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Invocation** — one Claude call: CLI subprocess or API request
 - **Runner kind** — `claude-cli` (subscription) or `anthropic-api` (key)
 - **Effort** — thinking-token budget: `off` (0), `standard` (1024), `extended-low` (8192), `extended-high` (32000), `custom`
-- **Scope** — the per-invocation `settings.json` defining permission allow/deny
+- **Scope** — the per-invocation **permission policy** derived from a team's reads/writes/tools. Projected to Claude's `settings.json` (permission allow/deny) and, EXPERIMENTALLY (S3, opt-in, macOS-only, Apple-deprecated `sandbox-exec`), to an SBPL `sandbox-exec` profile. Both projections live in `runners/src/scope.rs` (`build_settings` / `sandbox_profile`); the SBPL idiom is sealed inside the Runners ACL and never crosses the `Runner` trait. The live OS confinement is structural-only (unverified) — NOT a proven security boundary.
 - **Log delta** — a display-only assistant-prose fragment the *streaming* worker invocation (`invoke_stream`) forwards via a `LogSink` (`Box<dyn Fn(&str)>`) as it runs; carries no verdict/artifact and never crosses the ACL as stream-json. Mirrors LLM Chat's prose delta (`DeltaSink`), kept as a separate type because the two ACLs are distinct (R4).
 
 ### Workspace

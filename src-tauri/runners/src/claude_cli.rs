@@ -24,8 +24,13 @@ impl ClaudeCliRunner {
     pub fn new() -> Self {
         Self {
             spawn: Box::new(|args: &[String]| {
-                let output = std::process::Command::new(CLAUDE_BIN)
-                    .args(args)
+                // args[0] is the program (CLAUDE_BIN, or sandbox-exec when the
+                // S3 wrap is active). args[1..] are its arguments.
+                let (program, rest) = args
+                    .split_first()
+                    .ok_or_else(|| RunnerError::Spawn("empty argv".into()))?;
+                let output = std::process::Command::new(program)
+                    .args(rest)
                     .output()
                     .map_err(|e| RunnerError::Spawn(e.to_string()))?;
                 Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -48,8 +53,16 @@ impl ClaudeCliRunner {
         req: &InvocationRequest,
         forward: &mut dyn FnMut(&str),
     ) -> Result<RunnerOutput, RunnerError> {
-        let args = build_args(req);
-        let stdout = (self.spawn)(&args)?;
+        let mut argv = vec![CLAUDE_BIN.to_string()];
+        argv.extend(build_args(req));
+        // S3 (EXPERIMENTAL · macOS-only): when a sandbox profile is present, wrap
+        // the whole argv in `sandbox-exec -p <profile>`. Default (None) = the
+        // plain `claude` argv, unchanged. Live confinement is UNVERIFIED here —
+        // only the argv construction is exercised by tests.
+        if let Some(profile) = &req.sandbox_profile {
+            argv = crate::command::sandbox_wrap(profile, &argv);
+        }
+        let stdout = (self.spawn)(&argv)?;
         parse_stream_streaming(&stdout, &req.model, forward)
     }
 }
@@ -91,6 +104,7 @@ mod tests {
             user_message: "go".into(),
             settings_path: "/tmp/s.json".into(),
             add_dirs: vec![],
+            sandbox_profile: None,
         }
     }
 
@@ -106,6 +120,35 @@ mod tests {
         assert_eq!(out.verdict, Verdict::Approve);
         assert_eq!(out.artifact_path.as_deref(), Some("a.md"));
         assert_eq!(out.usage.input_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn spawn_argv_starts_with_claude_bin_when_no_sandbox() {
+        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args| {
+            // program name is now the first argv element handed to the SpawnFn
+            assert_eq!(args[0], crate::command::CLAUDE_BIN);
+            assert!(args.iter().any(|a| a == "--print"));
+            assert!(!args.iter().any(|a| a == "sandbox-exec"));
+            Ok(canned.to_string())
+        }));
+        runner.invoke(&req()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_argv_is_sandbox_wrapped_when_profile_present() {
+        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args| {
+            assert_eq!(args[0], "sandbox-exec");
+            assert_eq!(args[1], "-p");
+            assert_eq!(args[2], "(version 1)(deny default)");
+            assert_eq!(args[3], crate::command::CLAUDE_BIN);
+            assert!(args.iter().any(|a| a == "--print"));
+            Ok(canned.to_string())
+        }));
+        let mut r = req();
+        r.sandbox_profile = Some("(version 1)(deny default)".into());
+        runner.invoke(&r).await.unwrap();
     }
 
     #[tokio::test]
