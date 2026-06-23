@@ -99,13 +99,16 @@ You are writing ONE team's responsibility prompt. Reply with prose, THEN a fence
 team_id must be one of the existing teams. Only the json mutates state.";
 
 const WIRING_SYSTEM_PROMPT: &str = "\
-You are wiring the pipeline's flow (routes + optional fork/join lanes). Reply with \
-prose, THEN a fenced ```json block, schema:\n\
+You are wiring the pipeline's flow (routes, optional fork/join lanes, and optional \
+human-review gates). Reply with prose, THEN a fenced ```json block, schema:\n\
 ```json\n{\"kind\":\"wiring\",\
 \"routes\":[{\"team_id\":\"<id>\",\"on_approve\":\"<id|null>\",\"on_revise\":null,\"on_reject\":null}],\
 \"forks\":[{\"id\":\"fork-1\",\"lanes\":[\"<team id>\",\"<team id>\"]}],\
-\"joins\":[{\"id\":\"join-1\",\"waits_for\":[\"<team id>\",\"<team id>\"],\"downstream\":\"<id>\"}]}\n```\n\
-A fork must have >=2 lanes; routes stay single-target. Only the json mutates state.";
+\"joins\":[{\"id\":\"join-1\",\"waits_for\":[\"<team id>\",\"<team id>\"],\"downstream\":\"<id>\"}],\
+\"gates\":[{\"id\":\"gate-1\",\"label\":\"<human-readable>\",\"downstream\":\"<id>\"}]}\n```\n\
+A gate is a human-review checkpoint: a team routes to it via on_approve, and the \
+gate forwards approved work to its downstream. A fork must have >=2 lanes; NEVER \
+place a gate inside a fork lane. routes stay single-target. Only the json mutates state.";
 
 /// Build the user message for a turn: the user's words plus the current draft as
 /// JSON, so manual edits the user made (the other half of the two-way binding,
@@ -328,5 +331,27 @@ mod tests {
         let runner = FakeChatRunner::new(vec![reply("looks good.")]);
         let out = design_session_turn(&runner, "sess-1", Step::Wiring, draft, "ok").await;
         assert!(out.issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wiring_turn_applies_a_gate_from_the_slice() {
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("plan-writers", "Plan Writers"));
+        draft.teams.push(DraftTeam::new("implementers", "Implementers"));
+        let canned = "Adding a human review gate.\n\n```json\n{\"kind\":\"wiring\",\
+            \"routes\":[{\"team_id\":\"plan-writers\",\"on_approve\":\"gate-2\",\"on_revise\":null,\"on_reject\":null}],\
+            \"forks\":[],\"joins\":[],\
+            \"gates\":[{\"id\":\"gate-2\",\"label\":\"Plan review\",\"downstream\":\"implementers\"}]}\n```";
+        let runner = FakeChatRunner::new(vec![reply(canned)]);
+        let out = design_session_turn(&runner, "sess-1", Step::Wiring, draft, "add a review gate").await;
+        assert_eq!(out.updated_draft.gates.len(), 1);
+        assert_eq!(out.updated_draft.gates[0].downstream, "implementers");
+        assert_eq!(out.updated_draft.teams.iter().find(|t| t.id == "plan-writers").unwrap().outputs.on_approve.as_deref(), Some("gate-2"));
+    }
+
+    #[test]
+    fn wiring_system_prompt_documents_the_gates_schema() {
+        assert!(WIRING_SYSTEM_PROMPT.contains("gates"));
+        assert!(WIRING_SYSTEM_PROMPT.contains("downstream"));
     }
 }
