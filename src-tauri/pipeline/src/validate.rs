@@ -39,32 +39,84 @@ pub enum PipelineValidationError {
     TeamHasNoRunner(String),
     #[error("join '{join}' quorum {quorum} out of range (must be 1..={lanes})")]
     QuorumOutOfRange { join: String, quorum: u32, lanes: u32 },
+    #[error("fork nesting exceeds the maximum depth of {max} (fork '{fork}' is at depth {depth})")]
+    NestingTooDeep { fork: String, depth: u32, max: u32 },
 }
 
-/// Walk a fork lane from its entry team forward via on_approve edges until the
-/// join is reached. Every hop must be a team (lanes are linear team chains — no
-/// gate, escalation, or nested fork may appear inside a lane).
-fn check_lane_linear(
+/// Max fork nesting depth (DD-P1-5). A top-level fork is depth 1; a fork reached
+/// from inside another fork's lane is depth 2; etc.
+const MAX_NESTING_DEPTH: u32 = 3;
+
+/// Walk a fork lane from its entry forward toward the join. P1: a lane may
+/// contain gates and nested forks (no longer strictly linear). A team hop
+/// follows on_approve; a gate hop follows the gate's downstream; a fork hop
+/// recurses — each nested lane must reach the nested fork's paired join, whose
+/// downstream continues the walk. Reaching `join_id` is success. `depth` tracks
+/// fork nesting for the bound. Bounded by node count to terminate.
+fn check_lane_reachable(
     p: &Pipeline,
     kinds: &HashMap<&str, NodeKind>,
     entry: &str,
     join_id: &str,
+    depth: u32,
 ) -> Result<(), PipelineValidationError> {
+    let bound = p.teams.len() + p.gates.len() + p.forks.len() + p.joins.len() + 1;
     let mut current = entry.to_string();
-    for _ in 0..=p.teams.len() {
+    for _ in 0..=bound {
         if current == join_id {
             return Ok(());
         }
-        if kinds.get(current.as_str()) != Some(&NodeKind::Team) {
-            return Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current.clone(), join: join_id.to_string() });
-        }
-        let team = p.teams.iter().find(|t| t.id == current).unwrap();
-        match team.outputs.on_approve.as_deref() {
-            Some(next) => current = next.to_string(),
-            None => return Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current.clone(), join: join_id.to_string() }),
+        match kinds.get(current.as_str()) {
+            Some(NodeKind::Team) => {
+                let team = p.teams.iter().find(|t| t.id == current).unwrap();
+                match team.outputs.on_approve.as_deref() {
+                    Some(next) => current = next.to_string(),
+                    None => return Err(PipelineValidationError::LaneNotLinear {
+                        entry: entry.to_string(), node: current.clone(), join: join_id.to_string() }),
+                }
+            }
+            Some(NodeKind::Gate) => {
+                let gate = p.gates.iter().find(|g| g.id == current).unwrap();
+                current = gate.downstream.clone();
+            }
+            Some(NodeKind::Fork) => {
+                if depth + 1 > MAX_NESTING_DEPTH {
+                    return Err(PipelineValidationError::NestingTooDeep {
+                        fork: current.clone(), depth: depth + 1, max: MAX_NESTING_DEPTH });
+                }
+                let fork = p.forks.iter().find(|f| f.id == current).unwrap();
+                // Pair the nested fork with the join whose lanes are all reachable
+                // from its lanes (one deeper level). Continue from that downstream.
+                // A NestingTooDeep encountered while resolving a nested lane must
+                // surface rather than be masked as a bare mismatch — probe the
+                // lanes against the candidate join and propagate that error.
+                let nested_join = p.joins.iter().find(|j| {
+                    fork.lanes.iter().all(|lane| check_lane_reachable(p, kinds, lane, &j.id, depth + 1).is_ok())
+                });
+                match nested_join {
+                    Some(j) => current = j.downstream.clone(),
+                    None => {
+                        for j in &p.joins {
+                            for lane in &fork.lanes {
+                                if let Err(e @ PipelineValidationError::NestingTooDeep { .. }) =
+                                    check_lane_reachable(p, kinds, lane, &j.id, depth + 1)
+                                {
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        return Err(PipelineValidationError::ForkJoinMismatch { fork: current.clone() });
+                    }
+                }
+            }
+            // An escalation, join (other than the target), or unknown node ends a
+            // lane that never reaches its join.
+            _ => return Err(PipelineValidationError::LaneNotLinear {
+                entry: entry.to_string(), node: current.clone(), join: join_id.to_string() }),
         }
     }
-    Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current, join: join_id.to_string() })
+    Err(PipelineValidationError::LaneNotLinear {
+        entry: entry.to_string(), node: current, join: join_id.to_string() })
 }
 
 /// Validate a Pipeline against the aggregate invariants. Returns Ok(()) when
@@ -189,14 +241,16 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
 
     for fork in &p.forks {
         let paired = p.joins.iter().find(|j| {
-            fork.lanes.iter().all(|lane| check_lane_linear(p, &kinds, lane, &j.id).is_ok())
+            fork.lanes.iter().all(|lane| check_lane_reachable(p, &kinds, lane, &j.id, 1).is_ok())
         });
         match paired {
             Some(_join) => {}
             None => {
+                // Surface the most specific lane error (depth/linearity) instead
+                // of a bare mismatch when possible.
                 if let Some(j) = p.joins.first() {
                     for lane in &fork.lanes {
-                        check_lane_linear(p, &kinds, lane, &j.id)?;
+                        check_lane_reachable(p, &kinds, lane, &j.id, 1)?;
                     }
                 }
                 return Err(PipelineValidationError::ForkJoinMismatch { fork: fork.id.clone() });
@@ -413,19 +467,48 @@ mod tests {
     use crate::model::Gate as GateNode;
 
     #[test]
-    fn a_gate_inside_a_lane_is_rejected() {
+    fn a_gate_inside_a_lane_is_now_accepted() {
+        // P1: a lane may contain a gate. lane-a -> gate-x -> join-1.
         let mut p = valid_v2_pipeline();
         p.teams[1].outputs.on_approve = Some("gate-x".into());
         p.gates.push(GateNode { id: "gate-x".into(), label: "X".into(), downstream: "join-1".into() });
-        assert_eq!(validate(&p), Err(PipelineValidationError::LaneNotLinear { entry: "lane-a".into(), node: "gate-x".into(), join: "join-1".into() }));
+        assert_eq!(validate(&p), Ok(()));
     }
 
     #[test]
-    fn a_nested_fork_inside_a_lane_is_rejected() {
+    fn a_nested_fork_inside_a_lane_is_now_accepted() {
+        // P1: lane-a is itself a fork. lane-a -> fork-2 {n1,n2} -> join-2 -> join-1.
         let mut p = valid_v2_pipeline();
         p.teams[1].outputs.on_approve = Some("fork-2".into());
-        p.forks.push(Fork { id: "fork-2".into(), lanes: vec!["lane-b".into(), "after".into()] });
-        assert_eq!(validate(&p), Err(PipelineValidationError::LaneNotLinear { entry: "lane-a".into(), node: "fork-2".into(), join: "join-1".into() }));
+        p.teams.push(lane_team("n1", "join-2"));
+        p.teams.push(lane_team("n2", "join-2"));
+        p.forks.push(Fork { id: "fork-2".into(), lanes: vec!["n1".into(), "n2".into()] });
+        p.joins.push(Join { id: "join-2".into(), waits_for: vec!["n1".into(), "n2".into()], downstream: "join-1".into(), cancel_on_reject: false, quorum: None });
+        assert_eq!(validate(&p), Ok(()));
+    }
+
+    #[test]
+    fn nesting_deeper_than_the_bound_is_rejected() {
+        // 4 levels of fork nesting exceeds the max depth (3).
+        let mut p = valid_v2_pipeline();
+        // lane-a -> fork-2 -> fork-3 -> fork-4 (each a single nested fork inside the prior lane)
+        p.teams[1].outputs.on_approve = Some("fork-2".into());
+        // fork-2 lanes
+        p.teams.push(lane_team("b1", "fork-3"));
+        p.teams.push(lane_team("b2", "join-2"));
+        p.forks.push(Fork { id: "fork-2".into(), lanes: vec!["b1".into(), "b2".into()] });
+        p.joins.push(Join { id: "join-2".into(), waits_for: vec!["b1".into(), "b2".into()], downstream: "join-1".into(), cancel_on_reject: false, quorum: None });
+        // fork-3 (depth 3) lanes
+        p.teams.push(lane_team("c1", "fork-4"));
+        p.teams.push(lane_team("c2", "join-3"));
+        p.forks.push(Fork { id: "fork-3".into(), lanes: vec!["c1".into(), "c2".into()] });
+        p.joins.push(Join { id: "join-3".into(), waits_for: vec!["c1".into(), "c2".into()], downstream: "join-2".into(), cancel_on_reject: false, quorum: None });
+        // fork-4 (depth 4 — too deep) lanes
+        p.teams.push(lane_team("d1", "join-4"));
+        p.teams.push(lane_team("d2", "join-4"));
+        p.forks.push(Fork { id: "fork-4".into(), lanes: vec!["d1".into(), "d2".into()] });
+        p.joins.push(Join { id: "join-4".into(), waits_for: vec!["d1".into(), "d2".into()], downstream: "join-3".into(), cancel_on_reject: false, quorum: None });
+        assert!(matches!(validate(&p), Err(PipelineValidationError::NestingTooDeep { .. })));
     }
 
     #[test]

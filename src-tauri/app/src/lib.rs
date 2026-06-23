@@ -44,6 +44,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (5, include_str!("../migrations/005_usage.sql")),
         (6, include_str!("../migrations/006_fanout.sql")),
         (7, include_str!("../migrations/007_invocation_audit.sql")),
+        (8, include_str!("../migrations/008_nested_groups.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -748,6 +749,12 @@ pub fn run() {
             sql: include_str!("../migrations/007_invocation_audit.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            description: "nested groups — fanout_groups.parent_group_id + parent_lane",
+            sql: include_str!("../migrations/008_nested_groups.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -1275,7 +1282,7 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 7, "all seven migrations recorded");
+        assert_eq!(version, 8, "all eight migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
