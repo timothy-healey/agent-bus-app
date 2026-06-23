@@ -150,6 +150,67 @@ fn make_conversation_delta_sink(handle: tauri::AppHandle) -> ConversationDeltaEm
     ConversationDeltaEmitter { sink, reset }
 }
 
+/// Coalescing buffer for one task's live-log fragments. Pure (no Tauri) so the
+/// flush/emit shape is unit-tested. `push` accumulates; `flush_if_due` and
+/// `force_flush` invoke the emit callback with `(task_id, combined_delta)` and
+/// clear the buffer. Mirrors the conversation.delta coalescing (R4 / C2 F1).
+pub struct TaskLogBuffer {
+    task_id: String,
+    text: String,
+    last: std::time::Instant,
+}
+
+impl TaskLogBuffer {
+    pub fn new(task_id: String) -> Self {
+        Self { task_id, text: String::new(), last: std::time::Instant::now() }
+    }
+
+    pub fn push(&mut self, frag: &str) {
+        self.text.push_str(frag);
+    }
+
+    /// Flush when ~50ms elapsed or the buffer reached ~80 chars (same thresholds
+    /// as the conversation.delta sink), emitting (task_id, delta) and clearing.
+    pub fn flush_if_due(&mut self, emit: &mut dyn FnMut(&str, &str)) {
+        let due = self.last.elapsed() >= std::time::Duration::from_millis(50)
+            || self.text.len() >= 80;
+        if due {
+            self.force_flush(emit);
+        }
+    }
+
+    /// Emit whatever is buffered (if any) and clear; resets the timer.
+    pub fn force_flush(&mut self, emit: &mut dyn FnMut(&str, &str)) {
+        if !self.text.is_empty() {
+            emit(&self.task_id, &self.text);
+            self.text.clear();
+        }
+        self.last = std::time::Instant::now();
+    }
+}
+
+/// Build a per-task `LogSink` factory that emits throttled `task.log` Tauri
+/// events `{ task_id, delta }`. Display-only: the payload is the task id + a
+/// prose fragment; no stream-json idiom crosses here. Each task gets its own
+/// coalescing buffer so concurrent workers' logs never interleave within a flush.
+fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::pool::LogSinkFactory> {
+    Arc::new(move |task_id: &str| -> runners::output::LogSink {
+        use std::sync::Mutex;
+        let buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
+        let handle = handle.clone();
+        Box::new(move |frag: &str| {
+            let mut b = buf.lock().unwrap();
+            b.push(frag);
+            b.flush_if_due(&mut |tid: &str, delta: &str| {
+                let _ = handle.emit(
+                    "task.log",
+                    serde_json::json!({ "task_id": tid, "delta": delta }),
+                );
+            });
+        })
+    })
+}
+
 /// The free-form chat engine for the god terminal (spec Consumer 1). A
 /// ConversationEngine that delegates each user turn to the llm_chat ACL. Lives
 /// at the composition root because it is the one place allowed to import both
@@ -836,7 +897,7 @@ pub fn run() {
                 if !pipe.teams.is_empty() {
                     let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                         Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone());
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())));
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -919,6 +980,7 @@ fn spawn_worker_loops(
     usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
     revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
     pool: sqlx::SqlitePool,
+    log_sink: Option<Arc<runtime::pool::LogSinkFactory>>,
 ) {
     let runner: Arc<dyn runners::output::Runner> = Arc::new(ClaudeCliRunner::new());
     let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
@@ -939,6 +1001,7 @@ fn spawn_worker_loops(
             }),
             usage_sink: usage_sink.clone(),
             revision_reader: revision_reader.clone(),
+            log_sink: log_sink.clone(),
         };
         let handle = handle.clone();
         let team = team.clone();
@@ -962,6 +1025,50 @@ fn spawn_worker_loops(
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod task_log_tests {
+    use super::TaskLogBuffer;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn buffer_coalesces_until_flushed_then_emits_task_id_and_delta() {
+        let emitted: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(vec![]));
+        let e = emitted.clone();
+        let mut buf = TaskLogBuffer::new("T-1".into());
+        // push two fragments; force_flush combines and emits once with the task id
+        buf.push("chunk-a ");
+        buf.push("chunk-b");
+        buf.force_flush(&mut |task_id: &str, delta: &str| {
+            e.lock().unwrap().push((task_id.to_string(), delta.to_string()));
+        });
+        assert_eq!(*emitted.lock().unwrap(), vec![("T-1".to_string(), "chunk-a chunk-b".to_string())]);
+    }
+
+    #[test]
+    fn force_flush_on_empty_buffer_emits_nothing() {
+        let emitted: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(vec![]));
+        let e = emitted.clone();
+        let mut buf = TaskLogBuffer::new("T-2".into());
+        buf.force_flush(&mut |t: &str, d: &str| e.lock().unwrap().push((t.to_string(), d.to_string())));
+        assert!(emitted.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flush_if_due_emits_once_buffer_exceeds_threshold() {
+        let emitted: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(vec![]));
+        let e = emitted.clone();
+        let mut buf = TaskLogBuffer::new("T-3".into());
+        // a >80-char fragment trips the size threshold immediately
+        let big = "x".repeat(90);
+        buf.push(&big);
+        buf.flush_if_due(&mut |t: &str, d: &str| e.lock().unwrap().push((t.to_string(), d.to_string())));
+        let got = emitted.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "T-3");
+        assert_eq!(got[0].1.len(), 90);
     }
 }
 
