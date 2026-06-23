@@ -62,6 +62,8 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
         p.teams.iter().map(|t| (t.id.as_str(), NodeKind::Team)).collect::<Vec<_>>(),
         p.gates.iter().map(|g| (g.id.as_str(), NodeKind::Gate)).collect::<Vec<_>>(),
         p.escalations.iter().map(|e| (e.id.as_str(), NodeKind::Escalation)).collect::<Vec<_>>(),
+        p.forks.iter().map(|f| (f.id.as_str(), NodeKind::Fork)).collect::<Vec<_>>(),
+        p.joins.iter().map(|j| (j.id.as_str(), NodeKind::Join)).collect::<Vec<_>>(),
     ]
     .concat()
     {
@@ -107,6 +109,31 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
             });
         }
         inbound.insert(gate.downstream.as_str());
+    }
+
+    let is_team = |id: &str| kinds.get(id) == Some(&NodeKind::Team);
+    for fork in &p.forks {
+        if fork.lanes.len() < 2 {
+            return Err(PipelineValidationError::ForkTooFewLanes(fork.id.clone()));
+        }
+        for lane in &fork.lanes {
+            if !is_team(lane) {
+                return Err(PipelineValidationError::ForkLaneNotTeam { fork: fork.id.clone(), lane: lane.clone() });
+            }
+            inbound.insert(lane.as_str());
+        }
+    }
+    for join in &p.joins {
+        for team in &join.waits_for {
+            if !is_team(team) {
+                return Err(PipelineValidationError::JoinWaitsForNotTeam { join: join.id.clone(), team: team.clone() });
+            }
+        }
+        if !kinds.contains_key(join.downstream.as_str()) {
+            return Err(PipelineValidationError::UnresolvedJoinDownstream { join: join.id.clone(), target: join.downstream.clone() });
+        }
+        inbound.insert(join.downstream.as_str());
+        inbound.insert(join.id.as_str());
     }
 
     // reachability: every team except the first declared (the entry team) must
@@ -249,7 +276,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn schema_version_two_is_accepted() {
         assert_eq!(validate(&valid_v2_pipeline()), Ok(()));
     }
@@ -266,5 +292,40 @@ mod tests {
         let mut p = valid_v2_pipeline();
         p.schema_version = 1;
         assert_eq!(validate(&p), Err(PipelineValidationError::ForkRequiresV2));
+    }
+
+    #[test]
+    fn fork_lane_must_resolve_to_a_team() {
+        let mut p = valid_v2_pipeline();
+        p.forks[0].lanes[0] = "ghost".into();
+        assert_eq!(validate(&p), Err(PipelineValidationError::ForkLaneNotTeam { fork: "fork-1".into(), lane: "ghost".into() }));
+    }
+
+    #[test]
+    fn join_waits_for_must_resolve_to_a_team() {
+        let mut p = valid_v2_pipeline();
+        p.joins[0].waits_for[1] = "ghost".into();
+        assert_eq!(validate(&p), Err(PipelineValidationError::JoinWaitsForNotTeam { join: "join-1".into(), team: "ghost".into() }));
+    }
+
+    #[test]
+    fn fork_with_one_lane_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.forks[0].lanes = vec!["lane-a".into()];
+        p.joins[0].waits_for = vec!["lane-a".into()];
+        assert_eq!(validate(&p), Err(PipelineValidationError::ForkTooFewLanes("fork-1".into())));
+    }
+
+    #[test]
+    fn join_downstream_must_resolve() {
+        let mut p = valid_v2_pipeline();
+        p.joins[0].downstream = "ghost".into();
+        assert_eq!(validate(&p), Err(PipelineValidationError::UnresolvedJoinDownstream { join: "join-1".into(), target: "ghost".into() }));
+    }
+
+    #[test]
+    fn fork_target_team_is_reachable_via_fork_lane() {
+        let p = valid_v2_pipeline();
+        assert_eq!(validate(&p), Ok(()));
     }
 }
