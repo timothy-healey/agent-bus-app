@@ -540,6 +540,7 @@ async fn load_active(
     let empty = Pipeline {
         id: String::new(), name: String::new(), description: String::new(),
         schema_version: pipeline::model::SCHEMA_VERSION,
+        defaults: None,
         teams: vec![], gates: vec![], escalations: vec![],
         forks: vec![], joins: vec![],
     };

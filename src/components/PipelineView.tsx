@@ -59,7 +59,8 @@ export function PipelineView({ pipeline }: PipelineViewProps) {
             {t.name} <span style={meta}>· {t.id}</span>
           </div>
           <div style={meta}>
-            {t.runner.kind} · {t.runner.model} · effort {effortLabel(t.runner.effort)} · workers{" "}
+            {t.runner?.kind ?? "—"} · {t.runner?.model ?? "—"} · effort{" "}
+            {t.runner?.effort ? effortLabel(t.runner.effort) : "—"} · workers{" "}
             {t.workers.default}/{t.workers.max}
           </div>
           <div style={{ ...meta, marginTop: 4 }}>

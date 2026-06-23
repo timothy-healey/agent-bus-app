@@ -125,7 +125,7 @@ pub fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pipeline::model::{Escalation, Gate, Routes, RunnerConfig, Scope, Team, Workers};
+    use pipeline::model::{Escalation, Gate, Routes, Scope, Team, TeamRunnerConfig, Workers};
     use agent_bus_core::{EffortMode, RunnerKind};
 
     fn team(id: &str, approve: Option<&str>, revise: Option<&str>, reject: Option<&str>) -> Team {
@@ -133,7 +133,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             prompt: format!("prompts/{id}.md"),
-            runner: RunnerConfig { kind: RunnerKind::ClaudeCli, model: "m".into(), effort: EffortMode::Standard, api_key_env: None },
+            runner: Some(TeamRunnerConfig { kind: Some(RunnerKind::ClaudeCli), model: Some("m".into()), effort: Some(EffortMode::Standard), api_key_env: None }),
             scope: Scope::default(),
             outputs: Routes { on_approve: approve.map(String::from), on_revise: revise.map(String::from), on_reject: reject.map(String::from) },
             workers: Workers::default(),
@@ -143,6 +143,7 @@ mod tests {
     fn pipe() -> Pipeline {
         Pipeline {
             id: "p".into(), name: "P".into(), description: String::new(), schema_version: 1,
+            defaults: None,
             teams: vec![
                 team("research", Some("gate-1"), None, Some("needs-human")),
                 team("writers", Some("done"), Some("research"), Some("needs-human")),
@@ -158,6 +159,7 @@ mod tests {
         use pipeline::model::{Fork, Join};
         Pipeline {
             id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            defaults: None,
             teams: vec![
                 team("entry", Some("fork-1"), None, Some("needs-human")),
                 team("lane-a", Some("join-1"), None, Some("needs-human")),

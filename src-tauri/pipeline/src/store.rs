@@ -44,8 +44,12 @@ impl PipelineStore {
         }
         let yaml = std::fs::read_to_string(&path)?;
         let pipeline = parse_pipeline(&yaml)?;
-        validate(&pipeline)?;
-        Ok(pipeline)
+        // R5: resolve pipeline defaults into each team BEFORE validating/returning
+        // so Runtime only ever sees fully-specified team runners (resolution stays
+        // a Pipeline Authoring concern — DOMAIN.md).
+        let resolved = crate::resolve::resolve_defaults(&pipeline);
+        validate(&resolved)?;
+        Ok(resolved)
     }
 
     /// List the ids of all *.yaml pipelines in the project's pipelines/ dir.
@@ -73,7 +77,11 @@ impl PipelineStore {
     /// to write an invalid graph (spec → Pipeline editor: "Invalid graphs …
     /// refuse to save with a clear error").
     pub fn save(&self, pipeline: &Pipeline) -> Result<(), PipelineStoreError> {
-        validate(pipeline)?;
+        // R5: validate the RESOLVED form (a team may legitimately omit fields it
+        // inherits from pipeline defaults) but persist the AUTHORED form so
+        // defaults + omitted team runners stay compact on disk.
+        let resolved = crate::resolve::resolve_defaults(pipeline);
+        validate(&resolved)?;
         let dir = pipelines_dir(&self.project_root);
         std::fs::create_dir_all(&dir)?;
         let yaml = serde_yaml::to_string(pipeline)?;
@@ -110,14 +118,15 @@ mod tests {
 
     #[test]
     fn save_round_trips_through_yaml() {
-        use crate::model::{Escalation, Pipeline, Routes, RunnerConfig, Scope, Team, Workers};
+        use crate::model::{Escalation, Pipeline, Routes, Scope, Team, TeamRunnerConfig, Workers};
         use agent_bus_core::{EffortMode, RunnerKind};
         let store = PipelineStore::new(temp_root());
         let p = Pipeline {
             id: "demo".into(), name: "Demo".into(), description: String::new(), schema_version: 1,
+            defaults: None,
             teams: vec![Team {
                 id: "research".into(), name: "Research".into(), prompt: "prompts/research.md".into(),
-                runner: RunnerConfig { kind: RunnerKind::ClaudeCli, model: "m".into(), effort: EffortMode::Standard, api_key_env: None },
+                runner: Some(TeamRunnerConfig { kind: Some(RunnerKind::ClaudeCli), model: Some("m".into()), effort: Some(EffortMode::Standard), api_key_env: None }),
                 scope: Scope::default(),
                 outputs: Routes { on_approve: Some("needs-human".into()), on_revise: None, on_reject: None },
                 workers: Workers::default(),
@@ -129,5 +138,41 @@ mod tests {
         store.save(&p).unwrap();
         let reloaded = store.load("demo").unwrap();
         assert_eq!(reloaded.name, "Demo");
+    }
+
+    #[test]
+    fn load_resolves_pipeline_defaults_into_each_team() {
+        use crate::model::{Escalation, Pipeline, PipelineDefaults, Routes, Scope, Team, Workers};
+        use agent_bus_core::{EffortMode, RunnerKind};
+        let store = PipelineStore::new(temp_root());
+        // author a pipeline whose team omits its runner; pipeline default supplies it
+        let p = Pipeline {
+            id: "demo".into(), name: "Demo".into(), description: String::new(),
+            schema_version: 2,
+            defaults: Some(PipelineDefaults {
+                default_runner: Some(RunnerKind::ClaudeCli),
+                default_model: Some("claude-opus-4-8".into()),
+                default_effort: Some(EffortMode::ExtendedHigh),
+            }),
+            teams: vec![Team {
+                id: "research".into(), name: "Research".into(), prompt: "prompts/research.md".into(),
+                runner: None, // inherits the whole default
+                scope: Scope::default(),
+                outputs: Routes { on_approve: Some("needs-human".into()), on_revise: None, on_reject: None },
+                workers: Workers::default(),
+            }],
+            gates: vec![],
+            escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![], joins: vec![],
+        };
+        // write the *authored* YAML directly to disk
+        let dir = workspace::paths::pipelines_dir(store.project_root());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("demo.yaml"), serde_yaml::to_string(&p).unwrap()).unwrap();
+
+        let loaded = store.load("demo").unwrap();
+        let er = loaded.teams[0].effective_runner();
+        assert_eq!(er.model, "claude-opus-4-8");
+        assert_eq!(er.effort, EffortMode::ExtendedHigh);
     }
 }
