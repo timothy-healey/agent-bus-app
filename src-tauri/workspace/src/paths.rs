@@ -105,6 +105,12 @@ pub fn pipelines_dir(project_root: &Path) -> PathBuf {
     project_root.join("pipelines")
 }
 
+/// The directory per-team prompt markdown files live in, relative to a project
+/// root. Workspace owns this layout vocabulary (vet F1).
+pub fn prompts_dir(project_root: &Path) -> PathBuf {
+    project_root.join("prompts")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +166,10 @@ mod tests {
     #[test]
     fn pipelines_dir_is_project_root_join_pipelines() {
         assert_eq!(pipelines_dir(Path::new("/p")), PathBuf::from("/p/pipelines"));
+    }
+
+    #[test]
+    fn prompts_dir_is_project_root_join_prompts() {
+        assert_eq!(prompts_dir(Path::new("/p")), PathBuf::from("/p/prompts"));
     }
 }
