@@ -106,4 +106,41 @@ describe("CardDrawer", () => {
     fireEvent.click(lineage);
     expect(screen.getByText("topic")).toBeInTheDocument();
   });
+
+  it("raises onCompare when two versions are picked in the lineage tab", () => {
+    const onCompare = vi.fn();
+    render(
+      <CardDrawer
+        task={task({ parent_artifact: "artifacts/T-40-v1.md", review_artifact: "artifacts/T-40-rev.md" })}
+        artifactMarkdown="# Plan"
+        onCompare={onCompare}
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /lineage/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^compare/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /T-40-v1\.md/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /T-40-rev\.md/ }));
+    expect(onCompare).toHaveBeenCalledWith("artifacts/T-40-v1.md", "artifacts/T-40-rev.md");
+  });
+
+  it("renders the compare view in the lineage tab when compareMarkdown is supplied", () => {
+    render(
+      <CardDrawer
+        task={task({ parent_artifact: "artifacts/T-40-v1.md", review_artifact: "artifacts/T-40-rev.md" })}
+        artifactMarkdown="# Plan"
+        compareMarkdown={{ left: "# Plan\n\nv1 body", right: "# Plan\n\nrev body" }}
+        compareLabels={{ left: "T-40-v1.md", right: "T-40-rev.md" }}
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /lineage/i }));
+    expect(screen.getByTestId("compare-view")).toBeInTheDocument();
+    expect(screen.getByText(/v1 body/)).toBeInTheDocument();
+    expect(screen.getByText(/rev body/)).toBeInTheDocument();
+  });
 });
