@@ -66,6 +66,30 @@ impl FanOutGroup {
     pub fn early_cancel_continuation(&self) -> Continuation {
         Continuation::NeedsHuman
     }
+
+    /// The continuation under a quorum policy (P3): proceed to `downstream` as
+    /// soon as `quorum` lanes approve (early-resolve on success); resolve to
+    /// needs-human once reaching `quorum` is impossible (unsettled lanes plus
+    /// approvals-so-far < quorum); otherwise `None` (keep waiting). The aggregate
+    /// owns this rule — the store asks for it behind the completes-once guard.
+    /// A reject/revise-cap lane simply counts as a non-approval; quorum governs
+    /// success, so `cancel_on_reject` does not apply when a quorum is set.
+    ///
+    /// Precondition (vet F2): the caller passes a validated quorum in
+    /// `1..=expected_lanes.len()` — `validate.rs` enforces this at load/save, so
+    /// the aggregate never sees an out-of-range value. `saturating_sub` below
+    /// keeps the arithmetic panic-free regardless.
+    pub fn quorum_continuation(&self, recorded: &[LaneVerdict], quorum: u32) -> Option<Continuation> {
+        let approvals = recorded.iter().filter(|r| r.verdict == Verdict::Approve).count() as u32;
+        if approvals >= quorum {
+            return Some(Continuation::Downstream(self.downstream.clone()));
+        }
+        let unsettled = (self.expected_lanes.len() as u32).saturating_sub(recorded.len() as u32);
+        if approvals + unsettled < quorum {
+            return Some(Continuation::NeedsHuman);
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +135,65 @@ mod tests {
         // forces needs-human, regardless of the other (unsettled) lanes.
         let g = group();
         assert_eq!(g.early_cancel_continuation(), Continuation::NeedsHuman);
+    }
+
+    fn group3() -> FanOutGroup {
+        FanOutGroup {
+            id: "G-3".into(),
+            pipeline: "pipe".into(),
+            join_target: "join-1".into(),
+            downstream: "after".into(),
+            expected_lanes: vec!["lane-a".into(), "lane-b".into(), "lane-c".into()],
+            completed: false,
+        }
+    }
+
+    #[test]
+    fn quorum_reached_resolves_downstream_without_waiting() {
+        let g = group3(); // 3 lanes, quorum 2
+        let recorded = vec![
+            LaneVerdict { lane: "lane-a".into(), verdict: Verdict::Approve },
+            LaneVerdict { lane: "lane-b".into(), verdict: Verdict::Approve },
+        ];
+        assert_eq!(g.quorum_continuation(&recorded, 2), Some(Continuation::Downstream("after".into())));
+    }
+
+    #[test]
+    fn quorum_not_yet_reached_keeps_waiting() {
+        let g = group3(); // 3 lanes, quorum 2
+        let recorded = vec![LaneVerdict { lane: "lane-a".into(), verdict: Verdict::Approve }];
+        // 1 approval, 2 unsettled: 1+2=3 >= 2, not yet 2 approvals => wait
+        assert_eq!(g.quorum_continuation(&recorded, 2), None);
+    }
+
+    #[test]
+    fn quorum_impossible_resolves_needs_human() {
+        let g = group3(); // 3 lanes, quorum 2
+        let recorded = vec![
+            LaneVerdict { lane: "lane-a".into(), verdict: Verdict::Reject },
+            LaneVerdict { lane: "lane-b".into(), verdict: Verdict::Reject },
+        ];
+        // 0 approvals, 1 unsettled: 0+1=1 < 2 => impossible => needs-human
+        assert_eq!(g.quorum_continuation(&recorded, 2), Some(Continuation::NeedsHuman));
+    }
+
+    #[test]
+    fn quorum_one_resolves_on_first_approval() {
+        let g = group3();
+        let recorded = vec![LaneVerdict { lane: "lane-a".into(), verdict: Verdict::Approve }];
+        assert_eq!(g.quorum_continuation(&recorded, 1), Some(Continuation::Downstream("after".into())));
+    }
+
+    #[test]
+    fn quorum_equal_to_lanes_is_all_must_approve() {
+        let g = group(); // 2 lanes, quorum 2
+        let one = vec![LaneVerdict { lane: "lane-a".into(), verdict: Verdict::Approve }];
+        assert_eq!(g.quorum_continuation(&one, 2), None); // still need lane-b
+        let both = vec![
+            LaneVerdict { lane: "lane-a".into(), verdict: Verdict::Approve },
+            LaneVerdict { lane: "lane-b".into(), verdict: Verdict::Approve },
+        ];
+        assert_eq!(g.quorum_continuation(&both, 2), Some(Continuation::Downstream("after".into())));
     }
 
     #[test]

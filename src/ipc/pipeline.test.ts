@@ -58,7 +58,7 @@ describe("pipeline ipc", () => {
       gates: [],
       escalations: [],
       forks: [{ id: "fork-1", lanes: ["a", "b"] }],
-      joins: [{ id: "join-1", waits_for: ["a", "b"], downstream: "after", cancel_on_reject: true }],
+      joins: [{ id: "join-1", waits_for: ["a", "b"], downstream: "after", cancel_on_reject: true, quorum: 2 }],
     };
     invokeMock.mockResolvedValueOnce(graph);
     const result = await loadPipeline("/p", "ddd-spec-plan-impl");
@@ -69,6 +69,14 @@ describe("pipeline ipc", () => {
     expect(result.forks[0].lanes).toEqual(["a", "b"]);
     expect(result.joins[0].downstream).toBe("after");
     expect(result.joins[0].cancel_on_reject).toBe(true);
+    expect(result.joins[0].quorum).toBe(2);
+  });
+
+  it("Join carries the optional quorum field", () => {
+    const j: Join = { id: "join-1", waits_for: ["a", "b", "c"], downstream: "after", quorum: 2 };
+    expect(j.quorum).toBe(2);
+    const j2: Join = { id: "join-2", waits_for: ["a", "b"], downstream: "after" };
+    expect(j2.quorum).toBeUndefined();
   });
 
   it("Join carries the optional cancel_on_reject early-cancel flag", () => {

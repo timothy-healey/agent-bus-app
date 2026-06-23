@@ -441,7 +441,7 @@ mod tests {
                 RouteEdge { team_id: "b".into(), on_approve: Some("join-1".into()), on_revise: None, on_reject: None },
             ],
             forks: vec![Fork { id: "fork-1".into(), lanes: vec!["a".into(), "b".into()] }],
-            joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "needs-human".into(), cancel_on_reject: false }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "needs-human".into(), cancel_on_reject: false, quorum: None }],
             gates: vec![],
         }));
         assert_eq!(d.teams.iter().find(|t| t.id == "entry").unwrap().outputs.on_approve.as_deref(), Some("fork-1"));
@@ -516,7 +516,7 @@ mod tests {
         d.teams.push(lb);
         d.teams.push(after);
         d.forks.push(Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] });
-        d.joins.push(Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false });
+        d.joins.push(Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: None });
         d.gates.push(Gate { id: "gate-x".into(), label: "X".into(), downstream: "join-1".into() });
         let issues = best_effort_validate(&d);
         assert!(issues.iter().any(|i| i.to_lowercase().contains("lane") && i.contains("gate-x")));

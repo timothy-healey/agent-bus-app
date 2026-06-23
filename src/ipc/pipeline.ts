@@ -87,6 +87,12 @@ export interface Join {
    *  the full-barrier default. Backend field is `cancel_on_reject` (serde default
    *  false). */
   cancel_on_reject?: boolean;
+  /** Quorum (P3): proceed to downstream once `quorum` lanes approve (N-of-M);
+   *  resolve to needs-human once reaching it is impossible. Omitted/undefined =
+   *  all-must-approve (the default barrier). Backend field is `quorum`
+   *  (`Option<u32>`, serde-skipped when None). When set, it governs success and
+   *  `cancel_on_reject` is ignored. */
+  quorum?: number;
 }
 
 export interface Pipeline {
