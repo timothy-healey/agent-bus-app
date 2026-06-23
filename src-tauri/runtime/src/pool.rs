@@ -364,18 +364,26 @@ async fn resolve_barrier(
     let lane = task.lane.clone().unwrap_or_default();
     let now = now_unix();
 
-    // Does this lane's join opt into early-cancel? (P2) Read it from the pipeline
-    // by the lane task's join_target. Default false => full-barrier behavior.
-    let early_cancel = task
+    // Find this lane's join in the pipeline (by the lane task's join_target) to
+    // read its resolution policy (P2 early-cancel, P3 quorum). Default => full
+    // barrier (all-must-approve).
+    let join = task
         .join_target
         .as_deref()
-        .and_then(|jt| ctx.pipeline.joins.iter().find(|j| j.id == jt))
-        .map(|j| j.cancel_on_reject)
-        .unwrap_or(false);
+        .and_then(|jt| ctx.pipeline.joins.iter().find(|j| j.id == jt));
+    // Quorum (P3) governs success; cancel_on_reject (P2) only applies to the
+    // default all-must-approve barrier (DD7 — quorum set => cancel_on_reject
+    // ignored).
+    let quorum = join.and_then(|j| j.quorum);
+    let early_cancel = quorum.is_none() && join.map(|j| j.cancel_on_reject).unwrap_or(false);
 
     let is_failure = verdict == agent_bus_core::Verdict::Reject;
 
-    let outcome = if early_cancel && is_failure {
+    let outcome = if let Some(q) = quorum {
+        ctx.fanout
+            .record_and_try_quorum(&group_id, &lane, verdict, q)
+            .await?
+    } else if early_cancel && is_failure {
         ctx.fanout
             .record_failure_and_early_cancel(&group_id, &lane, verdict)
             .await?
@@ -391,10 +399,11 @@ async fn resolve_barrier(
     task.updated_at = now;
     ctx.tasks.update(task).await?;
     if let BarrierOutcome::Completed(cont) = outcome {
-        // If WE won the early-cancel guard, stop the outstanding lanes so queued
-        // siblings aren't claimed+run wastefully (DD4/DD5). The continuation is
+        // Stop outstanding lanes when an early resolution wins so queued siblings
+        // aren't claimed+run wastefully (DD4/DD5): an early-cancel (P2) OR a
+        // quorum (P3) decided before all lanes settled. The continuation is
         // created regardless; cancellation only trims waste.
-        if early_cancel && is_failure {
+        if (early_cancel && is_failure) || quorum.is_some() {
             ctx.tasks.cancel_outstanding_lanes(&group_id, now_unix()).await?;
         }
         let (stage, state) = match cont {
@@ -961,5 +970,81 @@ mod tests {
         process_one_claim(&ctx, &p.teams[1]).await.unwrap();
         let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
         assert_eq!(nh.len(), 1);
+    }
+
+    // ---- P3: quorum joins (N-of-M) ----
+
+    fn pipeline_v2_forkjoin_quorum(q: u32) -> Pipeline {
+        let mut p = pipeline_v2_forkjoin();
+        p.joins[0].quorum = Some(q);
+        p
+    }
+
+    #[tokio::test]
+    async fn quorum_reached_resolves_downstream_before_other_lane_settles() {
+        // 2 lanes, quorum 1: lane-a approving alone meets quorum -> downstream
+        // continuation created immediately; lane-b is parked (cancelled).
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin_quorum(1);
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // entry -> fork -> lane-a, lane-b queued
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a approves -> quorum 1 met
+
+        // exactly one continuation at downstream, back in linear flow
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        let at_after: Vec<_> = queued.iter().filter(|q| q.current_stage == "after").collect();
+        assert_eq!(at_after.len(), 1, "quorum met -> one downstream continuation");
+        assert_eq!(at_after[0].group_id, None, "continuation is back in linear flow");
+
+        // lane-b was parked (cancelled) — not left queued; a worker claiming it idles.
+        assert!(queued.iter().all(|q| q.current_stage != "lane-b"),
+            "outstanding lane-b is cancelled once quorum resolves");
+        let idle = process_one_claim(&ctx, &p.teams[2]).await.unwrap();
+        assert_eq!(idle, ClaimOutcome::Idle, "no outstanding lane work remains");
+    }
+
+    #[tokio::test]
+    async fn quorum_impossible_resolves_needs_human_early() {
+        // 2 lanes, quorum 2: lane-b rejecting first makes quorum 2 impossible
+        // (0 approvals + 1 unsettled < 2) -> needs-human immediately; lane-a parked.
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin_quorum(2);
+        let reject = RunnerOutput { verdict: Verdict::Reject, artifact_path: None, final_text: "VERDICT: reject".into(), usage: RunnerUsage::default() };
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(StageRunner::new(reject)), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // lane-b rejects FIRST -> quorum impossible
+
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 1, "quorum impossible -> needs-human immediately");
+        assert_eq!(nh[0].current_stage, "needs-human");
+
+        // lane-a was parked, not left to run.
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert!(queued.iter().all(|q| q.current_stage != "lane-a"),
+            "outstanding lane-a is cancelled once quorum is impossible");
+    }
+
+    #[tokio::test]
+    async fn quorum_default_none_keeps_full_barrier() {
+        // No quorum (None): the full all-must-approve barrier path is unchanged —
+        // one lane approving parks without continuing.
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin(); // quorum None
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // only lane-a approves
+
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert!(queued.iter().all(|q| q.current_stage != "after"), "no continuation while a lane is outstanding (full barrier)");
+        assert!(queued.iter().any(|q| q.current_stage == "lane-b"), "lane-b still queued under the full barrier");
     }
 }
