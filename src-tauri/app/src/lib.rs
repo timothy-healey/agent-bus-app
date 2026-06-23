@@ -593,12 +593,9 @@ pub async fn create_project_from_draft_inner(
     root: String,
     draft: DraftPipeline,
 ) -> Result<Project, String> {
-    // 1. Serialize + HARD validate (gate before any write).
+    // 1. HARD validate + serialize (shared gate; nothing is written when invalid).
+    let (yaml_rel, yaml, prompts) = pipeline::draft::prepare_pipeline_write(&draft)?;
     let pipeline = draft.to_pipeline();
-    pipeline::validate::validate(&pipeline).map_err(|e| e.to_string())?;
-    let yaml = pipeline::draft::to_yaml(&pipeline).map_err(|e| e.to_string())?;
-    let prompts = pipeline::draft::prompt_files(&draft);
-    let yaml_rel = format!("pipelines/{}.yaml", pipeline.id);
 
     // 2. Create the project row (Workspace; ~ already expanded inside).
     let expanded = workspace::api::expand_tilde(&root, &std::env::var("HOME").unwrap_or_default());
@@ -630,6 +627,89 @@ async fn create_project_from_draft(
     draft: DraftPipeline,
 ) -> Result<Project, String> {
     create_project_from_draft_inner(&state, name, root, draft).await
+}
+
+/// Read every team's prompt file body via Workspace's escape-guarded path
+/// resolution, then convert the resolved Pipeline into an editable DraftPipeline
+/// (A1; vet: Workspace owns the file read, Pipeline Authoring owns the convert).
+/// Inner fn so it is testable without a Tauri State wrapper.
+pub async fn pipeline_to_draft_inner(
+    ws: &workspace::api::WorkspaceState,
+    project_id: String,
+    pipeline: &pipeline::model::Pipeline,
+) -> Result<DraftPipeline, String> {
+    let project = ws
+        .store
+        .get(&agent_bus_core::ProjectId(project_id))
+        .await
+        .map_err(|e| e.to_string())?;
+    let root = project.root_path.to_string_lossy().into_owned();
+    let mut bodies: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for team in &pipeline.teams {
+        let full = workspace::api::resolve_under_root(&root, &team.prompt)?;
+        // A missing prompt file is tolerated (empty body) — the editor seeds a
+        // blank prompt the operator can fill, rather than failing to open.
+        let body = std::fs::read_to_string(&full).unwrap_or_default();
+        bodies.insert(team.id.clone(), body);
+    }
+    Ok(DraftPipeline::from_pipeline(pipeline, &bodies))
+}
+
+/// OHS: load the project's pipeline (resolved) into an editable DraftPipeline,
+/// reading each team's prompt body back from disk. Seeds the in-app editor (A1).
+#[tauri::command(rename_all = "snake_case")]
+async fn pipeline_to_draft_cmd(
+    state: tauri::State<'_, WorkspaceState>,
+    project_id: String,
+    project_root: String,
+    id: String,
+) -> Result<DraftPipeline, String> {
+    let pipeline = pipeline::store::PipelineStore::new(project_root)
+        .load(&id)
+        .map_err(|e| e.to_string())?;
+    pipeline_to_draft_inner(&state, project_id, &pipeline).await
+}
+
+/// Orchestrate save-pipeline-edits (A1; mirrors create_project_from_draft_inner
+/// minus the row insert). HARD validate the draft's Pipeline; only on Ok overwrite
+/// the project's existing YAML + prompt files (Workspace owns the write) and keep
+/// the pipeline active. Nothing is written when invalid. Inner fn so it is
+/// unit-testable without a Tauri State wrapper.
+pub async fn save_pipeline_edits_inner(
+    ws: &workspace::api::WorkspaceState,
+    project_id: String,
+    draft: DraftPipeline,
+) -> Result<(), String> {
+    // 1. HARD validate + serialize (the shared gate; nothing is written when
+    //    invalid). vet F2: same core the create flow uses.
+    let (yaml_rel, yaml, prompts) = pipeline::draft::prepare_pipeline_write(&draft)?;
+    let pipeline_id = draft.to_pipeline().id;
+
+    // 2. Overwrite the YAML + prompt files (Workspace owns bytes-to-disk; the
+    //    project row already exists — do NOT insert, do NOT re-expand the root).
+    workspace::api::write_project_pipeline_inner(ws, project_id.clone(), yaml_rel, yaml, prompts)
+        .await?;
+
+    // 3. Keep the pipeline active (idempotent — typically already active; correct
+    //    if the active pointer was cleared).
+    ws.store
+        .set_active_pipeline(
+            &agent_bus_core::ProjectId(project_id),
+            Some(&agent_bus_core::PipelineId(pipeline_id)),
+            now_unix(),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// OHS command: hard-validate → overwrite the active pipeline's YAML + prompts.
+#[tauri::command(rename_all = "snake_case")]
+async fn save_pipeline_edits(
+    state: tauri::State<'_, WorkspaceState>,
+    project_id: String,
+    draft: DraftPipeline,
+) -> Result<(), String> {
+    save_pipeline_edits_inner(&state, project_id, draft).await
 }
 
 #[async_trait]
@@ -978,6 +1058,8 @@ pub fn run() {
             design_session_turn_cmd,
             best_effort_validate_cmd,
             create_project_from_draft,
+            pipeline_to_draft_cmd,
+            save_pipeline_edits,
             runtime::api::inject_topic,
             runtime::api::approve_gate,
             runtime::api::reject_gate,
@@ -1478,6 +1560,59 @@ mod design_session_tests {
         // active pipeline set to the draft id
         let reloaded = ws.store.get(&agent_bus_core::ProjectId(project.id.0.clone())).await.unwrap();
         assert_eq!(reloaded.active_pipeline_id.map(|p| p.0), Some("demo".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn save_pipeline_edits_overwrites_yaml_and_prompts() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let root = std::env::temp_dir().join(format!("abp-save-{}", uuid::Uuid::new_v4()));
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+            .await.unwrap();
+
+        // edit: change a team prompt body, then save
+        let mut edited = complete_draft("demo");
+        edited.teams[0].prompt_body = "REWRITTEN body".into();
+        save_pipeline_edits_inner(&ws, project.id.0.clone(), edited).await.unwrap();
+
+        let body = std::fs::read_to_string(root.join("prompts/research.md")).unwrap();
+        assert_eq!(body, "REWRITTEN body");
+        let reloaded = pipeline::store::PipelineStore::new(root.to_string_lossy().into_owned()).load("demo").unwrap();
+        assert_eq!(reloaded.id, "demo");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn save_pipeline_edits_rejects_an_invalid_draft_without_writing() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let root = std::env::temp_dir().join(format!("abp-save-bad-{}", uuid::Uuid::new_v4()));
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+            .await.unwrap();
+        let before = std::fs::read_to_string(root.join("prompts/research.md")).unwrap();
+
+        let mut bad = complete_draft("demo");
+        bad.teams[0].prompt_body = "should NOT be written".into();
+        bad.teams[0].outputs.on_approve = Some("ghost-node".into());
+        let err = save_pipeline_edits_inner(&ws, project.id.0.clone(), bad).await.unwrap_err();
+        assert!(!err.is_empty());
+        assert_eq!(std::fs::read_to_string(root.join("prompts/research.md")).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn pipeline_to_draft_inner_reads_prompt_bodies_back() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let root = std::env::temp_dir().join(format!("abp-todraft-{}", uuid::Uuid::new_v4()));
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+            .await.unwrap();
+        let loaded = pipeline::store::PipelineStore::new(root.to_string_lossy().into_owned()).load("demo").unwrap();
+
+        let draft = pipeline_to_draft_inner(&ws, project.id.0.clone(), &loaded).await.unwrap();
+        let research = draft.teams.iter().find(|t| t.id == "research").unwrap();
+        assert_eq!(research.prompt_body, "investigate");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
