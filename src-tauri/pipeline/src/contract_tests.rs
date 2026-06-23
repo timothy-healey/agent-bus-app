@@ -9,6 +9,7 @@
 
 use crate::model::{Escalation, Gate, Pipeline, Routes, RunnerConfig, Scope, Team, Workers};
 use crate::api::TemplateInfo;
+use crate::draft::{DraftPipeline, DraftTeam, Slice, SliceTeam, TeamsSlice};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -159,4 +160,34 @@ fn escalation_key_set_matches_ts() {
 fn template_info_key_set_matches_ts() {
     let v = serde_json::to_value(TemplateInfo { id: "research-review".into(), name: "Research + Review".into() }).unwrap();
     assert_eq!(keys(&v), set(&["id", "name"]));
+}
+
+/// Locks the DraftPipeline key set the wizard IPC mirrors (src/ipc/pipeline.ts).
+#[test]
+fn draft_pipeline_key_set_matches_ts() {
+    let mut d = DraftPipeline::empty();
+    d.id = "p".into();
+    d.name = "P".into();
+    d.teams.push(DraftTeam::new("research", "Research"));
+    let v = serde_json::to_value(&d).unwrap();
+    assert_eq!(
+        keys(&v),
+        set(&["id", "name", "description", "schema_version", "teams", "forks", "joins", "escalations"]),
+    );
+}
+
+/// Locks DraftTeam (carries prompt_body inline, not a path).
+#[test]
+fn draft_team_key_set_matches_ts() {
+    let v = serde_json::to_value(DraftTeam::new("research", "Research")).unwrap();
+    assert_eq!(keys(&v), set(&["id", "name", "prompt_body", "runner", "scope", "outputs", "workers"]));
+}
+
+/// Locks the internally-tagged Slice wire shape (kind discriminator).
+#[test]
+fn teams_slice_serialises_with_kind_tag() {
+    let s = Slice::Teams(TeamsSlice { teams: vec![SliceTeam { id: "a".into(), name: "A".into() }] });
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["kind"], serde_json::Value::String("teams".into()));
+    assert!(v["teams"].is_array());
 }
