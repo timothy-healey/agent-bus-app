@@ -12,7 +12,8 @@ import { ListView } from "./components/ListView";
 import { SettingsView } from "./components/SettingsView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
-import { readArtifact, type Project } from "./ipc/workspace";
+import { readArtifact, removeProject, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
+import { setRunnerApiKey, clearRunnerApiKey, getRunnerApiKeyStatus, ANTHROPIC_API_KEY_ID } from "./ipc/secrets";
 import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
 import { listPipelines, loadPipeline, pipelineToDraft, type DraftPipeline, type Pipeline } from "./ipc/pipeline";
@@ -51,6 +52,14 @@ export default function App() {
     openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
 
   const { snapshot: usage } = useUsage();
+
+  // S1: Settings — keychain api-key presence + git author config.
+  const [apiKeyPresent, setApiKeyPresent] = useState(false);
+  const [gitConfig, setGitConfigState] = useState<GitConfig>({ author_name: "", author_email: "" });
+  useEffect(() => {
+    getRunnerApiKeyStatus(ANTHROPIC_API_KEY_ID).then(setApiKeyPresent).catch(() => {});
+    getGitConfig().then(setGitConfigState).catch(() => {});
+  }, []);
   const { turns: convoTurns, send: sendToTerminal, streaming: convoStreaming } = useConversation();
   const terminalContext = pipeline
     ? `${pipeline.name} + ${pipeline.teams.length} teams`
@@ -211,7 +220,19 @@ export default function App() {
         {view === "pipeline" ? (
           <PipelineView pipeline={pipeline} onEdit={activeProject && pipeline ? openEditor : undefined} />
         ) : view === "settings" ? (
-          <SettingsView usage={usage} onSetBudget={setBudget} onSetAutoMeter={setAutoMeter} />
+          <SettingsView
+            usage={usage}
+            onSetBudget={setBudget}
+            onSetAutoMeter={setAutoMeter}
+            apiKeyPresent={apiKeyPresent}
+            onSetApiKey={async (k) => { await setRunnerApiKey(ANTHROPIC_API_KEY_ID, k); setApiKeyPresent(true); }}
+            onClearApiKey={async () => { await clearRunnerApiKey(ANTHROPIC_API_KEY_ID); setApiKeyPresent(false); }}
+            gitConfig={gitConfig}
+            onSaveGitConfig={async (n, e) => { const c = await setGitConfig(n, e); setGitConfigState(c); return c; }}
+            projects={projects}
+            activeProjectId={activeProject?.id ?? null}
+            onRemoveProject={async (id) => { await removeProject(id); await reload(); }}
+          />
         ) : activeProject == null ? (
           <ProjectList />
         ) : view === "list" ? (
