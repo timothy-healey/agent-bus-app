@@ -138,6 +138,8 @@ pub struct WiringSlice {
     pub forks: Vec<Fork>,
     #[serde(default)]
     pub joins: Vec<Join>,
+    #[serde(default)]
+    pub gates: Vec<Gate>,
 }
 
 /// A structured slice the model emits (one per wizard step). Internally tagged on
@@ -187,6 +189,7 @@ pub fn apply_slice(draft: &mut DraftPipeline, slice: Slice) {
             }
             draft.forks = s.forks;
             draft.joins = s.joins;
+            draft.gates = s.gates;
         }
     }
 }
@@ -411,10 +414,28 @@ mod tests {
             ],
             forks: vec![Fork { id: "fork-1".into(), lanes: vec!["a".into(), "b".into()] }],
             joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "needs-human".into() }],
+            gates: vec![],
         }));
         assert_eq!(d.teams.iter().find(|t| t.id == "entry").unwrap().outputs.on_approve.as_deref(), Some("fork-1"));
         assert_eq!(d.forks.len(), 1);
         assert_eq!(d.joins[0].downstream, "needs-human");
+    }
+
+    #[test]
+    fn wiring_slice_replaces_gates_alongside_forks_and_joins() {
+        use crate::model::Gate;
+        let mut d = DraftPipeline::empty();
+        d.teams.push(DraftTeam::new("plan-writers", "Plan Writers"));
+        d.teams.push(DraftTeam::new("implementers", "Implementers"));
+        apply_slice(&mut d, Slice::Wiring(WiringSlice {
+            routes: vec![RouteEdge { team_id: "plan-writers".into(), on_approve: Some("gate-2".into()), on_revise: None, on_reject: None }],
+            forks: vec![],
+            joins: vec![],
+            gates: vec![Gate { id: "gate-2".into(), label: "Plan review".into(), downstream: "implementers".into() }],
+        }));
+        assert_eq!(d.gates.len(), 1);
+        assert_eq!(d.gates[0].downstream, "implementers");
+        assert_eq!(d.teams.iter().find(|t| t.id == "plan-writers").unwrap().outputs.on_approve.as_deref(), Some("gate-2"));
     }
 
     #[test]
