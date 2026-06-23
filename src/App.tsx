@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Topbar } from "./components/Topbar";
 import { ProjectList } from "./components/ProjectList";
-import { ProjectWizard } from "./components/ProjectWizard";
+import { NewProjectWizard } from "./wizard/NewProjectWizard";
 import { ViewSwitcher, type View } from "./components/ViewSwitcher";
 import { PipelineView } from "./components/PipelineView";
 import { useProjects } from "./hooks/useProjects";
@@ -14,7 +14,7 @@ import { CardDrawer } from "./components/CardDrawer";
 import { readArtifact, type Project } from "./ipc/workspace";
 import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
-import { instantiateTemplate, listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
+import { listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
 import { setBudget } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
@@ -123,9 +123,9 @@ export default function App() {
     [reload],
   );
 
-  // Load (or first-time instantiate) the active project's pipeline whenever the
-  // active project changes. v1 instantiates the bundled DDD template on first
-  // view so the read-only viewer has a graph to show.
+  // Load the active project's pipeline whenever the active project changes. The
+  // wizard is the only new-project path now (it always writes a pipeline), so a
+  // project with no pipeline file just shows the empty viewer.
   useEffect(() => {
     let cancelled = false;
     if (!activeProject) {
@@ -137,9 +137,7 @@ export default function App() {
       try {
         const ids = await listPipelines(root);
         const target = ids[0] ?? null;
-        const loaded = target
-          ? await loadPipeline(root, target)
-          : await instantiateTemplate(root, "ddd-spec-plan-impl");
+        const loaded = target ? await loadPipeline(root, target) : null;
         if (!cancelled) setPipeline(loaded);
       } catch {
         if (!cancelled) setPipeline(null);
@@ -198,7 +196,7 @@ export default function App() {
           />
         )}
       </Drawer>
-      <ProjectWizard
+      <NewProjectWizard
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
         onCreated={onCreated}

@@ -1,6 +1,7 @@
 //! Tauri commands published by the Workspace context — the context's
 //! Open Host Service surface.
 
+use crate::paths::project_subdirs;
 use crate::project::Project;
 use crate::store::{ProjectStore, ProjectStoreError};
 use agent_bus_core::{ProjectId, ToolSpec};
@@ -129,6 +130,61 @@ pub async fn read_artifact(
     std::fs::read_to_string(&full).map_err(|e| e.to_string())
 }
 
+/// Inner write logic (testable without a Tauri State wrapper). Resolves the
+/// project root from the stored Project (already ~-expanded at create — D6; do
+/// NOT re-expand), creates the canonical sub-dirs, and writes the pipeline YAML +
+/// each prompt file. Every relative path is escape-guarded with
+/// resolve_under_root (the same guard read_artifact uses).
+pub async fn write_project_pipeline_inner(
+    state: &WorkspaceState,
+    project_id: String,
+    yaml_rel_path: String,
+    pipeline_yaml: String,
+    prompts: Vec<(String, String)>,
+) -> Result<(), String> {
+    let project = state
+        .store
+        .get(&ProjectId(project_id))
+        .await
+        .map_err(|e| e.to_string())?;
+    let root = project.root_path.to_string_lossy().into_owned();
+
+    // Create the canonical project sub-dirs (Workspace owns the layout).
+    for sub in project_subdirs() {
+        std::fs::create_dir_all(Path::new(&root).join(sub)).map_err(|e| e.to_string())?;
+    }
+
+    // Write the pipeline YAML (path-scoped).
+    let yaml_path = resolve_under_root(&root, &yaml_rel_path)?;
+    if let Some(parent) = yaml_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&yaml_path, pipeline_yaml).map_err(|e| e.to_string())?;
+
+    // Write each prompt file (path-scoped).
+    for (rel, body) in prompts {
+        let path = resolve_under_root(&root, &rel)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// OHS command: write a project's pipeline YAML + per-team prompt files
+/// (vet F1 — Workspace owns the bytes-to-disk; Pipeline Authoring serializes).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn write_project_pipeline(
+    state: tauri::State<'_, WorkspaceState>,
+    project_id: String,
+    yaml_rel_path: String,
+    pipeline_yaml: String,
+    prompts: Vec<(String, String)>,
+) -> Result<(), String> {
+    write_project_pipeline_inner(&state, project_id, yaml_rel_path, pipeline_yaml, prompts).await
+}
+
 /// OHS contract: the union of these is what Conversational Control will
 /// expose to the god terminal in Plan 6.
 pub fn tools() -> Vec<ToolSpec> {
@@ -178,12 +234,76 @@ pub fn tools() -> Vec<ToolSpec> {
             }),
             supplier_context: "workspace".into(),
         },
+        ToolSpec {
+            name: "write_project_pipeline".into(),
+            description: "Write a project's pipeline YAML + per-team prompt files under the project root.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "string" },
+                    "yaml_rel_path": { "type": "string" },
+                    "pipeline_yaml": { "type": "string" },
+                    "prompts": { "type": "array" }
+                },
+                "required": ["project_id", "yaml_rel_path", "pipeline_yaml", "prompts"]
+            }),
+            supplier_context: "workspace".into(),
+        },
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::Project;
+    use crate::store::ProjectStore;
+    use std::sync::Arc as StdArc;
+
+    async fn state_with_project(root: &std::path::Path) -> (WorkspaceState, String) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        let store = StdArc::new(ProjectStore::new(pool));
+        let project = Project::new("Demo".into(), root.to_path_buf(), 0);
+        store.insert(&project).await.unwrap();
+        (WorkspaceState { store }, project.id.0)
+    }
+
+    #[tokio::test]
+    async fn write_project_pipeline_writes_yaml_and_prompts_under_root() {
+        let root = std::env::temp_dir().join(format!("abp-wpp-{}", uuid::Uuid::new_v4()));
+        let (state, project_id) = state_with_project(&root).await;
+        write_project_pipeline_inner(
+            &state,
+            project_id,
+            "pipelines/demo.yaml".into(),
+            "id: demo\nname: Demo\n".into(),
+            vec![("prompts/research.md".into(), "investigate".into())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("pipelines/demo.yaml")).unwrap(), "id: demo\nname: Demo\n");
+        assert_eq!(std::fs::read_to_string(root.join("prompts/research.md")).unwrap(), "investigate");
+        // the canonical subdirs were created
+        assert!(root.join("artifacts").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn write_project_pipeline_rejects_a_path_escape() {
+        let root = std::env::temp_dir().join(format!("abp-wpp-{}", uuid::Uuid::new_v4()));
+        let (state, project_id) = state_with_project(&root).await;
+        let err = write_project_pipeline_inner(
+            &state,
+            project_id,
+            "../escape.yaml".into(),
+            "x".into(),
+            vec![],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("escape") || err.contains("relative"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn tools_publishes_workspace_named_tools() {

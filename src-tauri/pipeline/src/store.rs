@@ -1,11 +1,9 @@
 //! Filesystem persistence for pipeline definitions. YAML files live under
 //! <project_root>/pipelines/ (Workspace path-resolution kernel owns the dir
-//! name). The store reads, lists, writes (with validation), and instantiates
-//! bundled templates.
+//! name). The store reads, lists, and writes (with validation).
 
 use crate::model::Pipeline;
 use crate::parse::{parse_pipeline, PipelineParseError};
-use crate::template::Template;
 use crate::validate::{validate, PipelineValidationError};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -83,15 +81,6 @@ impl PipelineStore {
         Ok(())
     }
 
-    /// Copy a bundled template's YAML into the project verbatim, then load it
-    /// back (which validates). Used by the project wizard / activation flow.
-    pub fn instantiate_template(&self, template: &Template) -> Result<Pipeline, PipelineStoreError> {
-        let dir = pipelines_dir(&self.project_root);
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(self.yaml_path(template.id), template.yaml)?;
-        self.load(template.id)
-    }
-
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
@@ -100,7 +89,6 @@ impl PipelineStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::template::bundled_templates;
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("abp-pipeline-{}", uuid::Uuid::new_v4()));
@@ -121,29 +109,25 @@ mod tests {
     }
 
     #[test]
-    fn instantiate_then_load_and_list_round_trip() {
-        let store = PipelineStore::new(temp_root());
-        let template = bundled_templates().into_iter().next().unwrap();
-
-        let p = store.instantiate_template(&template).unwrap();
-        assert_eq!(p.id, "ddd-spec-plan-impl");
-
-        let ids = store.list_ids().unwrap();
-        assert_eq!(ids, vec!["ddd-spec-plan-impl".to_string()]);
-
-        let reloaded = store.load("ddd-spec-plan-impl").unwrap();
-        assert_eq!(reloaded.teams.len(), 7);
-    }
-
-    #[test]
     fn save_round_trips_through_yaml() {
+        use crate::model::{Escalation, Pipeline, Routes, RunnerConfig, Scope, Team, Workers};
+        use agent_bus_core::{EffortMode, RunnerKind};
         let store = PipelineStore::new(temp_root());
-        let template = bundled_templates().into_iter().next().unwrap();
-        let mut p = crate::parse::parse_pipeline(template.yaml).unwrap();
-        p.name = "Renamed".into();
-
+        let p = Pipeline {
+            id: "demo".into(), name: "Demo".into(), description: String::new(), schema_version: 1,
+            teams: vec![Team {
+                id: "research".into(), name: "Research".into(), prompt: "prompts/research.md".into(),
+                runner: RunnerConfig { kind: RunnerKind::ClaudeCli, model: "m".into(), effort: EffortMode::Standard, api_key_env: None },
+                scope: Scope::default(),
+                outputs: Routes { on_approve: Some("needs-human".into()), on_revise: None, on_reject: None },
+                workers: Workers::default(),
+            }],
+            gates: vec![],
+            escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![], joins: vec![],
+        };
         store.save(&p).unwrap();
-        let reloaded = store.load(&p.id).unwrap();
-        assert_eq!(reloaded.name, "Renamed");
+        let reloaded = store.load("demo").unwrap();
+        assert_eq!(reloaded.name, "Demo");
     }
 }
