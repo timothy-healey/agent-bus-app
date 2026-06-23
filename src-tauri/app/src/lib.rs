@@ -150,6 +150,56 @@ impl ConversationEngine for LlmEngine {
     }
 }
 
+/// Extract the first fenced code block from the model's reply (DD3). Prefers a
+/// ```json fence; falls back to the first bare ``` fence. Returns the block's
+/// inner text (no fences), or None when there is no fence (= the model is done,
+/// the reply is the final prose answer).
+///
+/// VF1 (documented duplication): this intentionally mirrors
+/// `pipeline::design_session::extract_json_block` rather than sharing it, so the
+/// agentic loop stays decoupled from the wizard module. Keep the two in sync.
+pub fn extract_tool_call_block(reply: &str) -> Option<String> {
+    if let Some(start) = reply.find("```json") {
+        let after = &reply[start + "```json".len()..];
+        if let Some(end) = after.find("```") {
+            return Some(after[..end].trim().to_string());
+        }
+    }
+    if let Some(start) = reply.find("```") {
+        let after = &reply[start + 3..];
+        let after = match after.find('\n') {
+            Some(nl) if !after[..nl].contains("```") => &after[nl + 1..],
+            _ => after,
+        };
+        if let Some(end) = after.find("```") {
+            return Some(after[..end].trim().to_string());
+        }
+    }
+    None
+}
+
+/// Parse a model-emitted fenced block `{ "tool": "<name>", "args": { ... } }`
+/// directly into the kernel's `ToolCallRequest { tool_name, args }` (VF2 — no
+/// shadow `ParsedToolCall` type). The wire field is `tool`; the kernel field is
+/// `tool_name`, so we read the JSON object explicitly and construct the canonical
+/// type the dispatcher already takes. `args` defaults to `{}` when absent.
+/// Returns a descriptive error string (fed back to the model) when the block is
+/// not valid JSON or is missing the `tool` field.
+pub fn parse_tool_call(block: &str) -> Result<ToolCallRequest, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(block).map_err(|e| e.to_string())?;
+    let tool_name = value
+        .get("tool")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing string field `tool`".to_string())?
+        .to_string();
+    let args = value
+        .get("args")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    Ok(ToolCallRequest { tool_name, args })
+}
+
 /// Holds the chat runner for the wizard's Design Session (ephemeral; no
 /// persistence). The same Arc<dyn ChatRunner> the terminal uses can be shared.
 pub struct DesignSessionState {
@@ -898,5 +948,47 @@ mod design_session_tests {
         let reloaded = ws.store.get(&agent_bus_core::ProjectId(project.id.0.clone())).await.unwrap();
         assert_eq!(reloaded.active_pipeline_id.map(|p| p.0), Some("demo".to_string()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod composite_engine_tests {
+    use super::{extract_tool_call_block, parse_tool_call};
+
+    // --- Task 1: tool-call block extraction + parse into the kernel type (VF2) -
+
+    #[test]
+    fn extracts_a_fenced_json_tool_call_block() {
+        let prose = "I'll inject that.\n\n```json\n{\"tool\":\"inject_topic\",\"args\":{\"topic\":\"03-scheduling\"}}\n```\n";
+        let block = extract_tool_call_block(prose).expect("a fenced block");
+        // VF2: parse straight into agent_bus_core::ToolCallRequest, no shadow type.
+        let req = parse_tool_call(&block).unwrap();
+        assert_eq!(req.tool_name, "inject_topic");
+        assert_eq!(req.args["topic"], "03-scheduling");
+    }
+
+    #[test]
+    fn falls_back_to_a_bare_fence() {
+        let prose = "ok\n```\n{\"tool\":\"usage_snapshot\",\"args\":{}}\n```";
+        let block = extract_tool_call_block(prose).expect("a bare fence");
+        let req = parse_tool_call(&block).unwrap();
+        assert_eq!(req.tool_name, "usage_snapshot");
+    }
+
+    #[test]
+    fn plain_prose_has_no_block() {
+        assert!(extract_tool_call_block("T-042 is in design; nothing to do.").is_none());
+    }
+
+    #[test]
+    fn missing_args_defaults_to_empty_object() {
+        let req = parse_tool_call("{\"tool\":\"usage_snapshot\"}").unwrap();
+        assert_eq!(req.tool_name, "usage_snapshot");
+        assert_eq!(req.args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn invalid_json_is_an_error() {
+        assert!(parse_tool_call("{ this is not json").is_err());
     }
 }
