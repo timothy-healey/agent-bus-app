@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { listPipelines, loadPipeline, kickoffGenerate, designSessionTurn } from "./pipeline";
+import { listPipelines, loadPipeline, kickoffGenerate, designSessionTurn, bestEffortValidate } from "./pipeline";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -21,14 +21,23 @@ describe("pipeline ipc", () => {
     expect(result.id).toBe("p");
   });
 
-  it("designSessionTurn passes step + draft + user_message and returns prose", async () => {
-    const draft = { id: "p", name: "P", description: "", schema_version: 2, teams: [], forks: [], joins: [], escalations: [] };
-    invokeMock.mockResolvedValueOnce({ reply_text: "ok", updated_draft: draft });
+  it("designSessionTurn passes step + draft + user_message and returns prose + issues", async () => {
+    const draft = { id: "p", name: "P", description: "", schema_version: 2, teams: [], gates: [], forks: [], joins: [], escalations: [] };
+    invokeMock.mockResolvedValueOnce({ reply_text: "ok", updated_draft: draft, issues: ["draft has no teams yet"] });
     const out = await designSessionTurn("s1", "teams", draft, "add a team");
     expect(invokeMock).toHaveBeenCalledWith("design_session_turn_cmd", {
       session_id: "s1", step: "teams", draft, user_message: "add a team",
     });
     expect(out.reply_text).toBe("ok");
+    expect(out.issues).toEqual(["draft has no teams yet"]);
+  });
+
+  it("bestEffortValidate passes the draft and returns the issues list", async () => {
+    const draft = { id: "p", name: "P", description: "", schema_version: 2, teams: [], gates: [], forks: [], joins: [], escalations: [] };
+    invokeMock.mockResolvedValueOnce(["draft has no teams yet"]);
+    const issues = await bestEffortValidate(draft);
+    expect(invokeMock).toHaveBeenCalledWith("best_effort_validate_cmd", { draft });
+    expect(issues).toEqual(["draft has no teams yet"]);
   });
 
   it("listPipelines passes project_root", async () => {

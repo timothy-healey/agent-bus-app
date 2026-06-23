@@ -111,6 +111,7 @@ export type Step = "teams" | "prompts" | "wiring";
 export interface TurnResult {
   reply_text: string;
   updated_draft: DraftPipeline;
+  issues: string[];
 }
 
 export async function kickoffGenerate(sessionId: string, description: string): Promise<DraftPipeline> {
@@ -132,6 +133,10 @@ export async function designSessionTurn(
     draft,
     user_message: userMessage,
   });
+}
+
+export async function bestEffortValidate(draft: DraftPipeline): Promise<string[]> {
+  return await invoke<string[]>("best_effort_validate_cmd", { draft });
 }
 
 export async function createProjectFromDraft(

@@ -169,6 +169,19 @@ fn draft_pipeline_key_set_matches_ts() {
     );
 }
 
+/// Locks the TurnResult key set the wizard IPC mirrors (src/ipc/pipeline.ts).
+#[test]
+fn turn_result_key_set_matches_ts() {
+    use crate::design_session::TurnResult;
+    let v = serde_json::to_value(TurnResult {
+        reply_text: "ok".into(),
+        updated_draft: DraftPipeline::empty(),
+        issues: vec!["x".into()],
+    })
+    .unwrap();
+    assert_eq!(keys(&v), set(&["reply_text", "updated_draft", "issues"]));
+}
+
 /// Locks DraftTeam (carries prompt_body inline, not a path).
 #[test]
 fn draft_team_key_set_matches_ts() {
