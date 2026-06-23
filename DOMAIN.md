@@ -69,7 +69,8 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Fork** — a node that fans one task out into parallel lanes (routes stay single-target; the multiplicity is the fork's `lanes`)
 - **Join** — a barrier node that waits for all lanes, then continues — all must approve, else needs-human
 - **Lane** — a linear team chain between a fork and its join; named to avoid colliding with git/worktree *branch*
-- **Design Session** — an ephemeral authoring dialogue used to design a pipeline, conducted over the LLM Chat ACL; distinct from the terminal's `Conversation` aggregate (one `dialogue_id` per wizard step). *(Full definition lands with sub-project 3 — the wizard.)*
+- **Design Session** — an ephemeral, AI-assisted authoring dialogue that produces a pipeline, conducted over the LLM Chat ACL (one `dialogue_id` per wizard step: `<session>:<step>`). Distinct from the terminal's `Conversation` aggregate — it has no persistence and lives in frontend state + an in-memory chat session for the duration of the wizard. Drives the 5-step new-project wizard (basics → teams → responsibilities → wiring → review).
+- **DraftPipeline** — an in-progress, not-yet-valid pipeline the wizard edits; distinct from the validated `Pipeline` aggregate. Best-effort validation surfaces issues live during editing; only a `DraftPipeline` that passes **hard** validation (`validate.rs`) at create becomes a `Pipeline`. Prompt text is held inline; Pipeline Authoring serializes it (YAML + per-team prompt files) and Workspace writes it.
 
 ### Runtime
 - **Task** — a unit of work moving through the pipeline; identified by `task_id`
@@ -102,7 +103,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 
 ### Workspace
 - **Project root** — the directory the user picked; contains `pipelines/`, `prompts/`, `artifacts/`, `worktrees/`, `.agent-bus/`
-- **Template** — a bundled pipeline that can be instantiated into a project on creation
+- **Project write surface** — `write_project_pipeline` writes a project's pipeline YAML + per-team prompt files (`prompts/<team>.md`) under the (already `~`-expanded) project root, path-scoped with the `resolve_under_root` escape guard — the counterpart to `read_artifact`. (The bundled-**Template** instantiation path was dropped in sub-project 3; the wizard writes YAML directly. Templates may return as wizard seeds in v1.1.)
 
 ### Conversational Control
 - **Conversation** — the persistent dialogue with the terminal's Claude session
