@@ -178,6 +178,14 @@ async fn design_session_turn_cmd(
     Ok(design_session_turn(state.runner.as_ref(), &session_id, step, draft, &user_message).await)
 }
 
+/// OHS: recompute best-effort validation for a manually-edited draft (W1). The
+/// turn command already returns issues; this serves edits that bypass chat. Pure
+/// pass-through to pipeline::draft::best_effort_validate — no state, no chat.
+#[tauri::command(rename_all = "snake_case")]
+fn best_effort_validate_cmd(draft: pipeline::draft::DraftPipeline) -> Vec<String> {
+    pipeline::draft::best_effort_validate(&draft)
+}
+
 /// Orchestrate create-from-draft (Decision D5; vet F1). HARD validate the draft's
 /// Pipeline; only on Ok create the project + write files (Workspace) + activate.
 /// Nothing is written when invalid. Inner fn so it is unit-testable without a
@@ -537,6 +545,7 @@ pub fn run() {
             pipeline::api::pipeline_load,
             kickoff_generate_cmd,
             design_session_turn_cmd,
+            best_effort_validate_cmd,
             create_project_from_draft,
             runtime::api::inject_topic,
             runtime::api::approve_gate,
@@ -823,6 +832,14 @@ mod design_session_tests {
         let draft = pipeline::draft::DraftPipeline::empty();
         let out = design_session_turn(&runner, "s1", Step::Teams, draft, "add two teams").await;
         assert_eq!(out.updated_draft.teams.len(), 2);
+    }
+
+    #[test]
+    fn root_best_effort_reports_issues_for_an_incomplete_draft() {
+        let mut d = pipeline::draft::DraftPipeline::empty();
+        d.teams.push(pipeline::draft::DraftTeam::new("research", "Research"));
+        let issues = pipeline::draft::best_effort_validate(&d);
+        assert!(issues.iter().any(|i| i.contains("research") && i.contains("prompt")));
     }
 
     use pipeline::draft::DraftTeam;
