@@ -30,6 +30,9 @@ pub use fanout_group::*;
 pub mod fanout_store;
 pub use fanout_store::*;
 
+pub mod invocation_audit;
+pub use invocation_audit::*;
+
 pub mod revision;
 
 pub mod api;
