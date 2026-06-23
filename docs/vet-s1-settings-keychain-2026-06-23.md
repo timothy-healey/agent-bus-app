@@ -112,8 +112,9 @@ without registration become tribal knowledge.
 note — *Keychain / Secret store* (the `KeychainStore` seam; real macOS impl + fake; stores the
 runner API key; secret never persisted to SQLite/disk, never returned across the OHS); and
 under **Workspace** — *Git author identity* (`git_config` single-row store; the name/email for
-worker worktree commits; persisted in v1.1, consumed when worker-commits land). Recorded here
-so it is not lost; this is a doc follow-up, not a code change. **Status:** resolved (tracked).
+worker worktree commits; persisted in v1.1, consumed when worker-commits land). Applied
+to `DOMAIN.md` in this branch (new **Generic subdomains (infrastructure)** section +
+**Workspace → Git author identity** entry). **Status:** resolved.
 
 ## Verdict
 
