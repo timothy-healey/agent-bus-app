@@ -78,6 +78,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Stage** — the team or gate the task is currently at
 - **Claim** — the atomic act of a worker taking a task from inbox to working
 - **Settle** — the worker finishing; emits a verdict event
+- **Stream (live log)** — while a worker runs, its invocation may **stream** display-only log deltas in addition to its terminal **Settle**. Streaming is a side channel for live display (R4); **Settle** remains the single verdict moment. The deltas never influence settle/route.
 - **Verdict** — `approve` | `revise` | `reject`
 - **Attempts** — counter incremented on revise; capped at 3
 - **Brake** — system-wide flag halting new claims (in-flight workers complete)
@@ -101,6 +102,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Runner kind** — `claude-cli` (subscription) or `anthropic-api` (key)
 - **Effort** — thinking-token budget: `off` (0), `standard` (1024), `extended-low` (8192), `extended-high` (32000), `custom`
 - **Scope** — the per-invocation `settings.json` defining permission allow/deny
+- **Log delta** — a display-only assistant-prose fragment the *streaming* worker invocation (`invoke_stream`) forwards via a `LogSink` (`Box<dyn Fn(&str)>`) as it runs; carries no verdict/artifact and never crosses the ACL as stream-json. Mirrors LLM Chat's prose delta (`DeltaSink`), kept as a separate type because the two ACLs are distinct (R4).
 
 ### Workspace
 - **Project root** — the directory the user picked; contains `pipelines/`, `prompts/`, `artifacts/`, `worktrees/`, `.agent-bus/`

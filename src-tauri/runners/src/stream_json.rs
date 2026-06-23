@@ -21,10 +21,14 @@ impl StreamAccumulator {
         Self::default()
     }
 
-    /// Feed one stream-json line (already a parsed Value). Returns Err only on
-    /// a recognised rate-limit error event; everything else is accumulated.
-    pub fn feed(&mut self, v: &Value) -> Result<(), RunnerError> {
+    /// Feed one stream-json line (already a parsed Value). Returns the prose text
+    /// *this* event added (empty for non-prose events) so a streaming caller can
+    /// forward it; the accumulator keeps the running full text for the final
+    /// RunnerOutput. Returns Err only on a recognised rate-limit error event.
+    /// (Mirrors `llm_chat::stream_json`'s `feed`, by design — separate ACL; vet F3.)
+    pub fn feed(&mut self, v: &Value) -> Result<String, RunnerError> {
         let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let mut delta = String::new();
 
         // Rate-limit detection: an error event whose message mentions rate/429.
         if ty == "error" || v.get("is_error").and_then(|b| b.as_bool()) == Some(true) {
@@ -51,11 +55,12 @@ impl StreamAccumulator {
                     for block in content {
                         if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                             if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                self.text.push_str(t);
+                                delta.push_str(t);
                             }
                         }
                     }
                 }
+                self.text.push_str(&delta);
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                     self.add_usage(u);
                 }
@@ -82,7 +87,7 @@ impl StreamAccumulator {
             }
             _ => {}
         }
-        Ok(())
+        Ok(delta)
     }
 
     fn add_usage(&mut self, u: &Value) {
@@ -150,7 +155,35 @@ pub fn parse_stream(raw: &str, model: &str) -> Result<RunnerOutput, RunnerError>
         }
         let v: Value = serde_json::from_str(line)
             .map_err(|e| RunnerError::Other(format!("bad stream-json line: {e}")))?;
-        acc.feed(&v)?;
+        let _ = acc.feed(&v)?;
+    }
+    acc.finish(model)
+}
+
+/// Streaming variant of `parse_stream`. Parses the same newline-delimited JSON
+/// but invokes `on_delta` with each assistant *prose fragment* as it is parsed
+/// (display-only), then returns the identical final RunnerOutput. The result
+/// line's authoritative prose is NOT forwarded as a delta — it has already been
+/// streamed via the assistant events. Mirrors
+/// `llm_chat::stream_json::parse_chat_stream_streaming` (separate ACL crate, by
+/// design — vet F3; do not merge the two parsers).
+pub fn parse_stream_streaming(
+    raw: &str,
+    model: &str,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<RunnerOutput, RunnerError> {
+    let mut acc = StreamAccumulator::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = serde_json::from_str(line)
+            .map_err(|e| RunnerError::Other(format!("bad stream-json line: {e}")))?;
+        let delta = acc.feed(&v)?;
+        if !delta.is_empty() {
+            on_delta(&delta);
+        }
     }
     acc.finish(model)
 }
@@ -206,5 +239,37 @@ mod tests {
     fn malformed_line_is_other_error() {
         let err = parse_stream("not json", "m").unwrap_err();
         assert!(matches!(err, RunnerError::Other(_)));
+    }
+
+    #[test]
+    fn feed_returns_prose_delta_for_assistant_event_only() {
+        let mut acc = StreamAccumulator::new();
+        let sys: Value = serde_json::from_str(
+            r#"{"type":"system","subtype":"init","model":"m"}"#,
+        ).unwrap();
+        let asst: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello "}]}}"#,
+        ).unwrap();
+        let res: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","result":"hello world"}"#,
+        ).unwrap();
+        assert_eq!(acc.feed(&sys).unwrap(), "");
+        assert_eq!(acc.feed(&asst).unwrap(), "hello ");
+        // the result line carries authoritative text but is NOT a streamed delta
+        assert_eq!(acc.feed(&res).unwrap(), "");
+    }
+
+    #[test]
+    fn streaming_parse_forwards_only_assistant_prose_and_returns_same_output() {
+        let mut deltas: Vec<String> = vec![];
+        let out = parse_stream_streaming(SAMPLE, "fallback-model", &mut |d| deltas.push(d.to_string())).unwrap();
+        // identical final output to the whole-buffer parse
+        let plain = parse_stream(SAMPLE, "fallback-model").unwrap();
+        assert_eq!(out, plain);
+        // the two assistant lines streamed their prose; the result line did not
+        assert_eq!(deltas, vec![
+            "Analysing the repository.\n".to_string(),
+            "VERDICT: approve\nARTIFACT: artifacts/analyses/T-1-v1.md".to_string(),
+        ]);
     }
 }

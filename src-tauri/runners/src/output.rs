@@ -78,12 +78,35 @@ pub struct InvocationRequest {
     pub add_dirs: Vec<String>,
 }
 
+/// A display-only log sink. The streaming worker path forwards each assistant
+/// text fragment here as it parses, for live-log display. Deliberately a plain
+/// `&str` callback: NO stream-json idiom, CLI flag, or event name crosses the
+/// ACL through it — the composition root maps fragments to whatever UI event it
+/// likes. Mirrors `llm_chat::chat::DeltaSink` (separate ACL crate, by design —
+/// the worker ACL is verdict-shaped, the chat ACL is prose-shaped; vet F2).
+pub type LogSink = Box<dyn Fn(&str) + Send + Sync>;
+
 /// The ACL seam. Runtime depends only on this trait; the concrete runner kind
 /// is selected once at the composition root. Object-safe so it can be held as
 /// `Arc<dyn Runner>`.
 #[async_trait]
 pub trait Runner: Send + Sync {
     async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError>;
+
+    /// Streaming variant: identical contract to `invoke` (same final
+    /// `RunnerOutput` — verdict, artifact, usage), but assistant prose fragments
+    /// are forwarded to `sink` as they arrive for live-log display. The verdict/
+    /// artifact/usage parse + the value returned are unchanged; streaming is
+    /// purely additive. The default delegates to `invoke` (no deltas) so existing
+    /// runners keep working; streaming runners override this.
+    async fn invoke_stream(
+        &self,
+        req: &InvocationRequest,
+        sink: &LogSink,
+    ) -> Result<RunnerOutput, RunnerError> {
+        let _ = sink;
+        self.invoke(req).await
+    }
 }
 
 #[cfg(test)]
@@ -122,5 +145,30 @@ mod tests {
         assert_eq!(u.input_tokens, 0);
         assert_eq!(u.output_tokens, 0);
         assert_eq!(u.model, "");
+    }
+
+    #[tokio::test]
+    async fn default_invoke_stream_delegates_to_invoke_with_no_deltas() {
+        use crate::fake::FakeRunner;
+        let out = RunnerOutput {
+            verdict: Verdict::Approve,
+            artifact_path: Some("a.md".into()),
+            final_text: "x".into(),
+            usage: RunnerUsage::default(),
+        };
+        let fake = FakeRunner::always(out);
+        let req = InvocationRequest {
+            task_id: "T".into(), team_id: "t".into(), model: "m".into(),
+            thinking_budget: 0, system_prompt: String::new(), user_message: String::new(),
+            settings_path: String::new(), add_dirs: vec![],
+        };
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s = seen.clone();
+        let sink: LogSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        // FakeRunner gets a streaming override in a later task; even with it, a
+        // FakeRunner built without scripted deltas forwards nothing.
+        let result = fake.invoke_stream(&req, &sink).await.unwrap();
+        assert_eq!(result.verdict, Verdict::Approve);
+        assert!(seen.lock().unwrap().is_empty());
     }
 }
