@@ -765,7 +765,7 @@ mod tests {
             gates: vec![],
             escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
             forks: vec![Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] }],
-            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: None }],
         }
     }
 
