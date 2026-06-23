@@ -18,7 +18,7 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_create_project(
     state: tauri::State<'_, WorkspaceState>,
     name: String,
@@ -29,14 +29,14 @@ pub async fn workspace_create_project(
     Ok(project)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_list_projects(
     state: tauri::State<'_, WorkspaceState>,
 ) -> Result<Vec<Project>, String> {
     state.store.list().await.map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_get_project(
     state: tauri::State<'_, WorkspaceState>,
     id: String,
@@ -47,7 +47,7 @@ pub async fn workspace_get_project(
     })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_set_active_pipeline(
     state: tauri::State<'_, WorkspaceState>,
     id: String,
@@ -86,7 +86,7 @@ pub fn resolve_under_root(root: &str, rel_path: &str) -> Result<PathBuf, String>
 /// Read an artifact file (spec/plan/critique markdown) by a project-root-relative
 /// path. The path is constrained to the project root — Review's reading surface,
 /// published as a Workspace OHS command.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn read_artifact(
     state: tauri::State<'_, WorkspaceState>,
     project_id: String,

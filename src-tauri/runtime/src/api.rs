@@ -35,7 +35,7 @@ fn entry_stage(p: &Pipeline) -> Result<String, String> {
     p.teams.first().map(|t| t.id.clone()).ok_or_else(|| "pipeline has no teams".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn inject_topic(
     state: tauri::State<'_, RuntimeState>,
     topic: String,
@@ -64,7 +64,7 @@ pub async fn inject_topic_inner(
     Ok(task)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn approve_gate(
     state: tauri::State<'_, RuntimeState>,
     task_id: String,
@@ -72,7 +72,7 @@ pub async fn approve_gate(
     apply_gate_verdict_inner(&state, &task_id, Verdict::Approve).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn reject_gate(
     state: tauri::State<'_, RuntimeState>,
     task_id: String,
@@ -80,7 +80,7 @@ pub async fn reject_gate(
     apply_gate_verdict_inner(&state, &task_id, Verdict::Reject).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn revise_gate(
     state: tauri::State<'_, RuntimeState>,
     task_id: String,
@@ -143,7 +143,7 @@ pub async fn apply_gate_verdict_inner(
     Ok(task)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn list_tasks(
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<Vec<Task>, String> {
@@ -156,19 +156,19 @@ pub async fn list_tasks(
     Ok(all)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn brake_on(state: tauri::State<'_, RuntimeState>, reason: Option<String>) -> BrakeState {
     state.brake.set_on(reason.unwrap_or_else(|| "manual".to_string()));
     state.brake.state()
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn brake_off(state: tauri::State<'_, RuntimeState>) -> BrakeState {
     state.brake.set_off();
     state.brake.state()
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn brake_state(state: tauri::State<'_, RuntimeState>) -> BrakeState {
     state.brake.state()
 }
@@ -177,7 +177,7 @@ pub fn brake_state(state: tauri::State<'_, RuntimeState>) -> BrakeState {
 /// in Plan 3; manual scaling of concurrent workers is v1.1). Returns the team's
 /// configured max so the terminal can report the ceiling. This keeps the OHS
 /// surface stable for Plan 6 without overbuilding worker concurrency in v1.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn scale_team(state: tauri::State<'_, RuntimeState>, team_id: String) -> Result<u32, String> {
     scale_team_inner(&state, team_id)
 }

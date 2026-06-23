@@ -48,7 +48,7 @@ pub async fn load_config(pool: &SqlitePool) -> UsageConfig {
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn usage_snapshot(state: tauri::State<'_, UsageState>) -> Result<UsageSnapshot, String> {
     let cfg = load_config(&state.pool).await;
     let braked = (state.is_braked)();
@@ -57,7 +57,7 @@ pub async fn usage_snapshot(state: tauri::State<'_, UsageState>) -> Result<Usage
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn usage_set_budget(
     state: tauri::State<'_, UsageState>,
     budget: i64,
