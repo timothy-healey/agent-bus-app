@@ -6,6 +6,7 @@ import { formatTokens } from "../lib/cost";
 export interface SettingsViewProps {
   usage: UsageSnapshot | null;
   onSetBudget: (budget: number) => Promise<UsageSnapshot>;
+  onSetAutoMeter: (enabled: boolean) => Promise<UsageSnapshot>;
 }
 
 type Theme = "dark" | "light";
@@ -14,10 +15,23 @@ function currentTheme(): Theme {
   return (document.documentElement.getAttribute("data-theme") as Theme) ?? "dark";
 }
 
-export function SettingsView({ usage, onSetBudget }: SettingsViewProps) {
+export function SettingsView({ usage, onSetBudget, onSetAutoMeter }: SettingsViewProps) {
   const [theme, setTheme] = useState<Theme>(currentTheme());
   const [budgetInput, setBudgetInput] = useState(String(usage?.window_budget ?? 2_600_000));
   const [saving, setSaving] = useState(false);
+  const [autoMeter, setAutoMeter] = useState<boolean>(usage?.auto_meter_enabled ?? false);
+  const [autoSaving, setAutoSaving] = useState(false);
+
+  async function toggleAutoMeter(next: boolean) {
+    setAutoMeter(next);
+    setAutoSaving(true);
+    try {
+      const s = await onSetAutoMeter(next);
+      setAutoMeter(s.auto_meter_enabled);
+    } finally {
+      setAutoSaving(false);
+    }
+  }
 
   function applyTheme(next: Theme) {
     document.documentElement.setAttribute("data-theme", next);
@@ -63,6 +77,21 @@ export function SettingsView({ usage, onSetBudget }: SettingsViewProps) {
             currently {formatTokens(usage.window_total)} of {formatTokens(usage.window_budget)} used this window.
           </div>
         )}
+
+        <label style={{ ...label, display: "flex", alignItems: "center", gap: 8, marginTop: 16, marginBottom: 0, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={autoMeter}
+            disabled={autoSaving}
+            onChange={(e) => toggleAutoMeter(e.target.checked)}
+            aria-label="auto-brake"
+            style={{ accentColor: "var(--accent)", cursor: "pointer" }}
+          />
+          auto-brake when the window crosses the threshold
+        </label>
+        <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
+          off by default — manual + reactive (rate-limit) braking stays on either way.
+        </div>
       </div>
 
       <div style={{ ...section, color: "var(--text-3)", fontSize: 11 }}>

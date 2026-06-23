@@ -19,6 +19,7 @@ export interface UsageSnapshot {
   by_team: TeamSlice[];
   tokens_by_task: Record<string, number>;
   braked: boolean;
+  auto_meter_enabled: boolean;
 }
 
 export async function usageSnapshot(): Promise<UsageSnapshot> {
@@ -27,4 +28,8 @@ export async function usageSnapshot(): Promise<UsageSnapshot> {
 
 export async function setBudget(budget: number): Promise<UsageSnapshot> {
   return await invoke<UsageSnapshot>("usage_set_budget", { budget });
+}
+
+export async function setAutoMeter(enabled: boolean): Promise<UsageSnapshot> {
+  return await invoke<UsageSnapshot>("usage_set_auto_meter", { enabled });
 }
