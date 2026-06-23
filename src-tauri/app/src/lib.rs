@@ -11,6 +11,7 @@ use runtime::task_store::TaskStore;
 use pipeline::model::{Pipeline, Team};
 use pipeline::draft::DraftPipeline;
 use pipeline::design_session::{design_session_turn, kickoff_generate, Step, TurnResult};
+use workspace::project::Project;
 
 use conversational_control::catalog::ToolCatalog;
 use conversational_control::dispatch::ToolDispatcher;
@@ -175,6 +176,55 @@ async fn design_session_turn_cmd(
     user_message: String,
 ) -> Result<TurnResult, String> {
     Ok(design_session_turn(state.runner.as_ref(), &session_id, step, draft, &user_message).await)
+}
+
+/// Orchestrate create-from-draft (Decision D5; vet F1). HARD validate the draft's
+/// Pipeline; only on Ok create the project + write files (Workspace) + activate.
+/// Nothing is written when invalid. Inner fn so it is unit-testable without a
+/// Tauri State wrapper.
+pub async fn create_project_from_draft_inner(
+    ws: &workspace::api::WorkspaceState,
+    name: String,
+    root: String,
+    draft: DraftPipeline,
+) -> Result<Project, String> {
+    // 1. Serialize + HARD validate (gate before any write).
+    let pipeline = draft.to_pipeline();
+    pipeline::validate::validate(&pipeline).map_err(|e| e.to_string())?;
+    let yaml = pipeline::draft::to_yaml(&pipeline).map_err(|e| e.to_string())?;
+    let prompts = pipeline::draft::prompt_files(&draft);
+    let yaml_rel = format!("pipelines/{}.yaml", pipeline.id);
+
+    // 2. Create the project row (Workspace; ~ already expanded inside).
+    let expanded = workspace::api::expand_tilde(&root, &std::env::var("HOME").unwrap_or_default());
+    let project = Project::new(name, std::path::PathBuf::from(expanded), now_unix());
+    ws.store.insert(&project).await.map_err(|e| e.to_string())?;
+
+    // 3. Write the YAML + prompt files (Workspace owns the bytes-to-disk).
+    workspace::api::write_project_pipeline_inner(
+        ws, project.id.0.clone(), yaml_rel, yaml, prompts,
+    )
+    .await?;
+
+    // 4. Activate.
+    ws.store
+        .set_active_pipeline(&project.id, Some(&agent_bus_core::PipelineId(pipeline.id.clone())), now_unix())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Return the project with the active pipeline reflected.
+    ws.store.get(&project.id).await.map_err(|e| e.to_string())
+}
+
+/// OHS command: validate → create + write → activate. The only new-project path.
+#[tauri::command(rename_all = "snake_case")]
+async fn create_project_from_draft(
+    state: tauri::State<'_, WorkspaceState>,
+    name: String,
+    root: String,
+    draft: DraftPipeline,
+) -> Result<Project, String> {
+    create_project_from_draft_inner(&state, name, root, draft).await
 }
 
 #[async_trait]
@@ -488,6 +538,7 @@ pub fn run() {
             pipeline::api::pipeline_load,
             kickoff_generate_cmd,
             design_session_turn_cmd,
+            create_project_from_draft,
             pipeline::api::pipeline_instantiate_template,
             runtime::api::inject_topic,
             runtime::api::approve_gate,
@@ -774,5 +825,63 @@ mod design_session_tests {
         let draft = pipeline::draft::DraftPipeline::empty();
         let out = design_session_turn(&runner, "s1", Step::Teams, draft, "add two teams").await;
         assert_eq!(out.updated_draft.teams.len(), 2);
+    }
+
+    use pipeline::draft::DraftTeam;
+    use workspace::api::WorkspaceState;
+    use workspace::store::ProjectStore;
+    use std::sync::Arc as StdArc;
+
+    async fn workspace_state(pool: sqlx::SqlitePool) -> WorkspaceState {
+        sqlx::query(include_str!("../migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        WorkspaceState { store: StdArc::new(ProjectStore::new(pool)) }
+    }
+
+    fn complete_draft(root_friendly_id: &str) -> DraftPipeline {
+        let mut d = DraftPipeline::empty();
+        d.id = root_friendly_id.into();
+        d.name = "Demo".into();
+        let mut a = DraftTeam::new("research", "Research");
+        a.prompt_body = "investigate".into();
+        a.outputs.on_approve = Some("writers".into());
+        let mut b = DraftTeam::new("writers", "Writers");
+        b.prompt_body = "write".into();
+        d.teams.push(a);
+        d.teams.push(b);
+        d
+    }
+
+    #[tokio::test]
+    async fn create_from_an_invalid_draft_writes_nothing_and_errors() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let root = std::env::temp_dir().join(format!("abp-cpfd-bad-{}", uuid::Uuid::new_v4()));
+        // an invalid draft: a team routes to a non-existent node -> hard validate fails
+        let mut d = complete_draft("bad");
+        d.teams[0].outputs.on_approve = Some("ghost".into());
+        let err = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), d)
+            .await
+            .unwrap_err();
+        assert!(!err.is_empty());
+        // nothing written
+        assert!(!root.join("pipelines").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn create_from_a_valid_draft_writes_files_and_activates() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let root = std::env::temp_dir().join(format!("abp-cpfd-ok-{}", uuid::Uuid::new_v4()));
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+            .await
+            .unwrap();
+        // files written
+        assert!(root.join("pipelines/demo.yaml").exists());
+        assert_eq!(std::fs::read_to_string(root.join("prompts/research.md")).unwrap(), "investigate");
+        // active pipeline set to the draft id
+        let reloaded = ws.store.get(&agent_bus_core::ProjectId(project.id.0.clone())).await.unwrap();
+        assert_eq!(reloaded.active_pipeline_id.map(|p| p.0), Some("demo".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
