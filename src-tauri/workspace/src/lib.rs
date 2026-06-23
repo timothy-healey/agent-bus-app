@@ -7,3 +7,6 @@ pub mod paths;
 
 pub use project::*;
 pub use store::*;
+
+#[cfg(test)]
+mod contract_tests;

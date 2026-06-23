@@ -11,3 +11,6 @@ pub use verdict::*;
 pub use runner::*;
 pub use tool_protocol::*;
 pub use usage::*;
+
+#[cfg(test)]
+mod contract_tests;

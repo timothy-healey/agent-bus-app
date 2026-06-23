@@ -27,3 +27,6 @@ pub use pool::*;
 pub mod revision;
 
 pub mod api;
+
+#[cfg(test)]
+mod contract_tests;

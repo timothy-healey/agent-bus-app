@@ -12,3 +12,6 @@ pub use parse::*;
 pub use validate::*;
 pub use template::*;
 pub use store::*;
+
+#[cfg(test)]
+mod contract_tests;
