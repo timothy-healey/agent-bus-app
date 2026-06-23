@@ -291,6 +291,7 @@ impl DraftPipeline {
             name: self.name.clone(),
             description: self.description.clone(),
             schema_version: self.schema_version,
+            defaults: None,
             teams: self
                 .teams
                 .iter()
@@ -298,7 +299,9 @@ impl DraftPipeline {
                     id: t.id.clone(),
                     name: t.name.clone(),
                     prompt: prompt_path(&t.id),
-                    runner: t.runner.clone(),
+                    // R5: the wizard authors a full RunnerConfig per team; wrap it
+                    // as a complete TeamRunnerConfig override.
+                    runner: Some(crate::model::TeamRunnerConfig::from_full(t.runner.clone())),
                     scope: t.scope.clone(),
                     outputs: t.outputs.clone(),
                     workers: t.workers.clone(),
@@ -607,6 +610,16 @@ mod tests {
     fn to_pipeline_then_hard_validate_passes_for_a_complete_draft() {
         let p = complete_draft().to_pipeline();
         assert_eq!(crate::validate::validate(&p), Ok(()));
+    }
+
+    #[test]
+    fn to_pipeline_wraps_team_runner_as_some_full_override() {
+        let p = complete_draft().to_pipeline();
+        let tr = p.teams[0].runner.as_ref().unwrap();
+        assert!(tr.kind.is_some() && tr.model.is_some() && tr.effort.is_some());
+        // and it resolves + hard-validates
+        let resolved = crate::resolve::resolve_defaults(&p);
+        assert_eq!(crate::validate::validate(&resolved), Ok(()));
     }
 
     #[test]
