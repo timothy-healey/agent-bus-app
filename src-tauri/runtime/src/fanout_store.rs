@@ -163,6 +163,51 @@ impl FanOutStore {
             .collect::<Result<_, _>>()?;
         Ok(BarrierOutcome::Completed(g.continuation(&recorded)))
     }
+
+    /// Early-cancel path (P2): record this failing lane's verdict, then complete
+    /// the group to needs-human IMMEDIATELY — without waiting for the other lanes
+    /// — using the SAME completes-once conditional UPDATE guard as the full
+    /// barrier. This is the FanOutGroup aggregate's early-cancel policy; the
+    /// caller invokes it only when the lane's join has `cancel_on_reject` and the
+    /// lane settled as a failure (Verdict::Reject — covers explicit reject and
+    /// revise-cap escalation per Decision D5).
+    ///
+    /// Returns `Completed(NeedsHuman)` for the sole winner; `Parked` if the group
+    /// was already completed (a straggler / a concurrent settle won first). The
+    /// exactly-one-completion invariant is preserved: the same `WHERE completed=0`
+    /// row guard arbitrates between this path and `record_and_try_complete`.
+    pub async fn record_failure_and_early_cancel(
+        &self,
+        group_id: &str,
+        lane: &str,
+        verdict: Verdict,
+    ) -> Result<BarrierOutcome, FanOutStoreError> {
+        // 1. Upsert this lane's verdict (idempotent on re-record — D6).
+        sqlx::query(
+            "INSERT INTO fanout_lanes (group_id, lane, verdict) VALUES (?,?,?)
+             ON CONFLICT(group_id, lane) DO UPDATE SET verdict=excluded.verdict",
+        )
+        .bind(group_id)
+        .bind(lane)
+        .bind(verdict_str(verdict))
+        .execute(&self.pool)
+        .await?;
+
+        // 2. Attempt the completes-once guard NOW — do not wait for other lanes.
+        let res = sqlx::query("UPDATE fanout_groups SET completed=1 WHERE id=? AND completed=0")
+            .bind(group_id)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            // Already completed (full barrier or another early-cancel won).
+            return Ok(BarrierOutcome::Parked);
+        }
+
+        // 3. Sole winner: ask the aggregate root for the early-cancel
+        //    continuation (keeps the aggregation rule on FanOutGroup — vet F1).
+        let g = self.load(group_id).await?;
+        Ok(BarrierOutcome::Completed(g.early_cancel_continuation()))
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +285,55 @@ mod tests {
         let (a, b) = (h1.await.unwrap(), h2.await.unwrap());
         let completions = [&a, &b].iter().filter(|o| matches!(o, BarrierOutcome::Completed(_))).count();
         assert_eq!(completions, 1, "exactly one caller completes the barrier");
+    }
+
+    #[tokio::test]
+    async fn early_cancel_completes_to_needs_human_without_waiting_for_other_lanes() {
+        let store = FanOutStore::new(fresh_pool().await);
+        seeded(&store).await; // lanes a + b, both 'pending'
+        // lane-a fails; with early-cancel the group completes NOW even though
+        // lane-b is still pending.
+        let outcome = store
+            .record_failure_and_early_cancel("G-1", "lane-a", Verdict::Reject)
+            .await
+            .unwrap();
+        assert_eq!(outcome, BarrierOutcome::Completed(Continuation::NeedsHuman));
+        // group is marked completed
+        assert!(store.load("G-1").await.unwrap().completed);
+    }
+
+    #[tokio::test]
+    async fn early_cancel_is_exactly_once_against_a_concurrent_straggler() {
+        // THE CRUX for P2: the failing lane early-cancels while the other lane
+        // settles concurrently. Exactly one of them wins the completes-once guard.
+        let store = std::sync::Arc::new(FanOutStore::new(fresh_pool().await));
+        seeded(&store).await;
+        let s1 = store.clone();
+        let s2 = store.clone();
+        let h1 = tokio::spawn(async move {
+            s1.record_failure_and_early_cancel("G-1", "lane-a", Verdict::Reject).await.unwrap()
+        });
+        let h2 = tokio::spawn(async move {
+            s2.record_and_try_complete("G-1", "lane-b", Verdict::Approve).await.unwrap()
+        });
+        let (a, b) = (h1.await.unwrap(), h2.await.unwrap());
+        let completions = [&a, &b].iter().filter(|o| matches!(o, BarrierOutcome::Completed(_))).count();
+        assert_eq!(completions, 1, "exactly one caller completes the barrier");
+        // and if the early-cancel won, it completed to needs-human
+        if let BarrierOutcome::Completed(c) = &a {
+            assert_eq!(*c, Continuation::NeedsHuman);
+        }
+    }
+
+    #[tokio::test]
+    async fn early_cancel_after_group_already_completed_parks() {
+        let store = FanOutStore::new(fresh_pool().await);
+        seeded(&store).await;
+        // first failing lane early-cancels (completes)
+        store.record_failure_and_early_cancel("G-1", "lane-a", Verdict::Reject).await.unwrap();
+        // a straggler lane settles later -> group already completed -> parks
+        let again = store.record_and_try_complete("G-1", "lane-b", Verdict::Reject).await.unwrap();
+        assert_eq!(again, BarrierOutcome::Parked);
     }
 
     #[tokio::test]
