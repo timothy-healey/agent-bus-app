@@ -3,6 +3,7 @@ import { createProjectFromDraft, type DraftPipeline } from "../ipc/pipeline";
 import type { Project } from "../ipc/workspace";
 import { PipelineView } from "../components/PipelineView";
 import { draftToPipeline } from "./WiringStep";
+import { Button } from "../components/ui/Button";
 
 interface ReviewStepProps {
   basics: { name: string; root: string; description: string };
@@ -42,8 +43,12 @@ export function ReviewStep({ basics, draft, onCreated }: ReviewStepProps) {
           <pre style={{ whiteSpace: "pre-wrap", background: "var(--bg-2)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", color: "var(--text)" }}>{t.prompt_body}</pre>
         </div>
       ))}
-      {error && <div style={{ color: "var(--danger)", fontSize: 12 }}>{error}</div>}
-      <button onClick={create} disabled={busy}>Create project</button>
+      {error && (
+        <div role="alert" style={{ color: "var(--danger)", fontSize: "var(--ts-base)", border: "1px solid var(--danger)", background: "var(--danger-2)", borderRadius: "var(--r-sm)", padding: "var(--sp-2)", marginBottom: "var(--sp-2)" }}>{error}</div>
+      )}
+      <Button variant="primary" onClick={create} disabled={busy}>
+        {busy ? "Creating…" : "Create project"}
+      </Button>
     </div>
   );
 }

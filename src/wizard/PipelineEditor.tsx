@@ -4,6 +4,8 @@ import { bestEffortValidate, savePipelineEdits, type DraftPipeline } from "../ip
 import { TeamsStep } from "./TeamsStep";
 import { PromptsStep } from "./PromptsStep";
 import { WiringStep } from "./WiringStep";
+import { Button } from "../components/ui/Button";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 const EDIT_STEPS = ["teams", "prompts", "wiring"] as const;
 type EditStep = (typeof EDIT_STEPS)[number];
@@ -27,6 +29,8 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
   const [error, setError] = useState<string | null>(null);
 
   const idx = EDIT_STEPS.indexOf(step);
+  // Focus trap + Escape-to-close + restore-focus (audit A2).
+  const dialogRef = useModalA11y<HTMLDivElement>(true, onClose);
 
   // Manual edits re-fetch the backend's best-effort issues (the backend stays the
   // validation authority — same contract as ChatDraftPanel's manual-edit path).
@@ -49,12 +53,20 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
   }
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Edit pipeline" style={overlay} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={panel}>
+    <div style={overlay} onClick={onClose}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit pipeline"
+        onClick={(e) => e.stopPropagation()}
+        style={panel}
+      >
         <div style={{ display: "flex", gap: 8, marginBottom: "var(--sp-4)" }}>
           {EDIT_STEPS.map((s) => (
             <button
               key={s}
+              className="abp-tab"
               onClick={() => setStep(s)}
               style={{
                 background: s === step ? "var(--surface-2)" : "transparent",
@@ -63,9 +75,10 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
                 color: s === step ? "var(--text)" : "var(--text-3)",
                 padding: "3px 12px",
                 borderRadius: "var(--r-sm)",
-                fontSize: 12,
+                fontSize: "var(--ts-base)",
                 textTransform: "capitalize",
                 cursor: "pointer",
+                fontFamily: "inherit",
               }}
             >
               {s}
@@ -74,15 +87,15 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
         </div>
 
         {issues.length > 0 && (
-          <div
+          <ul
             role="status"
             aria-label="validation issues"
-            style={{ marginBottom: "var(--sp-3)", padding: "var(--sp-2)", border: "1px solid var(--accent-bd)", background: "var(--accent-2)", borderRadius: "var(--r-sm)", color: "var(--text-2)", fontSize: 11 }}
+            style={{ listStyle: "none", margin: "0 0 var(--sp-3)", padding: "var(--sp-2)", border: "1px solid var(--warn)", background: "var(--warn-2)", borderRadius: "var(--r-sm)", color: "var(--text-2)", fontSize: "var(--ts-sm)" }}
           >
             {issues.map((iss, i) => (
-              <div key={i}>• {iss}</div>
+              <li key={i}>• {iss}</li>
             ))}
-          </div>
+          </ul>
         )}
 
         <div style={{ minHeight: 360, maxHeight: 460, overflowY: "auto" }}>
@@ -91,14 +104,18 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
           {step === "wiring" && <WiringStep draft={draft} onChange={onChange} />}
         </div>
 
-        {error && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: "var(--sp-2)" }}>{error}</div>}
+        {error && (
+          <div role="alert" style={{ color: "var(--danger)", fontSize: "var(--ts-base)", marginTop: "var(--sp-2)", border: "1px solid var(--danger)", background: "var(--danger-2)", borderRadius: "var(--r-sm)", padding: "var(--sp-2)" }}>{error}</div>
+        )}
 
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: "var(--sp-5)" }}>
-          <button onClick={onClose}>Cancel</button>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <div style={{ display: "flex", gap: 8 }}>
-            {idx > 0 && <button onClick={() => setStep(EDIT_STEPS[idx - 1])}>Back</button>}
-            {idx < EDIT_STEPS.length - 1 && <button onClick={() => setStep(EDIT_STEPS[idx + 1])}>Next</button>}
-            <button onClick={save} disabled={busy} aria-label="save pipeline">Save pipeline</button>
+            {idx > 0 && <Button onClick={() => setStep(EDIT_STEPS[idx - 1])}>Back</Button>}
+            {idx < EDIT_STEPS.length - 1 && <Button onClick={() => setStep(EDIT_STEPS[idx + 1])}>Next</Button>}
+            <Button variant="primary" onClick={save} disabled={busy} aria-label="save pipeline">
+              {busy ? "Saving…" : "Save pipeline"}
+            </Button>
           </div>
         </div>
       </div>
@@ -106,5 +123,5 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
   );
 }
 
-const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 };
+const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "var(--scrim)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 };
 const panel: React.CSSProperties = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: "var(--sp-7)", minWidth: 720, maxWidth: 900 };
