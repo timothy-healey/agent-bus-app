@@ -2,6 +2,7 @@ import { type Project } from "../ipc/workspace";
 import type { UsageSnapshot } from "../ipc/usage";
 import { ThemeToggle } from "./ThemeToggle";
 import { UsageMeter } from "./UsageMeter";
+import { Button } from "./ui/Button";
 
 export interface TopbarProps {
   activeProject: Project | null;
@@ -47,7 +48,7 @@ export function Topbar({ activeProject, onNewProject, usage, brakeOn, brakeReaso
 
         <button
           onClick={() => onToggleBrake(!brakeOn)}
-          title={brakeOn && brakeReason ? `reason: ${brakeReason}` : undefined}
+          aria-pressed={brakeOn}
           style={{
             display: "flex",
             alignItems: "center",
@@ -57,7 +58,7 @@ export function Topbar({ activeProject, onNewProject, usage, brakeOn, brakeReaso
             color: brakeOn ? "var(--danger)" : "var(--text-3)",
             padding: "4px 10px",
             fontFamily: "inherit",
-            fontSize: 12,
+            fontSize: "var(--ts-base)",
             borderRadius: "var(--r-sm)",
             cursor: "pointer",
           }}
@@ -76,22 +77,7 @@ export function Topbar({ activeProject, onNewProject, usage, brakeOn, brakeReaso
           ) : null}
         </button>
 
-        <button
-          onClick={onNewProject}
-          style={{
-            background: "var(--accent)",
-            border: "1px solid var(--accent)",
-            color: "oklch(15% 0.04 55)",
-            padding: "4px 10px",
-            fontFamily: "inherit",
-            fontSize: 11,
-            borderRadius: "var(--r-sm)",
-            cursor: "pointer",
-            fontWeight: 500,
-          }}
-        >
-          New project
-        </button>
+        <Button variant="primary" size="sm" onClick={onNewProject}>New project</Button>
         <ThemeToggle />
       </div>
     </header>

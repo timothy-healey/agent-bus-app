@@ -90,6 +90,17 @@ code, .mono {
 .abp-icon-delete { transition: color var(--dur-fast) var(--ease-out); }
 .abp-icon-delete:hover { color: var(--danger); }
 
+/* Loading skeleton (DESIGN.md §States: skeleton lines, never spinners in content) */
+.abp-skeleton {
+  height: 0.7em;
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  animation: abp-pulse 1.8s var(--ease-out) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .abp-skeleton { animation: none !important; }
+}
+
 /* Motion — DESIGN.md §Motion. State, never decoration. */
 @keyframes abp-pulse {
   0%, 100% { opacity: 1; }
