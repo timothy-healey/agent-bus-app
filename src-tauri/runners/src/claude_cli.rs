@@ -5,8 +5,8 @@
 //! Spawner; tests inject a canned-stdout closure.
 
 use crate::command::{build_args, CLAUDE_BIN};
-use crate::output::{InvocationRequest, Runner, RunnerError, RunnerOutput};
-use crate::stream_json::parse_stream;
+use crate::output::{InvocationRequest, LogSink, Runner, RunnerError, RunnerOutput};
+use crate::stream_json::parse_stream_streaming;
 use async_trait::async_trait;
 
 /// Produces the raw stream-json stdout for a given argv. Async + boxed so the
@@ -37,6 +37,21 @@ impl ClaudeCliRunner {
     pub fn with_spawner(spawn: SpawnFn) -> Self {
         Self { spawn }
     }
+
+    /// Spawn once and parse, forwarding any assistant prose fragments to
+    /// `forward`. A no-op `forward` means no deltas (identical result to the old
+    /// whole-buffer parse — proven by the stream_json tests). Both `invoke` (no
+    /// forwarder) and `invoke_stream` (sink forwarder) route through here, so the
+    /// streaming and non-streaming paths can never drift on the final output.
+    fn run_once(
+        &self,
+        req: &InvocationRequest,
+        forward: &mut dyn FnMut(&str),
+    ) -> Result<RunnerOutput, RunnerError> {
+        let args = build_args(req);
+        let stdout = (self.spawn)(&args)?;
+        parse_stream_streaming(&stdout, &req.model, forward)
+    }
 }
 
 impl Default for ClaudeCliRunner {
@@ -48,9 +63,16 @@ impl Default for ClaudeCliRunner {
 #[async_trait]
 impl Runner for ClaudeCliRunner {
     async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError> {
-        let args = build_args(req);
-        let stdout = (self.spawn)(&args)?;
-        parse_stream(&stdout, &req.model)
+        self.run_once(req, &mut |_d: &str| {})
+    }
+
+    async fn invoke_stream(
+        &self,
+        req: &InvocationRequest,
+        sink: &LogSink,
+    ) -> Result<RunnerOutput, RunnerError> {
+        let mut forward = |d: &str| sink(d);
+        self.run_once(req, &mut forward)
     }
 }
 
@@ -102,5 +124,37 @@ mod tests {
         }));
         let err = runner.invoke(&req()).await.unwrap_err();
         assert!(err.is_rate_limited());
+    }
+
+    #[tokio::test]
+    async fn invoke_stream_forwards_prose_deltas_and_returns_same_output() {
+        use crate::output::LogSink;
+        use std::sync::{Arc, Mutex};
+        // The assistant prose carries the verdict (as in the real stream-json
+        // sample); the result line is authoritative but is NOT streamed as a delta.
+        // The assistant prose carries the verdict on its own line (as in the real
+        // stream-json sample); the result line is authoritative but is NOT streamed.
+        let canned = r#"{"type":"system","model":"claude-opus-4-7"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Analysing.\nVERDICT: approve"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Analysing.\nVERDICT: approve","usage":{"input_tokens":5,"output_tokens":7}}"#;
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args| Ok(canned.to_string())));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s = seen.clone();
+        let sink: LogSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let out = runner.invoke_stream(&req(), &sink).await.unwrap();
+        // final output identical to the non-streaming path
+        assert_eq!(out.verdict, Verdict::Approve);
+        // the assistant prose was streamed (result line is not a delta)
+        assert_eq!(*seen.lock().unwrap(), vec!["Analysing.\nVERDICT: approve".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn invoke_and_invoke_stream_produce_identical_output() {
+        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve\nARTIFACT: a.md","usage":{"input_tokens":5,"output_tokens":7}}"#;
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args| Ok(canned.to_string())));
+        let plain = runner.invoke(&req()).await.unwrap();
+        let noop: crate::output::LogSink = Box::new(|_d: &str| {});
+        let streamed = runner.invoke_stream(&req(), &noop).await.unwrap();
+        assert_eq!(plain, streamed);
     }
 }
