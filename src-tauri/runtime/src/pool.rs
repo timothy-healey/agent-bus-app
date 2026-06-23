@@ -873,6 +873,17 @@ mod tests {
         assert!(cg.parent_group_id.is_some());
     }
 
+    #[test]
+    fn lane_reaches_traverses_a_nested_fork_to_the_outer_join() {
+        let p = pipeline_v2_nested();
+        // lane-a goes through fork-2 / join-2 / mid-a before hitting join-1
+        assert!(lane_reaches(&p, "lane-a", "join-1"));
+        // lane-b is a direct linear lane to join-1
+        assert!(lane_reaches(&p, "lane-b", "join-1"));
+        // the nested fork's own lanes reach join-2 directly
+        assert!(lane_reaches(&p, "a1", "join-2"));
+    }
+
     /// A runner that returns a seeded reject for the `lane-b` team and approve
     /// for everything else — used to exercise the one-reject barrier path.
     struct StageRunner { reject: RunnerOutput }
