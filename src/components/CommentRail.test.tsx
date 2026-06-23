@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { CommentRail } from "./CommentRail";
-import type { Comment } from "../ipc/review";
+import type { ReanchoredComment } from "../ipc/review";
 
-function comment(over: Partial<Comment> = {}): Comment {
+function comment(over: Partial<ReanchoredComment> = {}): ReanchoredComment {
   return {
     id: "c1",
     task_id: "T-1",
@@ -13,6 +13,8 @@ function comment(over: Partial<Comment> = {}): Comment {
     note: "per-row, not per-batch",
     kind: "inline",
     created_at: 0,
+    status: "open",
+    effective_offset: 10,
     ...over,
   };
 }
@@ -61,5 +63,23 @@ describe("CommentRail", () => {
     render(<CommentRail comments={[comment()]} onSelect={() => {}} onDelete={onDelete} />);
     fireEvent.click(screen.getByRole("button", { name: /delete comment/i }));
     expect(onDelete).toHaveBeenCalledWith("c1");
+  });
+
+  it("marks addressed comments distinctly and counts them (B1)", () => {
+    render(
+      <CommentRail
+        comments={[
+          comment({ id: "c1", note: "note-c1", status: "addressed" }),
+          comment({ id: "c2", note: "note-c2", status: "open" }),
+        ]}
+        onSelect={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect(screen.getByText("note-c1").closest("[data-status]")).toHaveAttribute(
+      "data-status",
+      "addressed",
+    );
+    expect(screen.getByTestId("rail-count")).toHaveTextContent("1 of 2 addressed");
   });
 });

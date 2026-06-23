@@ -49,12 +49,14 @@ export function CardDrawer({
   onReject,
 }: CardDrawerProps) {
   const artifactPath = task.review_artifact ?? task.parent_artifact ?? `artifacts/${task.id}.md`;
-  const { comments, add, remove } = useComments(task.id, artifactPath);
+  // Pass the viewed artifact body so the hook re-anchors comments addressed in
+  // this version (B1); absent a body it falls back to v1 carry-over.
+  const { reanchored, add, remove } = useComments(task.id, artifactPath, artifactMarkdown);
   const [tab, setTab] = useState<Tab>("artifact");
   const [revising, setRevising] = useState(false);
   const [activeComment, setActiveComment] = useState<string | undefined>();
 
-  const inlineCount = comments.filter((c) => c.kind === "inline").length;
+  const inlineCount = reanchored.filter((c) => c.kind === "inline").length;
   const gated = task.state === "gated";
 
   const head: CSSProperties = { padding: "14px 18px", borderBottom: "1px solid var(--border)" };
@@ -127,7 +129,7 @@ export function CardDrawer({
             </div>
             <div style={{ width: 230, flexShrink: 0 }}>
               <CommentRail
-                comments={comments}
+                comments={reanchored}
                 activeId={activeComment}
                 onSelect={setActiveComment}
                 onDelete={remove}
