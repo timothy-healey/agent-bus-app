@@ -12,7 +12,7 @@ import { ListView } from "./components/ListView";
 import { SettingsView } from "./components/SettingsView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
-import { readArtifact, removeProject, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
+import { readArtifact, removeProject, listWorktrees, removeWorktree, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
 import { setRunnerApiKey, clearRunnerApiKey, getRunnerApiKeyStatus, ANTHROPIC_API_KEY_ID } from "./ipc/secrets";
 import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
@@ -232,6 +232,8 @@ export default function App() {
             projects={projects}
             activeProjectId={activeProject?.id ?? null}
             onRemoveProject={async (id) => { await removeProject(id); await reload(); }}
+            onListWorktrees={(id) => listWorktrees(id)}
+            onRemoveWorktree={async (id, path) => { await removeWorktree(id, path); }}
           />
         ) : activeProject == null ? (
           <ProjectList />

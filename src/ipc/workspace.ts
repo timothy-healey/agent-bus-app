@@ -52,6 +52,21 @@ export async function removeProject(id: string): Promise<void> {
   await invoke<void>("workspace_remove_project", { id });
 }
 
+export interface WorktreeEntry {
+  path: string;
+  head: string;
+  branch: string;
+  stale: boolean;
+}
+
+export async function listWorktrees(projectId: string): Promise<WorktreeEntry[]> {
+  return await invoke<WorktreeEntry[]>("list_worktrees", { project_id: projectId });
+}
+
+export async function removeWorktree(projectId: string, path: string): Promise<void> {
+  await invoke<void>("remove_worktree", { project_id: projectId, path });
+}
+
 export async function getGitConfig(): Promise<GitConfig> {
   return await invoke<GitConfig>("git_config_get");
 }
