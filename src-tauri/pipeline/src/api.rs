@@ -16,7 +16,7 @@ pub struct TemplateInfo {
     pub name: String,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn pipeline_list_templates() -> Vec<TemplateInfo> {
     bundled_templates()
         .into_iter()
@@ -24,21 +24,21 @@ pub fn pipeline_list_templates() -> Vec<TemplateInfo> {
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn pipeline_list(project_root: String) -> Result<Vec<String>, String> {
     PipelineStore::new(project_root)
         .list_ids()
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn pipeline_load(project_root: String, id: String) -> Result<Pipeline, String> {
     PipelineStore::new(project_root)
         .load(&id)
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn pipeline_instantiate_template(
     project_root: String,
     template_id: String,

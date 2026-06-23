@@ -31,7 +31,7 @@ pub struct VerdictMarker {
     pub comment_count: usize,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn add_comment(
     state: tauri::State<'_, ReviewState>,
     task_id: String,
@@ -60,7 +60,7 @@ pub async fn add_comment(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn list_comments(
     state: tauri::State<'_, ReviewState>,
     task_id: String,
@@ -72,7 +72,7 @@ pub async fn list_comments(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn delete_comment(
     state: tauri::State<'_, ReviewState>,
     comment_id: String,
@@ -87,7 +87,7 @@ pub async fn delete_comment(
 /// Records the verdict marker (Review-side audit) and returns it. The frontend
 /// then calls the Runtime gate command that actually transitions the Task —
 /// keeping Review Conformist to Runtime's state machine.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn record_verdict(
     state: tauri::State<'_, ReviewState>,
     task_id: String,

@@ -53,7 +53,7 @@ pub async fn send_message_inner(
     Ok(convo)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn send_message(
     state: tauri::State<'_, TerminalState>,
     input: String,
@@ -72,7 +72,7 @@ pub async fn send_message(
     .await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_conversation(
     state: tauri::State<'_, TerminalState>,
 ) -> Result<Option<Conversation>, String> {
