@@ -64,8 +64,9 @@ escalations:
 
         let team = &p.teams[0];
         assert_eq!(team.id, "research");
-        assert_eq!(team.runner.kind, RunnerKind::ClaudeCli);
-        assert_eq!(team.runner.effort, EffortMode::ExtendedHigh);
+        let runner = team.runner.as_ref().unwrap();
+        assert_eq!(runner.kind, Some(RunnerKind::ClaudeCli));
+        assert_eq!(runner.effort, Some(EffortMode::ExtendedHigh));
         assert_eq!(team.outputs.on_approve.as_deref(), Some("gate-1-spec"));
         assert_eq!(team.outputs.on_revise, None);
         assert_eq!(team.workers.max, 3);
@@ -132,8 +133,18 @@ escalations:
 
     #[test]
     fn missing_required_team_field_is_a_parse_error() {
-        // team missing `runner` — serde reports a missing-field error.
-        let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: p.md\n    scope: {}\n    outputs: {}\n";
+        // team missing `prompt` (still required) — serde reports a missing-field
+        // error. (`runner` is now optional/R5, so omitting it is NOT an error;
+        // the team inherits the pipeline default.)
+        let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    scope: {}\n    outputs: {}\n";
         assert!(parse_pipeline(yaml).is_err());
+    }
+
+    #[test]
+    fn team_omitting_runner_parses_for_inheritance() {
+        // R5: a team may omit its runner entirely (inherits pipeline defaults).
+        let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: p.md\n    scope: {}\n    outputs: {}\n";
+        let p = parse_pipeline(yaml).unwrap();
+        assert!(p.teams[0].runner.is_none());
     }
 }

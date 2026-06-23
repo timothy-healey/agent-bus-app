@@ -95,11 +95,12 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
     let scope_settings = prepare(&ctx.project_root, &team.id, &task.id.0, now, &team.scope, &vars)?;
 
     // 3. INVOKE runner (the ACL seam)
+    let effective = team.effective_runner();
     let req = InvocationRequest {
         task_id: task.id.0.clone(),
         team_id: team.id.clone(),
-        model: team.runner.model.clone(),
-        thinking_budget: team.runner.effort.budget_tokens(),
+        model: effective.model.clone(),
+        thinking_budget: effective.effort.budget_tokens(),
         system_prompt: (ctx.read_prompt)(team),
         user_message: compose_invocation_message(
             &task.topic,
@@ -317,7 +318,7 @@ mod tests {
     use super::*;
     use crate::task::Task;
     use agent_bus_core::Verdict;
-    use pipeline::model::{Gate, Routes, RunnerConfig, Scope, Workers};
+    use pipeline::model::{Gate, Routes, Scope, Workers};
     use agent_bus_core::{EffortMode, RunnerKind};
     use runners::fake::FakeRunner;
     use runners::output::{RunnerError, RunnerOutput, RunnerUsage};
@@ -338,7 +339,7 @@ mod tests {
     fn team(id: &str, approve: Option<&str>, revise: Option<&str>) -> Team {
         Team {
             id: id.into(), name: id.into(), prompt: format!("prompts/{id}.md"),
-            runner: RunnerConfig { kind: RunnerKind::ClaudeCli, model: "claude-opus-4-7".into(), effort: EffortMode::Standard, api_key_env: None },
+            runner: Some(pipeline::TeamRunnerConfig { kind: Some(RunnerKind::ClaudeCli), model: Some("claude-opus-4-7".into()), effort: Some(EffortMode::Standard), api_key_env: None }),
             scope: Scope { reads: vec!["${project}/artifacts".into()], writes: vec![], tools: vec!["Read".into()] },
             outputs: Routes { on_approve: approve.map(String::from), on_revise: revise.map(String::from), on_reject: Some("needs-human".into()) },
             workers: Workers::default(),
@@ -347,6 +348,7 @@ mod tests {
 
     fn pipeline_with(teams: Vec<Team>, gates: Vec<Gate>) -> Pipeline {
         Pipeline { id: "p".into(), name: "P".into(), description: String::new(), schema_version: 1,
+            defaults: None,
             teams, gates, escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
             forks: vec![], joins: vec![] }
     }
@@ -557,6 +559,7 @@ mod tests {
     fn pipeline_v2_forkjoin() -> Pipeline {
         Pipeline {
             id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            defaults: None,
             teams: vec![
                 team("entry", Some("fork-1"), None),
                 team("lane-a", Some("join-1"), None),

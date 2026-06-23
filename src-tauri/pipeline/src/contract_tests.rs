@@ -36,7 +36,7 @@ fn full_team() -> Team {
         id: "research".into(),
         name: "Research".into(),
         prompt: "prompts/research.md".into(),
-        runner: full_runner(),
+        runner: Some(crate::model::TeamRunnerConfig::from_full(full_runner())),
         scope: Scope { reads: vec!["src".into()], writes: vec!["artifacts".into()], tools: vec!["bash".into()] },
         // All routes Some so the skip_serializing_if fields appear (TS: on_*?).
         outputs: Routes {
@@ -57,6 +57,7 @@ fn pipeline_key_set_matches_ts() {
         name: "P".into(),
         description: "d".into(),
         schema_version: 1,
+        defaults: None,
         teams: vec![full_team()],
         gates: vec![Gate { id: "gate-1".into(), label: "Gate".into(), downstream: "research".into() }],
         escalations: vec![Escalation { id: "needs-human".into(), triggers: vec!["timeout".into()] }],
@@ -64,6 +65,9 @@ fn pipeline_key_set_matches_ts() {
         joins: vec![],
     };
     let v = serde_json::to_value(&p).unwrap();
+    // `defaults` is None here -> skip_serializing_if drops the key, so the base
+    // key set is unchanged (additive). `pipeline_defaults_key_appears_when_present`
+    // locks the key when populated.
     assert_eq!(
         keys(&v),
         set(&["id", "name", "description", "schema_version", "teams", "gates", "escalations", "forks", "joins"]),
@@ -153,6 +157,31 @@ fn gate_key_set_matches_ts() {
 fn escalation_key_set_matches_ts() {
     let v = serde_json::to_value(Escalation { id: "e".into(), triggers: vec!["t".into()] }).unwrap();
     assert_eq!(keys(&v), set(&["id", "triggers"]));
+}
+
+/// Locks `src/ipc/pipeline.ts` `PipelineDefaults` + the optional `Pipeline.defaults`
+/// key (R5): present and fully-populated when set; team.runner stays an object.
+#[test]
+fn pipeline_defaults_key_appears_when_present() {
+    use crate::model::PipelineDefaults;
+    let p = Pipeline {
+        id: "p".into(), name: "P".into(), description: "d".into(), schema_version: 2,
+        defaults: Some(PipelineDefaults {
+            default_runner: Some(RunnerKind::ClaudeCli),
+            default_model: Some("m".into()),
+            default_effort: Some(EffortMode::Standard),
+        }),
+        teams: vec![full_team()], gates: vec![], escalations: vec![], forks: vec![], joins: vec![],
+    };
+    let v = serde_json::to_value(&p).unwrap();
+    assert!(v.as_object().unwrap().contains_key("defaults"));
+    let d = &v["defaults"];
+    assert!(d.get("default_runner").is_some());
+    assert!(d.get("default_model").is_some());
+    assert!(d.get("default_effort").is_some());
+    // team.runner is still an object with the override keys
+    let r = &v["teams"][0]["runner"];
+    assert!(r.get("model").is_some());
 }
 
 /// Locks the DraftPipeline key set the wizard IPC mirrors (src/ipc/pipeline.ts).

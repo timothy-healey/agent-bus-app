@@ -21,6 +21,11 @@ pub struct Pipeline {
     /// predate the field still load; validate.rs enforces it is supported.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// Pipeline-level runner defaults teams inherit (R5). None = no defaults;
+    /// every team must then specify its own runner. Resolved at load
+    /// (resolve.rs) so Runtime only ever sees fully-specified team runners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<PipelineDefaults>,
     #[serde(default)]
     pub teams: Vec<Team>,
     #[serde(default)]
@@ -44,7 +49,11 @@ pub struct Team {
     /// Path to the team's operating prompt, relative to the project root
     /// (e.g. "prompts/research.md").
     pub prompt: String,
-    pub runner: RunnerConfig,
+    /// As authored: a partial override over `Pipeline.defaults`, or None to
+    /// inherit the whole default (R5). After `resolve::resolve_defaults` every
+    /// team holds `Some(fully-specified)`; use `effective_runner()` to read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<TeamRunnerConfig>,
     pub scope: Scope,
     pub outputs: Routes,
     #[serde(default)]
@@ -65,6 +74,50 @@ pub struct RunnerConfig {
 
 fn default_effort() -> EffortMode {
     EffortMode::Standard
+}
+
+/// Pipeline-level runner defaults (R5). Every field optional: a pipeline may
+/// supply just a model, just a runner kind, etc. Teams that omit a field
+/// inherit it (Pipeline Authoring resolves; see resolve.rs). Additive — a
+/// pipeline with no `defaults` key loads unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PipelineDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_runner: Option<RunnerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<EffortMode>,
+}
+
+/// A team's runner config as authored (R5): every field optional so a team can
+/// override just the model and inherit kind+effort from `Pipeline.defaults`.
+/// The resolver (resolve.rs) overlays this on the pipeline defaults to produce
+/// a fully-specified `RunnerConfig`. A team that omits `runner` entirely
+/// inherits the whole default.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TeamRunnerConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<RunnerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+}
+
+impl TeamRunnerConfig {
+    /// Wrap a fully-specified RunnerConfig as a (complete) override — used by
+    /// the wizard's `to_pipeline()` where the team runner is always full.
+    pub fn from_full(r: RunnerConfig) -> Self {
+        Self {
+            kind: Some(r.kind),
+            model: Some(r.model),
+            effort: Some(r.effort),
+            api_key_env: r.api_key_env,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -145,6 +198,25 @@ pub enum NodeKind {
     Join,
 }
 
+impl Team {
+    /// The team's fully-resolved runner (R5). Only valid after the pipeline has
+    /// been resolved (resolve::resolve_defaults) — every field is then present.
+    /// Panics if called on an unresolved team (a programmer error: the store
+    /// resolves + validates before any consumer sees the pipeline).
+    pub fn effective_runner(&self) -> RunnerConfig {
+        let tr = self
+            .runner
+            .as_ref()
+            .expect("team runner not resolved (call resolve::resolve_defaults first)");
+        RunnerConfig {
+            kind: tr.kind.expect("resolved runner missing kind"),
+            model: tr.model.clone().expect("resolved runner missing model"),
+            effort: tr.effort.expect("resolved runner missing effort"),
+            api_key_env: tr.api_key_env.clone(),
+        }
+    }
+}
+
 impl Pipeline {
     /// All node ids in the pipeline, paired with their kind. Used by validation
     /// (route targets must resolve to one of these) and the viewer.
@@ -168,12 +240,12 @@ mod tests {
             id: id.into(),
             name: id.into(),
             prompt: format!("prompts/{id}.md"),
-            runner: RunnerConfig {
-                kind: RunnerKind::ClaudeCli,
-                model: "claude-opus-4-7".into(),
-                effort: EffortMode::ExtendedHigh,
+            runner: Some(TeamRunnerConfig {
+                kind: Some(RunnerKind::ClaudeCli),
+                model: Some("claude-opus-4-7".into()),
+                effort: Some(EffortMode::ExtendedHigh),
                 api_key_env: None,
-            },
+            }),
             scope: Scope::default(),
             outputs: Routes::default(),
             workers: Workers::default(),
@@ -197,6 +269,7 @@ mod tests {
             name: "P".into(),
             description: String::new(),
             schema_version: 1,
+            defaults: None,
             teams: vec![sample_team("research")],
             gates: vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "research".into() }],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
@@ -217,6 +290,7 @@ mod tests {
             name: "P".into(),
             description: "d".into(),
             schema_version: 1,
+            defaults: None,
             teams: vec![sample_team("research")],
             gates: vec![],
             escalations: vec![],
@@ -232,6 +306,7 @@ mod tests {
     fn node_ids_includes_forks_and_joins() {
         let p = Pipeline {
             id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            defaults: None,
             teams: vec![sample_team("research")],
             gates: vec![],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
@@ -249,5 +324,54 @@ mod tests {
         let p: Pipeline = serde_json::from_str(json).unwrap();
         assert!(p.forks.is_empty());
         assert!(p.joins.is_empty());
+    }
+
+    #[test]
+    fn team_runner_config_round_trips_and_is_all_optional() {
+        // every field absent => deserialises to all-None
+        let empty: TeamRunnerConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(empty, TeamRunnerConfig::default());
+
+        let full = TeamRunnerConfig {
+            kind: Some(RunnerKind::ClaudeCli),
+            model: Some("m".into()),
+            effort: Some(EffortMode::Standard),
+            api_key_env: None,
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        let back: TeamRunnerConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(full, back);
+    }
+
+    #[test]
+    fn pipeline_defaults_is_all_optional() {
+        let d: PipelineDefaults = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(d, PipelineDefaults::default());
+        let d2 = PipelineDefaults {
+            default_runner: Some(RunnerKind::ClaudeCli),
+            default_model: Some("claude-opus-4-8".into()),
+            default_effort: Some(EffortMode::ExtendedHigh),
+        };
+        let s = serde_json::to_string(&d2).unwrap();
+        let back: PipelineDefaults = serde_json::from_str(&s).unwrap();
+        assert_eq!(d2, back);
+    }
+
+    #[test]
+    fn effective_runner_returns_the_resolved_config() {
+        let mut t = sample_team("research");
+        let r = t.effective_runner();
+        assert_eq!(r.kind, RunnerKind::ClaudeCli);
+        assert_eq!(r.model, "claude-opus-4-7");
+        // None => effective_runner panics (unresolved pipeline = programmer error)
+        t.runner = None;
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.effective_runner())).is_err());
+    }
+
+    #[test]
+    fn pipeline_defaults_field_defaults_to_none_when_absent() {
+        let json = r#"{"id":"p","name":"P","schema_version":2,"teams":[]}"#;
+        let p: Pipeline = serde_json::from_str(json).unwrap();
+        assert!(p.defaults.is_none());
     }
 }

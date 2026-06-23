@@ -62,7 +62,8 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 
 ### Pipeline Authoring
 - **Pipeline** — the graph: a versioned (`schema_version`) collection of teams, gates, escalations
-- **Team** — a node in the graph with one prompt, one scope, one runner config
+- **Team** — a node in the graph with one prompt, one scope, one runner config (a team may inherit the pipeline-level default and override fields selectively — R5; the *resolved* team always has exactly one fully-specified runner config)
+- **Pipeline defaults / effective runner config** — `Pipeline.defaults` (`default_runner` / `default_model` / `default_effort`) supply runner config that teams inherit when they omit their own (R5). The **effective runner config** is a team's runner after the pipeline defaults are overlaid; Pipeline Authoring resolves it at load (`resolve.rs`) so Runtime always consumes a fully-specified `RunnerConfig` and never learns about defaults.
 - **Gate** — a node where execution pauses until the operator approves/revises/rejects
 - **Escalation** — a sink for tasks that can't proceed (≥3 revises or explicit reject)
 - **Route** — an edge: `on_approve` / `on_revise` / `on_reject` pointing at another node

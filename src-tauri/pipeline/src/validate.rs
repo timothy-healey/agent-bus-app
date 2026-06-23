@@ -35,6 +35,8 @@ pub enum PipelineValidationError {
     UnreachableTeam(String),
     #[error("pipeline has no teams")]
     NoTeams,
+    #[error("team '{0}' has no resolvable runner (no model from the team or pipeline defaults)")]
+    TeamHasNoRunner(String),
 }
 
 /// Walk a fork lane from its entry team forward via on_approve edges until the
@@ -79,6 +81,21 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
 
     if p.teams.is_empty() {
         return Err(PipelineValidationError::NoTeams);
+    }
+
+    // R5: every team must end up with a fully-specified runner. validate runs on
+    // the RESOLVED pipeline (store::load resolves first), so a team whose runner
+    // is None or missing kind/model/effort here means neither the team nor the
+    // pipeline defaults supplied it.
+    for team in &p.teams {
+        let ok = team
+            .runner
+            .as_ref()
+            .map(crate::resolve::is_fully_resolved)
+            .unwrap_or(false);
+        if !ok {
+            return Err(PipelineValidationError::TeamHasNoRunner(team.id.clone()));
+        }
     }
 
     // unique node ids across all kinds
@@ -194,7 +211,7 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Escalation, Gate, Routes, RunnerConfig, Scope, Team, Workers};
+    use crate::model::{Escalation, Gate, Routes, Scope, Team, TeamRunnerConfig, Workers};
     use agent_bus_core::{EffortMode, RunnerKind};
 
     fn team(id: &str, approve: Option<&str>) -> Team {
@@ -202,12 +219,12 @@ mod tests {
             id: id.into(),
             name: id.into(),
             prompt: format!("prompts/{id}.md"),
-            runner: RunnerConfig {
-                kind: RunnerKind::ClaudeCli,
-                model: "m".into(),
-                effort: EffortMode::Standard,
+            runner: Some(TeamRunnerConfig {
+                kind: Some(RunnerKind::ClaudeCli),
+                model: Some("m".into()),
+                effort: Some(EffortMode::Standard),
                 api_key_env: None,
-            },
+            }),
             scope: Scope::default(),
             outputs: Routes { on_approve: approve.map(String::from), on_revise: None, on_reject: None },
             workers: Workers::default(),
@@ -220,6 +237,7 @@ mod tests {
             name: "P".into(),
             description: String::new(),
             schema_version: 1,
+            defaults: None,
             teams: vec![team("research", Some("gate-1")), team("writers", Some("needs-human"))],
             gates: vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "writers".into() }],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
@@ -288,6 +306,17 @@ mod tests {
         assert_eq!(validate(&p), Err(PipelineValidationError::NoTeams));
     }
 
+    #[test]
+    fn a_team_with_no_resolvable_model_is_rejected() {
+        let mut p = valid_pipeline();
+        // strip the model so it cannot resolve (no pipeline default either)
+        p.teams[0].runner = Some(TeamRunnerConfig { model: None, ..Default::default() });
+        assert_eq!(
+            validate(&p),
+            Err(PipelineValidationError::TeamHasNoRunner("research".into()))
+        );
+    }
+
     use crate::model::{Fork, Join};
 
     fn lane_team(id: &str, approve: &str) -> Team {
@@ -300,6 +329,7 @@ mod tests {
     fn valid_v2_pipeline() -> Pipeline {
         Pipeline {
             id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            defaults: None,
             teams: vec![
                 team("entry", Some("fork-1")),
                 lane_team("lane-a", "join-1"),
