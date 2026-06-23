@@ -27,6 +27,16 @@ pub struct FanOutGroup {
     pub downstream: String,
     pub expected_lanes: Vec<String>,
     pub completed: bool,
+    /// The enclosing group when this group is a nested fork inside a lane (P1).
+    /// `None` at the root (a top-level fork). When `Some`, this group's
+    /// completion settles the parent lane's verdict via the parent's barrier —
+    /// the same completes-once guard, one level up (DD-P1-2).
+    #[serde(default)]
+    pub parent_group_id: Option<String>,
+    /// The enclosing lane (entry team id) this group reports its resolution to.
+    /// `Some` iff `parent_group_id` is `Some`.
+    #[serde(default)]
+    pub parent_lane: Option<String>,
 }
 
 /// Where the single continuation past the barrier goes once all lanes settle.
@@ -39,6 +49,25 @@ pub enum Continuation {
 }
 
 impl FanOutGroup {
+    /// True when this group is a nested child (a fork inside a parent lane). A
+    /// child settles its parent lane on completion rather than spawning the
+    /// continuation directly (DD-P1-2).
+    pub fn is_child(&self) -> bool {
+        self.parent_group_id.is_some()
+    }
+
+    /// Map a resolved child group's continuation to the verdict its parent lane
+    /// records at the parent barrier: the child resolving to its downstream means
+    /// the lane "approved" into the parent join; needs-human means the lane
+    /// failed. This is how a nested group's exactly-once resolution feeds the
+    /// parent level's exactly-once barrier (DD-P1-2).
+    pub fn parent_lane_verdict(cont: &Continuation) -> Verdict {
+        match cont {
+            Continuation::Downstream(_) => Verdict::Approve,
+            Continuation::NeedsHuman => Verdict::Reject,
+        }
+    }
+
     /// True once every expected lane has a recorded verdict.
     pub fn all_lanes_settled(&self, recorded: &[LaneVerdict]) -> bool {
         self.expected_lanes
@@ -104,6 +133,8 @@ mod tests {
             downstream: "after".into(),
             expected_lanes: vec!["lane-a".into(), "lane-b".into()],
             completed: false,
+            parent_group_id: None,
+            parent_lane: None,
         }
     }
 
@@ -145,6 +176,8 @@ mod tests {
             downstream: "after".into(),
             expected_lanes: vec!["lane-a".into(), "lane-b".into(), "lane-c".into()],
             completed: false,
+            parent_group_id: None,
+            parent_lane: None,
         }
     }
 
@@ -204,5 +237,36 @@ mod tests {
             LaneVerdict { lane: "lane-b".into(), verdict: Verdict::Reject },
         ];
         assert_eq!(g.continuation(&settled), Continuation::NeedsHuman);
+    }
+
+    #[test]
+    fn a_root_group_has_no_parent_and_a_child_group_does() {
+        let root = group();
+        assert!(!root.is_child());
+        let child = FanOutGroup {
+            id: "G-2".into(),
+            pipeline: "pipe".into(),
+            join_target: "join-2".into(),
+            downstream: "after-2".into(),
+            expected_lanes: vec!["x".into(), "y".into()],
+            completed: false,
+            parent_group_id: Some("G-1".into()),
+            parent_lane: Some("lane-a".into()),
+        };
+        assert!(child.is_child());
+        assert_eq!(child.parent_group_id.as_deref(), Some("G-1"));
+        assert_eq!(child.parent_lane.as_deref(), Some("lane-a"));
+    }
+
+    #[test]
+    fn parent_lane_verdict_maps_downstream_to_approve_and_needs_human_to_reject() {
+        assert_eq!(
+            FanOutGroup::parent_lane_verdict(&Continuation::Downstream("x".into())),
+            Verdict::Approve
+        );
+        assert_eq!(
+            FanOutGroup::parent_lane_verdict(&Continuation::NeedsHuman),
+            Verdict::Reject
+        );
     }
 }
