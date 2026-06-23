@@ -1,4 +1,4 @@
-import type { DraftPipeline, DraftTeam, EffortMode, Gate } from "../ipc/pipeline";
+import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join } from "../ipc/pipeline";
 
 export const WIZARD_STEPS = ["basics", "teams", "prompts", "wiring", "review"] as const;
 export type WizardStep = (typeof WIZARD_STEPS)[number];
@@ -90,4 +90,27 @@ export function removeGate(d: DraftPipeline, id: string): DraftPipeline {
 
 export function setTeamApprove(d: DraftPipeline, teamId: string, target: string | null): DraftPipeline {
   return mapTeams(d, (t) => (t.id === teamId ? { ...t, outputs: { ...t.outputs, on_approve: target } } : t));
+}
+
+/// Create a paired fork + join in one action (W4). A fork must have >= 2 lanes
+/// (lane teams); the join waits on those same lanes and routes to `downstream`.
+/// No-op on <2 lanes or a duplicate fork/join id, so the user can never author
+/// an unpaired or malformed fork.
+export function addForkJoin(
+  d: DraftPipeline,
+  forkId: string,
+  joinId: string,
+  lanes: string[],
+  downstream: string,
+): DraftPipeline {
+  if (lanes.length < 2) return d;
+  if (d.forks.some((f) => f.id === forkId)) return d;
+  if (d.joins.some((j) => j.id === joinId)) return d;
+  const fork: Fork = { id: forkId, lanes };
+  const join: Join = { id: joinId, waits_for: lanes, downstream };
+  return { ...d, forks: [...d.forks, fork], joins: [...d.joins, join] };
+}
+
+export function removeForkJoin(d: DraftPipeline, forkId: string, joinId: string): DraftPipeline {
+  return { ...d, forks: d.forks.filter((f) => f.id !== forkId), joins: d.joins.filter((j) => j.id !== joinId) };
 }
