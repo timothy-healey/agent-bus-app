@@ -40,6 +40,7 @@ vi.mock("./ipc/runtime", async (orig) => {
 vi.mock("./ipc/review", () => ({
   recordVerdict: vi.fn().mockResolvedValue({ task_id: "T-40", verdict: "approve", comment_count: 0 }),
   listComments: vi.fn().mockResolvedValue([]),
+  reanchorComments: vi.fn().mockResolvedValue([]),
   addComment: vi.fn(),
   deleteComment: vi.fn(),
 }));

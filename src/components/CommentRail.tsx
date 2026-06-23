@@ -1,8 +1,8 @@
 import type { CSSProperties } from "react";
-import type { Comment } from "../ipc/review";
+import type { ReanchoredComment } from "../ipc/review";
 
 export interface CommentRailProps {
-  comments: Comment[];
+  comments: ReanchoredComment[];
   onSelect: (commentId: string) => void;
   onDelete: (commentId: string) => void;
   activeId?: string;
@@ -10,6 +10,7 @@ export interface CommentRailProps {
 
 export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentRailProps) {
   const inline = comments.filter((c) => c.kind === "inline");
+  const addressed = inline.filter((c) => c.status === "addressed").length;
 
   const rail: CSSProperties = {
     background: "var(--bg-2)",
@@ -56,16 +57,23 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
       <div style={head}>
         <span>comments</span>
         <span data-testid="rail-count" style={{ color: "var(--accent)" }}>
-          {inline.length} comment{inline.length === 1 ? "" : "s"}
+          {addressed > 0
+            ? `${addressed} of ${inline.length} addressed`
+            : `${inline.length} comment${inline.length === 1 ? "" : "s"}`}
         </span>
       </div>
       {inline.map((c, idx) => {
         const active = c.id === activeId;
+        const isAddressed = c.status === "addressed";
         const entry: CSSProperties = {
           padding: "10px 14px",
           borderBottom: "1px solid var(--border)",
           cursor: "pointer",
-          background: active ? "var(--accent-2)" : "transparent",
+          background: active
+            ? "var(--accent-2)"
+            : isAddressed
+              ? "var(--bg-3, var(--bg-2))"
+              : "transparent",
         };
         const marker: CSSProperties = {
           display: "inline-block",
@@ -99,11 +107,26 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
           lineHeight: 1.45,
         };
         return (
-          <div key={c.id} style={entry} onClick={() => onSelect(c.id)}>
+          <div key={c.id} data-status={c.status} style={entry} onClick={() => onSelect(c.id)}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span>
                 <span style={marker}>{idx + 1}</span>
                 <span style={{ color: "var(--text-3)", fontSize: 10.5 }}>you</span>
+                {isAddressed && (
+                  <span
+                    style={{
+                      marginLeft: 6,
+                      fontSize: 9.5,
+                      color: "var(--accent)",
+                      border: "1px solid var(--accent)",
+                      borderRadius: 6,
+                      padding: "0 5px",
+                      textTransform: "lowercase",
+                    }}
+                  >
+                    addressed
+                  </span>
+                )}
               </span>
               <button
                 type="button"
@@ -124,7 +147,15 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
               </button>
             </div>
             {c.anchor_text && <div style={quote}>"{c.anchor_text}"</div>}
-            <div style={noteStyle}>{c.note}</div>
+            <div
+              style={{
+                ...noteStyle,
+                textDecoration: isAddressed ? "line-through" : "none",
+                opacity: isAddressed ? 0.7 : 1,
+              }}
+            >
+              {c.note}
+            </div>
           </div>
         );
       })}
