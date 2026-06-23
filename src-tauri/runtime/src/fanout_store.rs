@@ -59,13 +59,16 @@ impl FanOutStore {
     /// Persist a new fan-out group (one row per fork expansion).
     pub async fn create(&self, g: &FanOutGroup) -> Result<(), FanOutStoreError> {
         sqlx::query(
-            "INSERT INTO fanout_groups (id, pipeline, join_target, downstream, completed, created_at)
-             VALUES (?,?,?,?,0,0)",
+            "INSERT INTO fanout_groups
+               (id, pipeline, join_target, downstream, completed, created_at, parent_group_id, parent_lane)
+             VALUES (?,?,?,?,0,0,?,?)",
         )
         .bind(&g.id)
         .bind(&g.pipeline)
         .bind(&g.join_target)
         .bind(&g.downstream)
+        .bind(&g.parent_group_id)
+        .bind(&g.parent_lane)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -73,8 +76,9 @@ impl FanOutStore {
 
     /// Load a group + its expected lanes (seeded at create time via `seed_lane`).
     pub async fn load(&self, group_id: &str) -> Result<FanOutGroup, FanOutStoreError> {
-        let row = sqlx::query_as::<_, (String, String, String, i64)>(
-            "SELECT pipeline, join_target, downstream, completed FROM fanout_groups WHERE id = ?",
+        let row = sqlx::query_as::<_, (String, String, String, i64, Option<String>, Option<String>)>(
+            "SELECT pipeline, join_target, downstream, completed, parent_group_id, parent_lane
+             FROM fanout_groups WHERE id = ?",
         )
         .bind(group_id)
         .fetch_optional(&self.pool)
@@ -92,6 +96,8 @@ impl FanOutStore {
             downstream: row.2,
             expected_lanes: lanes.into_iter().map(|(l,)| l).collect(),
             completed: row.3 != 0,
+            parent_group_id: row.4,
+            parent_lane: row.5,
         })
     }
 
@@ -281,6 +287,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/008_nested_groups.sql")).execute(&pool).await.unwrap();
         pool
     }
 
@@ -292,6 +299,8 @@ mod tests {
             downstream: "after".into(),
             expected_lanes: vec!["lane-a".into(), "lane-b".into()],
             completed: false,
+            parent_group_id: None,
+            parent_lane: None,
         }
     }
 
@@ -398,6 +407,8 @@ mod tests {
             downstream: "after".into(),
             expected_lanes: vec!["lane-a".into(), "lane-b".into(), "lane-c".into()],
             completed: false,
+            parent_group_id: None,
+            parent_lane: None,
         }
     }
 
@@ -452,6 +463,38 @@ mod tests {
         let (a, b) = (h1.await.unwrap(), h2.await.unwrap());
         let completions = [&a, &b].iter().filter(|o| matches!(o, BarrierOutcome::Completed(_))).count();
         assert_eq!(completions, 1, "exactly one caller completes the quorum barrier");
+    }
+
+    #[tokio::test]
+    async fn create_and_load_round_trips_the_parent_link() {
+        let store = FanOutStore::new(fresh_pool().await);
+        let child = FanOutGroup {
+            id: "G-child".into(),
+            pipeline: "pipe".into(),
+            join_target: "join-2".into(),
+            downstream: "after-2".into(),
+            expected_lanes: vec!["x".into(), "y".into()],
+            completed: false,
+            parent_group_id: Some("G-1".into()),
+            parent_lane: Some("lane-a".into()),
+        };
+        store.create(&child).await.unwrap();
+        store.seed_lane("G-child", "x").await.unwrap();
+        store.seed_lane("G-child", "y").await.unwrap();
+        let back = store.load("G-child").await.unwrap();
+        assert_eq!(back.parent_group_id.as_deref(), Some("G-1"));
+        assert_eq!(back.parent_lane.as_deref(), Some("lane-a"));
+        assert!(back.is_child());
+    }
+
+    #[tokio::test]
+    async fn a_root_group_loads_with_no_parent() {
+        let store = FanOutStore::new(fresh_pool().await);
+        seeded(&store).await;
+        let back = store.load("G-1").await.unwrap();
+        assert_eq!(back.parent_group_id, None);
+        assert_eq!(back.parent_lane, None);
+        assert!(!back.is_child());
     }
 
     #[tokio::test]
