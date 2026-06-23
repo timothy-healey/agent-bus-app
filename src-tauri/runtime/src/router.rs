@@ -35,6 +35,12 @@ fn target_to_outcome(p: &Pipeline, target: &str) -> Result<(String, TaskState), 
         Some(NodeKind::Team) => Ok((target.to_string(), TaskState::Queued)),
         Some(NodeKind::Gate) => Ok((target.to_string(), TaskState::Gated)),
         Some(NodeKind::Escalation) => Ok((target.to_string(), TaskState::NeedsHuman)),
+        // A fork target queues the task at the fork id; the POOL reads the
+        // NodeKind::Fork and expands it into lane siblings (route stays pure).
+        Some(NodeKind::Fork) => Ok((target.to_string(), TaskState::Queued)),
+        // A join target is the barrier sentinel (Decision D1/F3): the pool/store
+        // resolve it. route() stays total and never returns many.
+        Some(NodeKind::Join) => Ok((target.to_string(), TaskState::Joining)),
         None => {
             // The bundled template uses a literal "done" sink for terminal
             // teams that may not be a declared node; treat it as terminal.
@@ -143,7 +149,42 @@ mod tests {
             ],
             gates: vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "writers".into() }],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![],
+            joins: vec![],
         }
+    }
+
+    fn pipe_v2() -> Pipeline {
+        use pipeline::model::{Fork, Join};
+        Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            teams: vec![
+                team("entry", Some("fork-1"), None, Some("needs-human")),
+                team("lane-a", Some("join-1"), None, Some("needs-human")),
+                team("lane-b", Some("join-1"), None, Some("needs-human")),
+                team("after", Some("done"), None, Some("needs-human")),
+            ],
+            gates: vec![],
+            escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into() }],
+        }
+    }
+
+    #[test]
+    fn approve_into_fork_queues_at_the_fork() {
+        let r = route(&pipe_v2(), "entry", Verdict::Approve, 1).unwrap();
+        assert_eq!(r.next_stage, "fork-1");
+        assert_eq!(r.next_state, TaskState::Queued);
+        assert!(!r.bump_attempts);
+    }
+
+    #[test]
+    fn approve_into_join_yields_the_joining_barrier_outcome() {
+        let r = route(&pipe_v2(), "lane-a", Verdict::Approve, 1).unwrap();
+        assert_eq!(r.next_stage, "join-1");
+        assert_eq!(r.next_state, TaskState::Joining);
+        assert!(!r.bump_attempts);
     }
 
     #[test]
