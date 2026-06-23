@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from "react";
 import type { UsageSnapshot } from "../ipc/usage";
-import type { GitConfig, Project } from "../ipc/workspace";
+import type { GitConfig, Project, WorktreeEntry } from "../ipc/workspace";
 import { Button } from "./ui/Button";
 import { formatTokens } from "../lib/cost";
 
@@ -19,6 +19,9 @@ export interface SettingsViewProps {
   projects: Project[];
   activeProjectId: string | null;
   onRemoveProject: (id: string) => Promise<void>;
+  // Worktree cleanup (S2)
+  onListWorktrees: (projectId: string) => Promise<WorktreeEntry[]>;
+  onRemoveWorktree: (projectId: string, path: string) => Promise<void>;
 }
 
 type Theme = "dark" | "light";
@@ -27,12 +30,104 @@ function currentTheme(): Theme {
   return (document.documentElement.getAttribute("data-theme") as Theme) ?? "dark";
 }
 
+function basename(p: string): string {
+  const parts = p.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+
+function ProjectWorktrees(props: {
+  project: Project;
+  onList: (projectId: string) => Promise<WorktreeEntry[]>;
+  onRemove: (projectId: string, path: string) => Promise<void>;
+}) {
+  const { project, onList, onRemove } = props;
+  const [open, setOpen] = useState(false);
+  const [entries, setEntries] = useState<WorktreeEntry[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmPath, setConfirmPath] = useState<string | null>(null);
+
+  async function load() {
+    setBusy(true);
+    setError(null);
+    try {
+      setEntries(await onList(project.id));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && entries === null) await load();
+  }
+
+  async function remove(path: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await onRemove(project.id, path);
+      setConfirmPath(null);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      <button
+        onClick={toggle}
+        aria-expanded={open}
+        style={{ background: "none", border: "none", color: "var(--text-3)", fontSize: 11, cursor: "pointer", padding: 0 }}
+      >
+        {open ? "▾" : "▸"} worktrees
+      </button>
+      {open && (
+        <div style={{ marginTop: 6, paddingLeft: 14 }}>
+          {busy && entries === null && (
+            <div style={{ fontSize: 11, color: "var(--text-3)" }}>loading…</div>
+          )}
+          {error && <div style={{ fontSize: 11, color: "var(--danger, #d66)" }}>{error}</div>}
+          {entries !== null && entries.length === 0 && (
+            <div style={{ fontSize: 11, color: "var(--text-3)" }}>no worktrees to clean up.</div>
+          )}
+          {entries?.map((w) => (
+            <div key={w.path} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, color: "var(--text)" }}>{basename(w.path)}</div>
+                <div style={{ fontSize: 11, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {w.branch || w.head || w.path} · not tied to an active task
+                </div>
+              </div>
+              {confirmPath === w.path ? (
+                <>
+                  <Button disabled={busy} onClick={() => remove(w.path)}>confirm remove</Button>
+                  <Button disabled={busy} onClick={() => setConfirmPath(null)}>cancel</Button>
+                </>
+              ) : (
+                <Button disabled={busy} onClick={() => setConfirmPath(w.path)}>remove</Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsView(props: SettingsViewProps) {
   const {
     usage, onSetBudget, onSetAutoMeter,
     apiKeyPresent, onSetApiKey, onClearApiKey,
     gitConfig, onSaveGitConfig,
     projects, activeProjectId, onRemoveProject,
+    onListWorktrees, onRemoveWorktree,
   } = props;
 
   const [theme, setTheme] = useState<Theme>(currentTheme());
@@ -186,14 +281,17 @@ export function SettingsView(props: SettingsViewProps) {
           <div style={{ fontSize: 11, color: "var(--text-3)" }}>no projects yet.</div>
         )}
         {projects.map((p) => (
-          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 12, color: "var(--text)" }}>
-                {p.name}{p.id === activeProjectId ? " (active)" : ""}
+          <div key={p.id} style={{ padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, color: "var(--text)" }}>
+                  {p.name}{p.id === activeProjectId ? " (active)" : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-3)" }}>{p.root_path}</div>
               </div>
-              <div style={{ fontSize: 11, color: "var(--text-3)" }}>{p.root_path}</div>
+              <Button onClick={() => onRemoveProject(p.id)}>remove</Button>
             </div>
-            <Button onClick={() => onRemoveProject(p.id)}>remove</Button>
+            <ProjectWorktrees project={p} onList={onListWorktrees} onRemove={onRemoveWorktree} />
           </div>
         ))}
       </div>

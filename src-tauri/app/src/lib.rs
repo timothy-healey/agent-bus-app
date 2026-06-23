@@ -893,6 +893,12 @@ pub fn run() {
                 let project_store = Arc::new(ProjectStore::new(pool.clone()));
                 handle.manage(WorkspaceState { store: project_store.clone() });
 
+                // Worktree cleanup (S2): real git behind the WorktreeGit seam.
+                handle.manage(workspace::worktree::WorktreeState {
+                    store: project_store.clone(),
+                    git: Arc::new(workspace::worktree::GitCli),
+                });
+
                 // Secrets / keychain (S1). Real OS keychain on macOS; an
                 // in-memory fake elsewhere keeps the seam usable in any build.
                 #[cfg(target_os = "macos")]
@@ -1071,6 +1077,8 @@ pub fn run() {
             workspace::api::workspace_get_project,
             workspace::api::workspace_set_active_pipeline,
             workspace::api::workspace_remove_project,
+            workspace::worktree::list_worktrees,
+            workspace::worktree::remove_worktree,
             workspace::api::read_artifact,
             workspace::git_config::git_config_get,
             workspace::git_config::git_config_set,

@@ -1,8 +1,9 @@
 import React from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { SettingsView } from "./SettingsView";
 import type { UsageSnapshot } from "../ipc/usage";
+import type { WorktreeEntry } from "../ipc/workspace";
 
 const snap: UsageSnapshot = {
   window_total: 1000, window_budget: 2_600_000, window_pct: 0.0004, band: "safe",
@@ -23,6 +24,8 @@ function baseProps(over: Partial<React.ComponentProps<typeof SettingsView>> = {}
     projects: [],
     activeProjectId: null,
     onRemoveProject: vi.fn().mockResolvedValue(undefined),
+    onListWorktrees: vi.fn().mockResolvedValue([]),
+    onRemoveWorktree: vi.fn().mockResolvedValue(undefined),
     ...over,
   } as React.ComponentProps<typeof SettingsView>;
 }
@@ -89,6 +92,56 @@ describe("SettingsView", () => {
   it("lists projects and exposes remove", () => {
     render(<SettingsView {...baseProps({ projects: [{ id: "p1", name: "Alpha", root_path: "/a", active_pipeline_id: null, created_at: 0, updated_at: 0 }] })} />);
     expect(screen.getByText("Alpha")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /remove/i })).toBeInTheDocument();
+    // The project row's own remove button (worktrees expander collapsed by default).
+    expect(screen.getByRole("button", { name: "remove" })).toBeInTheDocument();
+  });
+});
+
+const oneProject = [
+  { id: "p1", name: "Alpha", root_path: "/home/u/proj", active_pipeline_id: null, created_at: 0, updated_at: 0 },
+];
+
+describe("SettingsView worktrees (S2)", () => {
+  it("lists worktrees when the expander is opened", async () => {
+    const entries: WorktreeEntry[] = [
+      { path: "/home/u/proj/worktrees/T-1", head: "abc", branch: "refs/heads/t1", stale: true },
+    ];
+    const onListWorktrees = vi.fn().mockResolvedValue(entries);
+    render(<SettingsView {...baseProps({ projects: oneProject, onListWorktrees })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /worktrees/i }));
+    await waitFor(() => expect(onListWorktrees).toHaveBeenCalledWith("p1"));
+    expect(await screen.findByText("T-1")).toBeInTheDocument();
+  });
+
+  it("requires confirm before removing and calls onRemoveWorktree", async () => {
+    const entries: WorktreeEntry[] = [
+      { path: "/home/u/proj/worktrees/T-1", head: "abc", branch: "", stale: true },
+    ];
+    const onListWorktrees = vi.fn().mockResolvedValue(entries);
+    const onRemoveWorktree = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView {...baseProps({ projects: oneProject, onListWorktrees, onRemoveWorktree })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /worktrees/i }));
+    const label = await screen.findByText("T-1");
+    // Walk up to the row flex container that holds the label + its remove button.
+    let row = label.parentElement!;
+    while (row && within(row).queryByRole("button", { name: "remove" }) === null) {
+      row = row.parentElement!;
+    }
+
+    fireEvent.click(within(row).getByRole("button", { name: "remove" }));
+    expect(onRemoveWorktree).not.toHaveBeenCalled(); // not yet — needs confirm
+    fireEvent.click(within(row).getByRole("button", { name: "confirm remove" }));
+    await waitFor(() =>
+      expect(onRemoveWorktree).toHaveBeenCalledWith("p1", "/home/u/proj/worktrees/T-1"),
+    );
+  });
+
+  it("shows the empty state when there are no worktrees", async () => {
+    const onListWorktrees = vi.fn().mockResolvedValue([]);
+    render(<SettingsView {...baseProps({ projects: oneProject, onListWorktrees })} />);
+    fireEvent.click(screen.getByRole("button", { name: /worktrees/i }));
+    expect(await screen.findByText(/no worktrees to clean up/i)).toBeInTheDocument();
   });
 });
