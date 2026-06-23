@@ -1,5 +1,6 @@
 //! Serde contract regression tests for the Pipeline Authoring IPC return types:
-//! `Pipeline` and its node/team/gate value types, plus `TemplateInfo`. Lock the
+//! `Pipeline` and its node/team/gate value types, plus the wizard's draft types.
+//! Lock the
 //! serialized JSON key set against the TS interfaces. Several fields use
 //! `#[serde(skip_serializing_if = "Option::is_none")]` (`RunnerConfig.api_key_env`,
 //! all of `Routes`), so each instance is FULLY populated (every Option = Some) to
@@ -8,7 +9,6 @@
 #![cfg(test)]
 
 use crate::model::{Escalation, Gate, Pipeline, Routes, RunnerConfig, Scope, Team, Workers};
-use crate::api::TemplateInfo;
 use crate::draft::{DraftPipeline, DraftTeam, Slice, SliceTeam, TeamsSlice};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde_json::Value;
@@ -153,13 +153,6 @@ fn gate_key_set_matches_ts() {
 fn escalation_key_set_matches_ts() {
     let v = serde_json::to_value(Escalation { id: "e".into(), triggers: vec!["t".into()] }).unwrap();
     assert_eq!(keys(&v), set(&["id", "triggers"]));
-}
-
-/// Locks `src/ipc/pipeline.ts:67-70` `interface TemplateInfo { id; name }`.
-#[test]
-fn template_info_key_set_matches_ts() {
-    let v = serde_json::to_value(TemplateInfo { id: "research-review".into(), name: "Research + Review".into() }).unwrap();
-    assert_eq!(keys(&v), set(&["id", "name"]));
 }
 
 /// Locks the DraftPipeline key set the wizard IPC mirrors (src/ipc/pipeline.ts).
