@@ -257,8 +257,8 @@ fn prompt_path(team_id: &str) -> String {
 
 impl DraftPipeline {
     /// Convert to a real `Pipeline` (Decision D1/D5). Each team's inline
-    /// `prompt_body` becomes a `prompts/<id>.md` path; gates are always empty for
-    /// a wizard-built pipeline. The result is NOT yet validated — the caller runs
+    /// prompt_body becomes a prompts/<id>.md path; gates carry through (W3).
+    /// The result is NOT yet validated — the caller runs
     /// hard validation (validate::validate) before writing anything.
     pub fn to_pipeline(&self) -> Pipeline {
         Pipeline {
@@ -279,7 +279,7 @@ impl DraftPipeline {
                     workers: t.workers.clone(),
                 })
                 .collect(),
-            gates: vec![],
+            gates: self.gates.clone(),
             escalations: self.escalations.clone(),
             forks: self.forks.clone(),
             joins: self.joins.clone(),
@@ -499,6 +499,27 @@ mod tests {
         assert_eq!(p.teams[1].prompt, "prompts/writers.md");
         // gates is always empty for a draft-built pipeline (D1)
         assert!(p.gates.is_empty());
+    }
+
+    #[test]
+    fn to_pipeline_emits_the_drafts_gates_and_hard_validates() {
+        use crate::model::Gate;
+        let mut d = DraftPipeline::empty();
+        d.id = "demo".into();
+        d.name = "Demo".into();
+        let mut a = DraftTeam::new("plan-writers", "Plan Writers");
+        a.prompt_body = "write the plan".into();
+        a.outputs.on_approve = Some("gate-2".into());
+        let mut b = DraftTeam::new("implementers", "Implementers");
+        b.prompt_body = "implement".into();
+        d.teams.push(a);
+        d.teams.push(b);
+        d.gates.push(Gate { id: "gate-2".into(), label: "Plan review".into(), downstream: "implementers".into() });
+        let p = d.to_pipeline();
+        assert_eq!(p.gates.len(), 1);
+        assert_eq!(p.gates[0].downstream, "implementers");
+        // the gate makes implementers reachable -> hard validate passes
+        assert_eq!(crate::validate::validate(&p), Ok(()));
     }
 
     #[test]
