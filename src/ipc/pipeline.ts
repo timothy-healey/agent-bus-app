@@ -77,15 +77,6 @@ export interface Pipeline {
   joins: Join[];
 }
 
-export interface TemplateInfo {
-  id: string;
-  name: string;
-}
-
-export async function listTemplates(): Promise<TemplateInfo[]> {
-  return await invoke<TemplateInfo[]>("pipeline_list_templates");
-}
-
 export async function listPipelines(projectRoot: string): Promise<string[]> {
   return await invoke<string[]>("pipeline_list", { project_root: projectRoot });
 }
@@ -94,12 +85,59 @@ export async function loadPipeline(projectRoot: string, id: string): Promise<Pip
   return await invoke<Pipeline>("pipeline_load", { project_root: projectRoot, id });
 }
 
-export async function instantiateTemplate(
-  projectRoot: string,
-  templateId: string,
-): Promise<Pipeline> {
-  return await invoke<Pipeline>("pipeline_instantiate_template", {
-    project_root: projectRoot,
-    template_id: templateId,
+export interface DraftTeam {
+  id: string;
+  name: string;
+  prompt_body: string;
+  runner: RunnerConfig;
+  scope: Scope;
+  outputs: Routes;
+  workers: Workers;
+}
+
+export interface DraftPipeline {
+  id: string;
+  name: string;
+  description: string;
+  schema_version: number;
+  teams: DraftTeam[];
+  forks: Fork[];
+  joins: Join[];
+  escalations: Escalation[];
+}
+
+export type Step = "teams" | "prompts" | "wiring";
+
+export interface TurnResult {
+  reply_text: string;
+  updated_draft: DraftPipeline;
+}
+
+export async function kickoffGenerate(sessionId: string, description: string): Promise<DraftPipeline> {
+  return await invoke<DraftPipeline>("kickoff_generate_cmd", {
+    session_id: sessionId,
+    description,
   });
+}
+
+export async function designSessionTurn(
+  sessionId: string,
+  step: Step,
+  draft: DraftPipeline,
+  userMessage: string,
+): Promise<TurnResult> {
+  return await invoke<TurnResult>("design_session_turn_cmd", {
+    session_id: sessionId,
+    step,
+    draft,
+    user_message: userMessage,
+  });
+}
+
+export async function createProjectFromDraft(
+  name: string,
+  root: string,
+  draft: DraftPipeline,
+): Promise<{ id: string; name: string; root_path: string; active_pipeline_id: string | null; created_at: number; updated_at: number }> {
+  return await invoke("create_project_from_draft", { name, root, draft });
 }
