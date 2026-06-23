@@ -38,6 +38,16 @@ describe("Terminal", () => {
     expect(input.value).toBe("");
   });
 
+  it("renders the live streaming bubble when streaming text is present", () => {
+    render(<Terminal turns={[]} contextLine="ctx" onSend={vi.fn()} streaming="typing now" />);
+    expect(screen.getByText("typing now")).toBeInTheDocument();
+  });
+
+  it("renders no streaming bubble when streaming is empty", () => {
+    const { container } = render(<Terminal turns={[]} contextLine="ctx" onSend={vi.fn()} streaming="" />);
+    expect(container.querySelector('[data-streaming="true"]')).toBeNull();
+  });
+
   it("collapses to a thin bar when the head toggle is clicked", () => {
     render(<Terminal turns={turns} contextLine="x" onSend={vi.fn()} />);
     const toggle = screen.getByLabelText(/collapse terminal/i);

@@ -38,7 +38,7 @@ export default function App() {
     openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
 
   const { snapshot: usage } = useUsage();
-  const { turns: convoTurns, send: sendToTerminal } = useConversation();
+  const { turns: convoTurns, send: sendToTerminal, streaming: convoStreaming } = useConversation();
   const terminalContext = pipeline
     ? `${pipeline.name} + ${pipeline.teams.length} teams`
     : "no active pipeline";
@@ -182,7 +182,7 @@ export default function App() {
           />
         )}
       </main>
-      <Terminal turns={convoTurns} contextLine={terminalContext} onSend={sendToTerminal} />
+      <Terminal turns={convoTurns} contextLine={terminalContext} onSend={sendToTerminal} streaming={convoStreaming} />
       <Drawer open={openTask != null} onClose={() => setOpenTaskId(null)}>
         {openTask && (
           <CardDrawer
