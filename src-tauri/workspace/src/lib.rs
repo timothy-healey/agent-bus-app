@@ -5,6 +5,7 @@ pub mod store;
 pub mod api;
 pub mod git_config;
 pub mod paths;
+pub mod worktree;
 
 pub use project::*;
 pub use store::*;
