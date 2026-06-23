@@ -188,6 +188,61 @@ pub fn apply_slice(draft: &mut DraftPipeline, slice: Slice) {
     }
 }
 
+/// Non-blocking validation for LIVE editing (Decision D3). Returns a list of
+/// human-readable issues; NEVER errors and never blocks. The wizard shows these
+/// inline. Hard validation (validate::validate on to_pipeline()) is what gates
+/// the create. An empty draft is not an error — it reports the single "no teams
+/// yet" hint.
+pub fn best_effort_validate(draft: &DraftPipeline) -> Vec<String> {
+    let mut issues = Vec::new();
+    if draft.teams.is_empty() {
+        issues.push("draft has no teams yet".to_string());
+        return issues;
+    }
+
+    // Known node ids: teams + forks + joins + escalations.
+    let mut known: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for t in &draft.teams { known.insert(t.id.as_str()); }
+    for f in &draft.forks { known.insert(f.id.as_str()); }
+    for j in &draft.joins { known.insert(j.id.as_str()); }
+    for e in &draft.escalations { known.insert(e.id.as_str()); }
+
+    for t in &draft.teams {
+        if t.prompt_body.trim().is_empty() {
+            issues.push(format!("team '{}' has no prompt yet", t.id));
+        }
+        for (label, target) in [
+            ("on_approve", t.outputs.on_approve.as_deref()),
+            ("on_revise", t.outputs.on_revise.as_deref()),
+            ("on_reject", t.outputs.on_reject.as_deref()),
+        ] {
+            if let Some(target) = target {
+                if !known.contains(target) {
+                    issues.push(format!("team '{}' {} points at unknown node '{}'", t.id, label, target));
+                }
+            }
+        }
+    }
+    for f in &draft.forks {
+        for lane in &f.lanes {
+            if !known.contains(lane.as_str()) {
+                issues.push(format!("fork '{}' lane '{}' is not a known team", f.id, lane));
+            }
+        }
+    }
+    for j in &draft.joins {
+        for w in &j.waits_for {
+            if !known.contains(w.as_str()) {
+                issues.push(format!("join '{}' waits_for '{}' is not a known team", j.id, w));
+            }
+        }
+        if !known.contains(j.downstream.as_str()) {
+            issues.push(format!("join '{}' downstream '{}' is unknown", j.id, j.downstream));
+        }
+    }
+    issues
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +342,43 @@ mod tests {
         assert_eq!(d.teams.iter().find(|t| t.id == "entry").unwrap().outputs.on_approve.as_deref(), Some("fork-1"));
         assert_eq!(d.forks.len(), 1);
         assert_eq!(d.joins[0].downstream, "needs-human");
+    }
+
+    #[test]
+    fn best_effort_on_empty_draft_reports_no_teams_only() {
+        let issues = best_effort_validate(&DraftPipeline::empty());
+        assert_eq!(issues, vec!["draft has no teams yet".to_string()]);
+    }
+
+    #[test]
+    fn best_effort_flags_a_team_with_no_prompt() {
+        let mut d = DraftPipeline::empty();
+        d.teams.push(DraftTeam::new("research", "Research"));
+        let issues = best_effort_validate(&d);
+        assert!(issues.iter().any(|i| i.contains("research") && i.contains("prompt")));
+    }
+
+    #[test]
+    fn best_effort_flags_a_route_to_an_unknown_node() {
+        let mut d = DraftPipeline::empty();
+        let mut t = DraftTeam::new("research", "Research");
+        t.prompt_body = "x".into();
+        t.outputs.on_approve = Some("ghost".into());
+        d.teams.push(t);
+        let issues = best_effort_validate(&d);
+        assert!(issues.iter().any(|i| i.contains("ghost")));
+    }
+
+    #[test]
+    fn best_effort_is_silent_on_a_complete_linear_draft() {
+        let mut d = DraftPipeline::empty();
+        let mut a = DraftTeam::new("research", "Research");
+        a.prompt_body = "investigate".into();
+        a.outputs.on_approve = Some("writers".into());
+        let mut b = DraftTeam::new("writers", "Writers");
+        b.prompt_body = "write".into();
+        d.teams.push(a);
+        d.teams.push(b);
+        assert_eq!(best_effort_validate(&d), Vec::<String>::new());
     }
 }
