@@ -3,9 +3,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 const invokeMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invokeMock(...a) }));
 
-import { sendMessage, getConversation } from "./terminal";
+const listenMock = vi.fn();
+vi.mock("@tauri-apps/api/event", () => ({ listen: (...a: unknown[]) => listenMock(...a) }));
 
-beforeEach(() => invokeMock.mockReset());
+import { sendMessage, getConversation, onConversationDelta } from "./terminal";
+
+beforeEach(() => { invokeMock.mockReset(); listenMock.mockReset(); });
 
 describe("terminal ipc", () => {
   it("sendMessage invokes send_message with the input arg", async () => {
@@ -19,5 +22,18 @@ describe("terminal ipc", () => {
     const c = await getConversation();
     expect(invokeMock).toHaveBeenCalledWith("get_conversation");
     expect(c).toBeNull();
+  });
+
+  it("onConversationDelta subscribes to conversation.delta and forwards payloads", async () => {
+    const handlers: Array<(e: { payload: unknown }) => void> = [];
+    listenMock.mockImplementation((_name: string, cb: (e: { payload: unknown }) => void) => {
+      handlers.push(cb);
+      return Promise.resolve(() => {});
+    });
+    const got: Array<{ text: string; reset: boolean }> = [];
+    await onConversationDelta((d) => got.push(d));
+    expect(listenMock).toHaveBeenCalledWith("conversation.delta", expect.any(Function));
+    handlers[0]({ payload: { text: "hi", reset: false } });
+    expect(got).toEqual([{ text: "hi", reset: false }]);
   });
 });
