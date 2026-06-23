@@ -138,6 +138,7 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         .await,
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
+        sandbox_profile: None,
     };
 
     // Stream display-only log deltas when a sink factory is wired (R4); else use

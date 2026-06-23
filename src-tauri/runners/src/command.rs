@@ -64,6 +64,7 @@ mod tests {
             user_message: "Investigate topic X".into(),
             settings_path: "/p/.agent-bus/runtime/T-1-research-1700.settings.json".into(),
             add_dirs: vec!["/repo".into(), "/p/artifacts/analyses".into()],
+            sandbox_profile: None,
         }
     }
 

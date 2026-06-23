@@ -204,6 +204,7 @@ mod tests {
             user_message: "Investigate topic X".into(),
             settings_path: "/tmp/s.json".into(),
             add_dirs: vec![],
+            sandbox_profile: None,
         }
     }
 

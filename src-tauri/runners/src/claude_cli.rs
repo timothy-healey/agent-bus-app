@@ -91,6 +91,7 @@ mod tests {
             user_message: "go".into(),
             settings_path: "/tmp/s.json".into(),
             add_dirs: vec![],
+            sandbox_profile: None,
         }
     }
 
