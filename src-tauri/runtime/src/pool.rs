@@ -273,38 +273,15 @@ async fn settle_and_route(
 
     // FORK EXPANSION: an approve whose target is a Fork node fans the task out
     // into one sibling task per lane, then terminates the original (forked).
+    // P1: if the SETTLING task is itself a lane of a parent group, the new group
+    // is a CHILD — it carries the parent group id + the parent lane so its
+    // completion settles the parent lane's verdict (DD-P1-2).
     if let Some(fork) = ctx.pipeline.forks.iter().find(|f| f.id == routed.next_stage) {
-        let join = ctx
-            .pipeline
-            .joins
-            .iter()
-            .find(|j| fork.lanes.iter().all(|lane| lane_reaches(&ctx.pipeline, lane, &j.id)))
-            .ok_or(PoolError::Route(RouteError::NoRoute))?;
-        let group_id = format!("G-{}", uuid::Uuid::new_v4());
-        let group = FanOutGroup {
-            id: group_id.clone(),
-            pipeline: task.pipeline.clone(),
-            join_target: join.id.clone(),
-            downstream: join.downstream.clone(),
-            expected_lanes: fork.lanes.clone(),
-            completed: false,
-            parent_group_id: None,
-            parent_lane: None,
-        };
-        ctx.fanout.create(&group).await?;
-        let now = now_unix();
-        for lane in &fork.lanes {
-            ctx.fanout.seed_lane(&group_id, lane).await?;
-            let sib = Task::forked(task, lane, &group_id, &join.id, now);
-            ctx.tasks.insert(&sib).await?;
-        }
-        // Terminate the original: its work is done; the continuation past the
-        // join is a fresh task the barrier creates.
-        task.state = TaskState::Done;
-        task.current_stage = fork.id.clone();
-        task.updated_at = now;
-        ctx.tasks.update(task).await?;
-        return Ok(Some((fork.id.clone(), TaskState::Done)));
+        let parent = task
+            .group_id
+            .clone()
+            .zip(task.lane.clone());
+        return expand_fork(ctx, task, fork, parent).await;
     }
 
     // JOIN BARRIER: an approve whose target is a Join node hits the barrier.
@@ -333,21 +310,82 @@ async fn settle_and_route(
     Ok(Some((routed.next_stage, routed.next_state)))
 }
 
-/// Walk a lane from its entry team following on_approve to the join id (mirrors
-/// the validator's linearity walk; here it pairs a fork with its join).
+/// Expand a fork into one lane sibling per lane and create the (possibly child)
+/// FanOutGroup. `parent` is `Some((parent_group_id, parent_lane))` when the fork
+/// is nested inside a lane (P1) — the new group is then a child whose completion
+/// settles that parent lane. Top-level forks pass `None`.
+async fn expand_fork(
+    ctx: &PoolContext,
+    task: &mut Task,
+    fork: &pipeline::model::Fork,
+    parent: Option<(String, String)>,
+) -> Result<Option<(String, TaskState)>, PoolError> {
+    let join = ctx
+        .pipeline
+        .joins
+        .iter()
+        .find(|j| fork.lanes.iter().all(|lane| lane_reaches(&ctx.pipeline, lane, &j.id)))
+        .ok_or(PoolError::Route(RouteError::NoRoute))?;
+    let group_id = format!("G-{}", uuid::Uuid::new_v4());
+    let (parent_group_id, parent_lane) = match parent {
+        Some((g, l)) => (Some(g), Some(l)),
+        None => (None, None),
+    };
+    let group = FanOutGroup {
+        id: group_id.clone(),
+        pipeline: task.pipeline.clone(),
+        join_target: join.id.clone(),
+        downstream: join.downstream.clone(),
+        expected_lanes: fork.lanes.clone(),
+        completed: false,
+        parent_group_id,
+        parent_lane,
+    };
+    ctx.fanout.create(&group).await?;
+    let now = now_unix();
+    for lane in &fork.lanes {
+        ctx.fanout.seed_lane(&group_id, lane).await?;
+        let sib = Task::forked(task, lane, &group_id, &join.id, now);
+        ctx.tasks.insert(&sib).await?;
+    }
+    task.state = TaskState::Done;
+    task.current_stage = fork.id.clone();
+    task.updated_at = now;
+    ctx.tasks.update(task).await?;
+    Ok(Some((fork.id.clone(), TaskState::Done)))
+}
+
+/// Walk a lane from its entry team toward `join_id`, following on_approve.
+/// Hierarchical (P1): a team hop follows on_approve; a GATE hop follows the
+/// gate's downstream; a FORK hop jumps to that nested fork's paired join's
+/// downstream (the nested group resolves to a single continuation there).
+/// Reaching `join_id` is success. Bounded by total node count to terminate.
 fn lane_reaches(p: &Pipeline, entry: &str, join_id: &str) -> bool {
+    let bound = p.teams.len() + p.gates.len() + p.forks.len() + p.joins.len() + 1;
     let mut current = entry.to_string();
-    for _ in 0..=p.teams.len() {
+    for _ in 0..=bound {
         if current == join_id {
             return true;
         }
-        match p.teams.iter().find(|t| t.id == current) {
-            Some(t) => match t.outputs.on_approve.as_deref() {
-                Some(next) => current = next.to_string(),
+        if let Some(t) = p.teams.iter().find(|t| t.id == current) {
+            match t.outputs.on_approve.as_deref() {
+                Some(next) => { current = next.to_string(); continue; }
                 None => return false,
-            },
-            None => return false,
+            }
         }
+        if let Some(g) = p.gates.iter().find(|g| g.id == current) {
+            current = g.downstream.clone();
+            continue;
+        }
+        if let Some(f) = p.forks.iter().find(|f| f.id == current) {
+            // Pair this nested fork with its join: the join whose lanes are all
+            // reachable from the fork's lanes. Continue from that join's downstream.
+            match p.joins.iter().find(|j| f.lanes.iter().all(|lane| lane_reaches(p, lane, &j.id))) {
+                Some(j) => { current = j.downstream.clone(); continue; }
+                None => return false,
+            }
+        }
+        return false;
     }
     false
 }
@@ -449,6 +487,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/008_nested_groups.sql")).execute(&pool).await.unwrap();
         pool
     }
 
@@ -778,6 +817,60 @@ mod tests {
             forks: vec![Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] }],
             joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: None }],
         }
+    }
+
+    fn pipeline_v2_nested() -> Pipeline {
+        // entry -> fork-1 {lane-a, lane-b}; lane-a is itself a fork:
+        //   lane-a -> fork-2 {a1, a2} -> join-2 -> mid-a -> join-1
+        //   lane-b -> join-1
+        // join-1 -> after
+        Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            defaults: None,
+            teams: vec![
+                team("entry", Some("fork-1"), None),
+                team("lane-a", Some("fork-2"), None),
+                team("a1", Some("join-2"), None),
+                team("a2", Some("join-2"), None),
+                team("mid-a", Some("join-1"), None),
+                team("lane-b", Some("join-1"), None),
+                team("after", Some("done"), None),
+            ],
+            gates: vec![],
+            escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![
+                Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] },
+                Fork { id: "fork-2".into(), lanes: vec!["a1".into(), "a2".into()] },
+            ],
+            joins: vec![
+                Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: None },
+                Join { id: "join-2".into(), waits_for: vec!["a1".into(), "a2".into()], downstream: "mid-a".into(), cancel_on_reject: false, quorum: None },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_fork_inside_a_lane_spawns_a_child_group_linked_to_parent() {
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_nested();
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // entry -> fork-1 -> lane-a, lane-b
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a approve -> fork-2 (nested) -> a1, a2
+
+        // Two queued lane tasks for the nested fork (a1, a2), each in a CHILD group.
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        let child_lane_tasks: Vec<_> = queued.iter().filter(|q| q.current_stage == "a1" || q.current_stage == "a2").collect();
+        assert_eq!(child_lane_tasks.len(), 2, "nested fork expands into 2 child lane tasks");
+        let child_group = child_lane_tasks[0].group_id.clone().unwrap();
+        assert!(child_lane_tasks.iter().all(|q| q.group_id.as_deref() == Some(child_group.as_str())));
+        // The child group is linked to the parent group + lane-a.
+        let cg = ctx.fanout.load(&child_group).await.unwrap();
+        assert!(cg.is_child());
+        assert_eq!(cg.parent_lane.as_deref(), Some("lane-a"));
+        assert!(cg.parent_group_id.is_some());
     }
 
     /// A runner that returns a seeded reject for the `lane-b` team and approve
