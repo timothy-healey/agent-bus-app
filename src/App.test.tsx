@@ -23,12 +23,13 @@ vi.mock("./hooks/useProjects", () => ({
 }));
 
 const loadPipelineMock = vi.fn();
-const instantiateMock = vi.fn();
 vi.mock("./ipc/pipeline", () => ({
   loadPipeline: (...a: unknown[]) => loadPipelineMock(...a),
-  instantiateTemplate: (...a: unknown[]) => instantiateMock(...a),
-  listPipelines: vi.fn().mockResolvedValue([]),
-  listTemplates: vi.fn().mockResolvedValue([]),
+  listPipelines: vi.fn().mockResolvedValue(["pl"]),
+  // NewProjectWizard's import tree pulls these from ./ipc/pipeline.
+  kickoffGenerate: vi.fn(),
+  designSessionTurn: vi.fn(),
+  createProjectFromDraft: vi.fn(),
 }));
 
 const approveMock = vi.fn();
@@ -60,14 +61,12 @@ describe("App board integration", () => {
   beforeEach(() => {
     approveMock.mockReset();
     const pl = {
-      id: "pl", name: "PL", description: "", schema_version: 1,
+      id: "pl", name: "PL", description: "", schema_version: 2,
       teams: [{ id: "plan-writers", name: "Plan Writers" }],
       gates: [{ id: "gate-2-plan", label: "Gate 2", downstream: "implementers" }],
-      escalations: [],
+      escalations: [], forks: [], joins: [],
     };
     loadPipelineMock.mockReset().mockResolvedValue(pl);
-    // listPipelines is mocked to [] so App falls through to instantiateTemplate.
-    instantiateMock.mockReset().mockResolvedValue(pl);
   });
 
   it("renders the board with the gated card and opens the drawer on click", async () => {
