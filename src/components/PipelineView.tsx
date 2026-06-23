@@ -87,6 +87,24 @@ export function PipelineView({ pipeline }: PipelineViewProps) {
           <div style={meta}>triggers: {e.triggers.join(" · ") || "none"}</div>
         </div>
       ))}
+
+      <div style={sectionTitle}>Forks ({pipeline.forks.length})</div>
+      {pipeline.forks.map((f) => (
+        <div key={f.id} style={card}>
+          <div style={{ color: "var(--text)", fontWeight: 500 }}>{f.id}</div>
+          <div style={meta}>lanes: {f.lanes.join(", ")}</div>
+        </div>
+      ))}
+
+      <div style={sectionTitle}>Joins ({pipeline.joins.length})</div>
+      {pipeline.joins.map((j) => (
+        <div key={j.id} style={card}>
+          <div style={{ color: "var(--text)", fontWeight: 500 }}>{j.id}</div>
+          <div style={meta}>
+            waits for: {j.waits_for.join(", ")} · downstream → {j.downstream}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
