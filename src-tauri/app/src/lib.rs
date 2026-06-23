@@ -20,6 +20,38 @@ use async_trait::async_trait;
 
 const DB_URL: &str = "sqlite:agent_bus.db";
 
+/// Apply schema migrations to the app's own pool, in order, idempotently.
+///
+/// The applied version lives in SQLite's `PRAGMA user_version` rather than in
+/// tauri-plugin-sql's tracking (whose migrations only run when the *frontend*
+/// loads the plugin — which this app never does). `raw_sql` runs the
+/// multi-statement migration files; migration 004 is a non-idempotent `ALTER`,
+/// so the version gate is what keeps re-runs safe.
+async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    const MIGRATIONS: &[(i64, &str)] = &[
+        (1, include_str!("../migrations/001_initial.sql")),
+        (2, include_str!("../migrations/002_pipeline_activation.sql")),
+        (3, include_str!("../migrations/003_runtime.sql")),
+        (4, include_str!("../migrations/004_comments_kind.sql")),
+        (5, include_str!("../migrations/005_usage.sql")),
+    ];
+
+    let current: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await?;
+
+    for (version, sql) in MIGRATIONS {
+        if *version > current {
+            sqlx::raw_sql(sql).execute(pool).await?;
+            // PRAGMA can't bind parameters; the value is our own trusted i64.
+            sqlx::raw_sql(&format!("PRAGMA user_version = {version};"))
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 /// The concrete dispatcher. Lives at the root — the only module that imports
 /// every context (D1/D2). Routes a ToolCallRequest to the owning supplier's
 /// logic, reusing the same stores the Tauri commands use.
@@ -191,9 +223,21 @@ pub fn run() {
                 let db_path = data_dir.join("agent_bus.db");
 
                 let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                    .connect(&format!("sqlite://{}", db_path.display()))
+                    .connect_with(
+                        sqlx::sqlite::SqliteConnectOptions::new()
+                            .filename(&db_path)
+                            .create_if_missing(true),
+                    )
                     .await
                     .expect("could not open store pool");
+
+                // This pool — not tauri-plugin-sql — owns the schema. The
+                // plugin only migrates when the frontend calls Database.load(),
+                // which this app never does (all data goes through Rust commands
+                // over this pool). So apply migrations here, idempotently.
+                run_migrations(&pool)
+                    .await
+                    .expect("could not run migrations");
 
                 // Workspace state (Plan 1).
                 let project_store = Arc::new(ProjectStore::new(pool.clone()));
@@ -457,5 +501,64 @@ mod revision_reader_tests {
         let pool = pool_with_comment("T-1", "inline", None, "x").await;
         let reader = SqliteRevisionReader { pool };
         assert!(reader.load("T-NOPE").await.notes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::run_migrations;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    // Regression: the GUI boot path opens a *file* pool and the app — not
+    // tauri-plugin-sql — must create + migrate the schema. The in-memory store
+    // tests never exercised this, so a fresh launch panicked ("unable to open
+    // database file") and would then have hit "no such table".
+    #[tokio::test]
+    async fn fresh_file_is_created_migrated_and_idempotent() {
+        let dir = std::env::temp_dir().join("agent_bus_app_migration_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("boot_test.db");
+        let _ = std::fs::remove_file(&db); // ensure a truly fresh file
+
+        // create_if_missing(true) is the fix for the code-14 panic.
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db)
+                    .create_if_missing(true),
+            )
+            .await
+            .expect("pool opens and creates a missing file");
+
+        run_migrations(&pool).await.expect("first migration run");
+        // Second run must be a no-op — migration 004's ALTER would error if
+        // re-applied, so this proves the user_version gate works.
+        run_migrations(&pool)
+            .await
+            .expect("second run is idempotent");
+
+        let projects: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='projects'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(projects, 1, "projects table created (migration 001)");
+
+        let kind_cols: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('comments') WHERE name='kind'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kind_cols, 1, "migration 004 column present exactly once");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 5, "all five migrations recorded");
+
+        let _ = std::fs::remove_file(&db);
     }
 }
