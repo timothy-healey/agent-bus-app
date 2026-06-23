@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Role = "user" | "assistant";
 
@@ -39,4 +40,19 @@ export async function sendMessage(input: string): Promise<Conversation> {
 
 export async function getConversation(): Promise<Conversation | null> {
   return await invoke<Conversation | null>("get_conversation");
+}
+
+/// Display-only streaming fragment for the terminal. `text` is a prose fragment;
+/// `reset` marks a new model step (clears the live bubble). Authoritative turns
+/// still arrive via `sendMessage`'s result; this is purely for feel.
+export interface ConversationDelta {
+  text: string;
+  reset: boolean;
+}
+
+/// Subscribe to backend display-only streaming fragments for the terminal.
+export async function onConversationDelta(
+  cb: (delta: ConversationDelta) => void,
+): Promise<UnlistenFn> {
+  return await listen<ConversationDelta>("conversation.delta", (e) => cb(e.payload));
 }
