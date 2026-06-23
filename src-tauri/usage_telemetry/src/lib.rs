@@ -22,3 +22,6 @@ mod crate_smoke {
         assert_eq!(2 + 2, 4);
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

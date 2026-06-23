@@ -7,3 +7,6 @@
 pub mod api;
 pub mod comment;
 pub mod store;
+
+#[cfg(test)]
+mod contract_tests;

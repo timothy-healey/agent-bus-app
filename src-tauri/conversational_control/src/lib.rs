@@ -18,3 +18,6 @@ pub mod engine;
 pub mod summarise;
 pub mod store;
 pub mod api;
+
+#[cfg(test)]
+mod contract_tests;
