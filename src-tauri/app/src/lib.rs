@@ -15,10 +15,10 @@ use workspace::project::Project;
 
 use conversational_control::catalog::ToolCatalog;
 use conversational_control::dispatch::ToolDispatcher;
-#[allow(unused_imports)]
 use conversational_control::engine::CommandEngine;
 use conversational_control::engine::{ConversationEngine, EngineReply};
 use conversational_control::store::ConversationStore;
+use conversational_control::turn::ToolCall;
 use llm_chat::chat::{ChatRequest, ChatRunner};
 use conversational_control::api::TerminalState;
 use agent_bus_core::{ToolCallRequest, ToolCallResult};
@@ -146,6 +146,241 @@ impl ConversationEngine for LlmEngine {
             // §Error handling). The root's existing rate-limit handling can read
             // the text; the terminal never crashes on a missing `claude`.
             Err(e) => EngineReply { text: format!("[terminal error] {e}"), tool_calls: vec![] },
+        }
+    }
+}
+
+/// Extract the first fenced code block from the model's reply (DD3). Prefers a
+/// ```json fence; falls back to the first bare ``` fence. Returns the block's
+/// inner text (no fences), or None when there is no fence (= the model is done,
+/// the reply is the final prose answer).
+///
+/// VF1 (documented duplication): this intentionally mirrors
+/// `pipeline::design_session::extract_json_block` rather than sharing it, so the
+/// agentic loop stays decoupled from the wizard module. Keep the two in sync.
+pub fn extract_tool_call_block(reply: &str) -> Option<String> {
+    if let Some(start) = reply.find("```json") {
+        let after = &reply[start + "```json".len()..];
+        if let Some(end) = after.find("```") {
+            return Some(after[..end].trim().to_string());
+        }
+    }
+    if let Some(start) = reply.find("```") {
+        let after = &reply[start + 3..];
+        let after = match after.find('\n') {
+            Some(nl) if !after[..nl].contains("```") => &after[nl + 1..],
+            _ => after,
+        };
+        if let Some(end) = after.find("```") {
+            return Some(after[..end].trim().to_string());
+        }
+    }
+    None
+}
+
+/// Parse a model-emitted fenced block `{ "tool": "<name>", "args": { ... } }`
+/// directly into the kernel's `ToolCallRequest { tool_name, args }` (VF2 — no
+/// shadow `ParsedToolCall` type). The wire field is `tool`; the kernel field is
+/// `tool_name`, so we read the JSON object explicitly and construct the canonical
+/// type the dispatcher already takes. `args` defaults to `{}` when absent.
+/// Returns a descriptive error string (fed back to the model) when the block is
+/// not valid JSON or is missing the `tool` field.
+pub fn parse_tool_call(block: &str) -> Result<ToolCallRequest, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(block).map_err(|e| e.to_string())?;
+    let tool_name = value
+        .get("tool")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing string field `tool`".to_string())?
+        .to_string();
+    let args = value
+        .get("args")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    Ok(ToolCallRequest { tool_name, args })
+}
+
+/// Max model<->tool round-trips per user message (DD1). One "step" = one
+/// ChatRunner::chat call. On hitting the cap the loop stops with a clear turn.
+pub const MAX_STEPS: usize = 8;
+
+/// The within-turn agentic chat loop (backlog C1, Option B). For one user
+/// message it alternates model calls and tool dispatches until the model replies
+/// with plain prose (no fenced tool-call = done, DD3), then returns ONE composite
+/// EngineReply embedding every resolved tool-call (DD2). Bounded by MAX_STEPS
+/// (DD1) and brake-aware (DD4) — both are safety invariants. Lives at the root
+/// because it composes the ChatRunner ACL, the RootDispatcher, the catalog, and
+/// the Brake; conversational_control stays kernel-only.
+pub struct AgenticChatEngine {
+    runner: Arc<dyn ChatRunner>,
+    dispatcher: Arc<dyn ToolDispatcher>,
+    brake: Arc<Brake>,
+    dialogue_id: String,
+    system_prompt_framing: String,
+    model: String,
+    thinking_budget: u32,
+    max_steps: usize,
+}
+
+impl AgenticChatEngine {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        runner: Arc<dyn ChatRunner>,
+        dispatcher: Arc<dyn ToolDispatcher>,
+        brake: Arc<Brake>,
+        dialogue_id: String,
+        system_prompt_framing: String,
+        model: String,
+        thinking_budget: u32,
+    ) -> Self {
+        Self {
+            runner,
+            dispatcher,
+            brake,
+            dialogue_id,
+            system_prompt_framing,
+            model,
+            thinking_budget,
+            max_steps: MAX_STEPS,
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationEngine for AgenticChatEngine {
+    async fn respond(&self, input: &str, catalog: &ToolCatalog) -> EngineReply {
+        let system_prompt = build_agentic_system_prompt(&self.system_prompt_framing, catalog);
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        // The first turn is the user's words; subsequent turns are fed-back results.
+        let mut next_user_message = input.to_string();
+
+        for _step in 0..self.max_steps {
+            // DD4: brake before each step — never call the model or dispatch while braked.
+            if self.brake.is_on() {
+                let reason = self.brake.state().reason.unwrap_or_else(|| "on".into());
+                return EngineReply { text: format!("[braked] terminal paused: {reason}"), tool_calls };
+            }
+
+            let req = ChatRequest {
+                dialogue_id: self.dialogue_id.clone(),
+                system_prompt: system_prompt.clone(),
+                user_message: next_user_message.clone(),
+                model: self.model.clone(),
+                thinking_budget: self.thinking_budget,
+            };
+            let reply = match self.runner.chat(&req).await {
+                Ok(r) => r,
+                // DD4: rate-limit (and any other chat error) stops the loop and surfaces.
+                Err(e) => return EngineReply { text: format!("[terminal error] {e}"), tool_calls },
+            };
+
+            // No fenced tool-call block => the model is done; this is the final answer (DD3).
+            let Some(block) = extract_tool_call_block(&reply.text) else {
+                return EngineReply { text: reply.text, tool_calls };
+            };
+
+            // An unparseable / unknown tool-call is fed back as an error so the
+            // model can recover; it counts against the step cap and never panics (DD5).
+            // VF2: parse straight into the kernel's ToolCallRequest, no shadow type.
+            let request = match parse_tool_call(&block) {
+                Err(e) => {
+                    next_user_message = format!(
+                        "Tool call rejected: that was not a valid tool call ({e}). \
+                         Reply with a single fenced ```json {{\"tool\":\"<name>\",\"args\":{{…}}}} block, \
+                         or your final answer as plain prose."
+                    );
+                    continue;
+                }
+                Ok(req) if catalog.by_name(&req.tool_name).is_none() => {
+                    next_user_message = format!(
+                        "Tool call rejected: unknown tool `{}`. Available tools: {}. \
+                         Reply with a valid fenced ```json tool call, or your final answer.",
+                        req.tool_name, tool_names(catalog),
+                    );
+                    continue;
+                }
+                Ok(req) => req,
+            };
+
+            // DD4: brake before dispatch too.
+            if self.brake.is_on() {
+                let reason = self.brake.state().reason.unwrap_or_else(|| "on".into());
+                return EngineReply { text: format!("[braked] terminal paused: {reason}"), tool_calls };
+            }
+            let tool_name = request.tool_name.clone();
+            let result = self.dispatcher.dispatch(&request).await;
+            let result_json = serde_json::to_string(&result).unwrap_or_else(|_| "{}".into());
+            tool_calls.push(ToolCall { request, result: Some(result) });
+            // DD5: feed the result back as the next user message.
+            next_user_message = format!(
+                "Tool `{}` returned:\n```json\n{}\n```\nContinue: call another tool \
+                 (fenced json) or reply with your final answer.",
+                tool_name, result_json,
+            );
+        }
+
+        // DD1: hit the step cap without a plain-prose finish.
+        EngineReply {
+            text: format!(
+                "[step limit reached] stopped after {} steps; the last tool result is above.",
+                self.max_steps
+            ),
+            tool_calls,
+        }
+    }
+}
+
+/// Comma-separated tool names for an error frame.
+fn tool_names(catalog: &ToolCatalog) -> String {
+    catalog.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// Build the agentic system prompt: the operator framing + the tool catalog
+/// (name/description/input_schema for each app-tool) + the emit contract (DD3).
+fn build_agentic_system_prompt(framing: &str, catalog: &ToolCatalog) -> String {
+    let mut tools_doc = String::new();
+    for s in catalog.specs() {
+        tools_doc.push_str(&format!(
+            "- {} — {}\n  input_schema: {}\n",
+            s.name, s.description, s.input_schema
+        ));
+    }
+    format!(
+        "{framing}\n\nYou can call these app-tools:\n{tools_doc}\n\
+         To call a tool, reply with a SINGLE fenced ```json block and nothing else:\n\
+         ```json\n{{\"tool\":\"<name>\",\"args\":{{ … }}}}\n```\n\
+         After a tool runs you will be given its result; then call another tool or \
+         finish. When you are done, reply with plain prose (NO fenced block) — that \
+         plain reply is your final answer to the operator."
+    )
+}
+
+/// The god terminal's unified agentic engine (backlog C1). For one user message:
+/// a leading `/` (after trim) is a one-shot slash command handled by the inner
+/// command engine (parser -> RootDispatcher); anything else runs the inner
+/// agentic chat loop. Routes by the SAME rule the parser uses (command.rs), so a
+/// malformed `/cmd` surfaces as an error turn rather than entering the loop.
+/// Holding each branch as `Arc<dyn ConversationEngine>` keeps them independently
+/// fakeable. Lives at the composition root because both branches need root-only
+/// imports; conversational_control stays kernel-only.
+pub struct CompositeEngine {
+    command: Arc<dyn ConversationEngine>,
+    agentic: Arc<dyn ConversationEngine>,
+}
+
+impl CompositeEngine {
+    pub fn new(command: Arc<dyn ConversationEngine>, agentic: Arc<dyn ConversationEngine>) -> Self {
+        Self { command, agentic }
+    }
+}
+
+#[async_trait]
+impl ConversationEngine for CompositeEngine {
+    async fn respond(&self, input: &str, catalog: &ToolCatalog) -> EngineReply {
+        if input.trim_start().starts_with('/') {
+            self.command.respond(input, catalog).await
+        } else {
+            self.agentic.respond(input, catalog).await
         }
     }
 }
@@ -448,10 +683,11 @@ pub fn run() {
                 let catalog = Arc::new(ToolCatalog::new(specs));
                 debug_assert!(catalog.duplicate_names().is_empty(), "tool name collision in catalog");
 
-                // Constructed for the v1.1 slash-command merge (CommandEngine
-                // over RootDispatcher). v1 free-form chat dispatches no tools, so
-                // it is intentionally unused for now (one rename away from live).
-                let _dispatcher: Arc<dyn ToolDispatcher> = Arc::new(RootDispatcher {
+                // The real dispatcher both CompositeEngine branches reach: the
+                // slash branch (parser -> dispatch) and the agentic loop (model
+                // -> dispatch -> feed result back). Routes a ToolCallRequest to
+                // the owning supplier's logic (C1).
+                let dispatcher: Arc<dyn ToolDispatcher> = Arc::new(RootDispatcher {
                     runtime: runtime_state_arc.clone(),
                     usage: usage_state_arc.clone(),
                     app: handle.clone(),
@@ -464,16 +700,26 @@ pub fn run() {
                 let chat_runner: Arc<dyn llm_chat::chat::ChatRunner> =
                     Arc::new(llm_chat::claude_cli::ClaudeChatRunner::new());
                 handle.manage(DesignSessionState { runner: chat_runner.clone() });
-                let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
-                    Arc::new(LlmEngine::new(
+                // The slash branch: parser -> RootDispatcher (restores the full
+                // slash tool surface). The agentic branch: the bounded,
+                // brake-aware within-turn loop over the same dispatcher + the
+                // chat runner + the catalog. CompositeEngine routes by leading '/'.
+                let command_engine: Arc<dyn conversational_control::engine::ConversationEngine> =
+                    Arc::new(CommandEngine::new(dispatcher.clone()));
+                let agentic_engine: Arc<dyn conversational_control::engine::ConversationEngine> =
+                    Arc::new(AgenticChatEngine::new(
                         chat_runner.clone(),
+                        dispatcher.clone(),
+                        brake.clone(),
                         project_id.clone(),
-                        "You are the god terminal for the Agent Bus app. Answer the operator's \
-                         questions about the pipeline, tasks, and usage concisely."
+                        "You are the god terminal for the Agent Bus app. Help the operator run \
+                         and inspect the pipeline (tasks, gates, usage, the brake). Be concise."
                             .into(),
                         "claude-opus-4-8".into(),
                         8192,
                     ));
+                let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
+                    Arc::new(CompositeEngine::new(command_engine, agentic_engine));
 
                 let convo_store = Arc::new(ConversationStore::new(pool.clone()));
 
@@ -898,5 +1144,295 @@ mod design_session_tests {
         let reloaded = ws.store.get(&agent_bus_core::ProjectId(project.id.0.clone())).await.unwrap();
         assert_eq!(reloaded.active_pipeline_id.map(|p| p.0), Some("demo".to_string()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod composite_engine_tests {
+    use super::{extract_tool_call_block, parse_tool_call};
+
+    // --- Task 1: tool-call block extraction + parse into the kernel type (VF2) -
+
+    #[test]
+    fn extracts_a_fenced_json_tool_call_block() {
+        let prose = "I'll inject that.\n\n```json\n{\"tool\":\"inject_topic\",\"args\":{\"topic\":\"03-scheduling\"}}\n```\n";
+        let block = extract_tool_call_block(prose).expect("a fenced block");
+        // VF2: parse straight into agent_bus_core::ToolCallRequest, no shadow type.
+        let req = parse_tool_call(&block).unwrap();
+        assert_eq!(req.tool_name, "inject_topic");
+        assert_eq!(req.args["topic"], "03-scheduling");
+    }
+
+    #[test]
+    fn falls_back_to_a_bare_fence() {
+        let prose = "ok\n```\n{\"tool\":\"usage_snapshot\",\"args\":{}}\n```";
+        let block = extract_tool_call_block(prose).expect("a bare fence");
+        let req = parse_tool_call(&block).unwrap();
+        assert_eq!(req.tool_name, "usage_snapshot");
+    }
+
+    #[test]
+    fn plain_prose_has_no_block() {
+        assert!(extract_tool_call_block("T-042 is in design; nothing to do.").is_none());
+    }
+
+    #[test]
+    fn missing_args_defaults_to_empty_object() {
+        let req = parse_tool_call("{\"tool\":\"usage_snapshot\"}").unwrap();
+        assert_eq!(req.tool_name, "usage_snapshot");
+        assert_eq!(req.args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn invalid_json_is_an_error() {
+        assert!(parse_tool_call("{ this is not json").is_err());
+    }
+
+    // --- Tasks 2-7: the agentic loop, routing, and end-to-end -----------------
+
+    use super::{AgenticChatEngine, CompositeEngine, MAX_STEPS};
+    use agent_bus_core::{ToolCallResult, ToolSpec};
+    use conversational_control::catalog::ToolCatalog;
+    use conversational_control::dispatch::{FakeDispatcher, ToolDispatcher};
+    use conversational_control::engine::{ConversationEngine, EngineReply, FakeEngine};
+    use llm_chat::chat::{ChatReply, ChatRunner, ChatUsage};
+    use llm_chat::fake::FakeChatRunner;
+    use runtime::brake::Brake;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn catalog() -> ToolCatalog {
+        ToolCatalog::new(vec![ToolSpec {
+            name: "inject_topic".into(),
+            description: "Inject a topic".into(),
+            input_schema: json!({"type":"object"}),
+            supplier_context: "runtime".into(),
+        }])
+    }
+
+    fn reply(text: &str) -> ChatReply {
+        ChatReply { text: text.into(), usage: ChatUsage::default() }
+    }
+
+    fn agentic(
+        runner: Arc<FakeChatRunner>,
+        disp: Arc<FakeDispatcher>,
+        brake: Arc<Brake>,
+    ) -> AgenticChatEngine {
+        AgenticChatEngine::new(
+            runner as Arc<dyn ChatRunner>,
+            disp as Arc<dyn ToolDispatcher>,
+            brake,
+            "p".into(),
+            "You are the god terminal.".into(),
+            "m".into(),
+            8192,
+        )
+    }
+
+    // Task 2: one tool-call then a final answer => one composite turn.
+    #[tokio::test]
+    async fn two_step_loop_dispatches_once_then_finishes_with_a_composite_turn() {
+        let runner = Arc::new(FakeChatRunner::new(vec![
+            reply("On it.\n```json\n{\"tool\":\"inject_topic\",\"args\":{\"topic\":\"03-scheduling\"}}\n```"),
+            reply("Done — task T-9 was injected for 03-scheduling."),
+        ]));
+        let disp = Arc::new(
+            FakeDispatcher::new().with("inject_topic", ToolCallResult::Ok { result: json!({"task_id":"T-9"}) }),
+        );
+        let brake = Arc::new(Brake::new());
+        let eng = agentic(runner.clone(), disp.clone(), brake);
+
+        let r = eng.respond("kick off research on 03-scheduling", &catalog()).await;
+
+        assert_eq!(r.text, "Done — task T-9 was injected for 03-scheduling.");
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].request.tool_name, "inject_topic");
+        assert!(matches!(r.tool_calls[0].result, Some(ToolCallResult::Ok { .. })));
+        assert_eq!(disp.received.lock().unwrap().len(), 1);
+        let got = runner.received.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1].dialogue_id, "p");
+        assert!(got[1].user_message.contains("inject_topic"));
+        assert!(got[1].user_message.contains("T-9"));
+    }
+
+    // Task 3: plain-prose first reply finishes with no dispatch.
+    #[tokio::test]
+    async fn plain_prose_first_reply_finishes_with_no_dispatch() {
+        let runner = Arc::new(FakeChatRunner::new(vec![reply("T-042 is in design; nothing to do.")]));
+        let disp = Arc::new(FakeDispatcher::new());
+        let brake = Arc::new(Brake::new());
+        let eng = agentic(runner.clone(), disp.clone(), brake);
+
+        let r = eng.respond("how is T-042 going?", &catalog()).await;
+
+        assert_eq!(r.text, "T-042 is in design; nothing to do.");
+        assert!(r.tool_calls.is_empty());
+        assert_eq!(disp.received.lock().unwrap().len(), 0);
+        assert_eq!(runner.received.lock().unwrap().len(), 1);
+    }
+
+    // Task 4: unknown tool fed back as an error; model recovers.
+    #[tokio::test]
+    async fn unknown_tool_call_is_fed_back_and_the_model_recovers() {
+        let runner = Arc::new(FakeChatRunner::new(vec![
+            reply("```json\n{\"tool\":\"frobnicate\",\"args\":{}}\n```"),
+            reply("```json\n{\"tool\":\"inject_topic\",\"args\":{\"topic\":\"x\"}}\n```"),
+            reply("Injected x as T-1."),
+        ]));
+        let disp = Arc::new(
+            FakeDispatcher::new().with("inject_topic", ToolCallResult::Ok { result: json!({"task_id":"T-1"}) }),
+        );
+        let brake = Arc::new(Brake::new());
+        let eng = agentic(runner.clone(), disp.clone(), brake);
+
+        let r = eng.respond("do the thing", &catalog()).await;
+
+        assert_eq!(r.text, "Injected x as T-1.");
+        assert_eq!(disp.received.lock().unwrap().len(), 1);
+        assert_eq!(disp.received.lock().unwrap()[0].tool_name, "inject_topic");
+        assert_eq!(r.tool_calls.len(), 1);
+        let got = runner.received.lock().unwrap();
+        assert_eq!(got.len(), 3);
+        assert!(got[1].user_message.contains("unknown tool"));
+        assert!(got[1].user_message.contains("frobnicate"));
+    }
+
+    // Task 4: malformed JSON fed back; model recovers.
+    #[tokio::test]
+    async fn malformed_json_tool_call_is_fed_back_then_recovers() {
+        let runner = Arc::new(FakeChatRunner::new(vec![
+            reply("```json\n{ this is not json\n```"),
+            reply("Sorry — nothing to do after all."),
+        ]));
+        let disp = Arc::new(FakeDispatcher::new());
+        let brake = Arc::new(Brake::new());
+        let eng = agentic(runner.clone(), disp.clone(), brake);
+
+        let r = eng.respond("go", &catalog()).await;
+
+        assert_eq!(r.text, "Sorry — nothing to do after all.");
+        assert!(r.tool_calls.is_empty());
+        assert_eq!(disp.received.lock().unwrap().len(), 0);
+        let got = runner.received.lock().unwrap();
+        assert!(got[1].user_message.contains("not a valid tool call"));
+    }
+
+    // Task 5: max-steps cap stops cleanly.
+    #[tokio::test]
+    async fn loop_stops_at_max_steps_when_the_model_never_finishes() {
+        let endless = reply("```json\n{\"tool\":\"inject_topic\",\"args\":{\"topic\":\"x\"}}\n```");
+        let runner = Arc::new(FakeChatRunner::new(vec![endless]));
+        let disp = Arc::new(
+            FakeDispatcher::new().with("inject_topic", ToolCallResult::Ok { result: json!({"task_id":"T"}) }),
+        );
+        let brake = Arc::new(Brake::new());
+        let eng = agentic(runner.clone(), disp.clone(), brake);
+
+        let r = eng.respond("loop forever", &catalog()).await;
+
+        assert!(r.text.contains("step limit reached"));
+        assert_eq!(runner.received.lock().unwrap().len(), MAX_STEPS);
+        assert_eq!(disp.received.lock().unwrap().len(), MAX_STEPS);
+        assert_eq!(r.tool_calls.len(), MAX_STEPS);
+    }
+
+    // Task 5: brake already on => stop before any model call or dispatch.
+    #[tokio::test]
+    async fn braked_loop_stops_before_any_model_call_or_dispatch() {
+        let runner = Arc::new(FakeChatRunner::new(vec![reply("should never be called")]));
+        let disp = Arc::new(FakeDispatcher::new());
+        let brake = Arc::new(Brake::new());
+        brake.set_on("rate-limit");
+        let eng = agentic(runner.clone(), disp.clone(), brake);
+
+        let r = eng.respond("anything", &catalog()).await;
+
+        assert!(r.text.contains("braked"));
+        assert!(r.text.contains("rate-limit"));
+        assert!(r.tool_calls.is_empty());
+        assert_eq!(runner.received.lock().unwrap().len(), 0);
+        assert_eq!(disp.received.lock().unwrap().len(), 0);
+    }
+
+    // Task 6: CompositeEngine routing by leading '/'.
+    fn command_branch() -> Arc<dyn ConversationEngine> {
+        Arc::new(FakeEngine::new(vec![EngineReply { text: "CMD-BRANCH".into(), tool_calls: vec![] }]))
+    }
+    fn chat_branch() -> Arc<dyn ConversationEngine> {
+        Arc::new(FakeEngine::new(vec![EngineReply { text: "CHAT-BRANCH".into(), tool_calls: vec![] }]))
+    }
+
+    #[tokio::test]
+    async fn slash_line_routes_to_the_command_branch() {
+        let eng = CompositeEngine::new(command_branch(), chat_branch());
+        let r = eng.respond("/inject 03-scheduling", &catalog()).await;
+        assert_eq!(r.text, "CMD-BRANCH");
+    }
+
+    #[tokio::test]
+    async fn plain_line_routes_to_the_agentic_branch() {
+        let eng = CompositeEngine::new(command_branch(), chat_branch());
+        let r = eng.respond("kick off research", &catalog()).await;
+        assert_eq!(r.text, "CHAT-BRANCH");
+    }
+
+    #[tokio::test]
+    async fn leading_whitespace_before_slash_still_routes_to_command() {
+        let eng = CompositeEngine::new(command_branch(), chat_branch());
+        let r = eng.respond("   /inject x", &catalog()).await;
+        assert_eq!(r.text, "CMD-BRANCH");
+    }
+
+    // Task 7: end-to-end through send_message_inner — slash turn + composite turn.
+    use conversational_control::api::send_message_inner;
+    use conversational_control::engine::CommandEngine;
+    use conversational_control::store::ConversationStore;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn store_with_project() -> ConversationStore {
+        let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        sqlx::query(include_str!("../migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,name,root_path,created_at,updated_at) VALUES ('p','n','/p',0,0)")
+            .execute(&pool).await.unwrap();
+        ConversationStore::new(pool)
+    }
+
+    #[tokio::test]
+    async fn composite_records_a_slash_turn_then_an_agentic_composite_turn() {
+        let store = store_with_project().await;
+        let cat = catalog();
+
+        let disp = Arc::new(
+            FakeDispatcher::new().with("inject_topic", ToolCallResult::Ok { result: json!({"task_id":"T-3"}) }),
+        );
+        let command: Arc<dyn ConversationEngine> =
+            Arc::new(CommandEngine::new(disp.clone() as Arc<dyn ToolDispatcher>));
+
+        let runner = Arc::new(FakeChatRunner::new(vec![
+            reply("on it\n```json\n{\"tool\":\"inject_topic\",\"args\":{\"topic\":\"y\"}}\n```"),
+            reply("Injected y as T-3."),
+        ]));
+        let brake = Arc::new(Brake::new());
+        let chat_eng: Arc<dyn ConversationEngine> = Arc::new(agentic(runner.clone(), disp.clone(), brake));
+
+        let engine: Arc<dyn ConversationEngine> = Arc::new(CompositeEngine::new(command, chat_eng));
+
+        // 1) a slash command -> command branch -> one tool-call turn
+        let convo = send_message_inner("p", &cat, engine.as_ref(), &store, "/inject 03-x", 500).await.unwrap();
+        assert_eq!(convo.turns.len(), 2);
+        assert!(convo.turns[1].text.contains("Done"));
+        assert_eq!(convo.turns[1].tool_calls.len(), 1);
+
+        // 2) a plain line on the SAME conversation -> agentic branch -> ONE composite turn
+        let convo = send_message_inner("p", &cat, engine.as_ref(), &store, "kick off y", 600).await.unwrap();
+        assert_eq!(convo.turns.len(), 4); // alternation held across both branches (DD2)
+        assert_eq!(convo.turns[3].text, "Injected y as T-3.");
+        assert_eq!(convo.turns[3].tool_calls.len(), 1);
+        assert_eq!(convo.turns[3].tool_calls[0].request.tool_name, "inject_topic");
+
+        let reloaded = store.load("p").await.unwrap().unwrap();
+        assert_eq!(reloaded.turns.len(), 4);
     }
 }
