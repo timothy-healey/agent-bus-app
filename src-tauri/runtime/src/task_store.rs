@@ -169,6 +169,35 @@ impl TaskStore {
         Ok(Some(self.get(&TaskId(id)).await?))
     }
 
+    /// Early-cancel (P2): park the still-active lane tasks of a fan-out group so
+    /// queued ones are never claimed and run wastefully once the group has
+    /// already resolved (to needs-human). Transitions tasks of `group_id` whose
+    /// state is `queued` or `revising` to `done`, parked at their `join_target`
+    /// (mirrors how the barrier parks a settled lane task). A `running` lane is
+    /// deliberately left alone (DD5: never kill a live invocation — its later
+    /// settle hits the already-`completed` group guard and no-ops). Returns the
+    /// count parked. Like `claim_next_for_stage`, this is a direct conditional
+    /// UPDATE — the early-cancel park does not route through Task::transition_to,
+    /// consistent with the barrier's existing direct `state = Done` park.
+    pub async fn cancel_outstanding_lanes(
+        &self,
+        group_id: &str,
+        now_unix: i64,
+    ) -> Result<u64, TaskStoreError> {
+        let res = sqlx::query(
+            "UPDATE tasks
+             SET state='done',
+                 current_stage=COALESCE(join_target, current_stage),
+                 updated_at=?
+             WHERE group_id=? AND state IN ('queued','revising')",
+        )
+        .bind(now_unix)
+        .bind(group_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Crash recovery (spec F4): release any task stuck in `running` back to
     /// `queued` on startup, since v1 keeps no live invocation record. Returns
     /// the count released.
@@ -283,6 +312,34 @@ mod tests {
         assert_eq!(back.group_id, None);
         assert_eq!(back.lane, None);
         assert_eq!(back.join_target, None);
+    }
+
+    #[tokio::test]
+    async fn cancel_outstanding_lanes_parks_queued_and_revising_not_running_or_done() {
+        let store = TaskStore::new(fresh_pool().await);
+        let parent = task("entry");
+        // queued lane task in group G-1
+        let queued = Task::forked(&parent, "lane-a", "G-1", "join-1", 500);
+        store.insert(&queued).await.unwrap();
+        // a running lane task in the same group (must be left alone — DD5)
+        let mut running = Task::forked(&parent, "lane-b", "G-1", "join-1", 500);
+        running.state = TaskState::Running;
+        store.insert(&running).await.unwrap();
+        // a lane task in a DIFFERENT group (must be untouched)
+        let other = Task::forked(&parent, "lane-c", "G-2", "join-2", 500);
+        store.insert(&other).await.unwrap();
+
+        let cancelled = store.cancel_outstanding_lanes("G-1", 900).await.unwrap();
+        assert_eq!(cancelled, 1, "only the queued lane in G-1 is parked");
+
+        // queued -> Done, parked at its join_target
+        let q = store.get(&queued.id).await.unwrap();
+        assert_eq!(q.state, TaskState::Done);
+        assert_eq!(q.current_stage, "join-1");
+        // running is left to finish (DD5)
+        assert_eq!(store.get(&running.id).await.unwrap().state, TaskState::Running);
+        // other group untouched
+        assert_eq!(store.get(&other.id).await.unwrap().state, TaskState::Queued);
     }
 
     #[tokio::test]

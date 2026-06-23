@@ -162,6 +162,10 @@ impl Task {
         }
         match (self.state, to) {
             (Queued, Running) | (Queued, Braked) => true,
+            // P2 early-cancel parks an outstanding lane task to done (queued or
+            // revising), so the group's resolution isn't blocked by lanes that
+            // will never run. See TaskStore::cancel_outstanding_lanes.
+            (Queued, Done) | (Revising, Done) => true,
             (Running, Queued) | (Running, Gated) | (Running, Done) | (Running, NeedsHuman)
             | (Running, Revising) | (Running, Braked) => true,
             (Gated, Queued) | (Gated, Revising) | (Gated, NeedsHuman) => true,
@@ -295,6 +299,22 @@ mod tests {
     fn joining_state_string_round_trips() {
         assert_eq!(TaskState::parse("joining"), Some(TaskState::Joining));
         assert_eq!(TaskState::Joining.as_str(), "joining");
+    }
+
+    #[test]
+    fn early_cancel_park_edges_are_legal() {
+        // P2 early-cancel parks an outstanding lane (queued or revising) to done.
+        // These edges are intentional (see TaskStore::cancel_outstanding_lanes);
+        // assert them so they aren't later removed as illegal.
+        let mut q = t(); // queued
+        assert!(q.can_transition_to(TaskState::Done));
+        assert!(q.transition_to(TaskState::Done, 200).is_ok());
+
+        let mut r = t();
+        r.transition_to(TaskState::Running, 1).unwrap();
+        r.transition_to(TaskState::Revising, 2).unwrap();
+        assert!(r.can_transition_to(TaskState::Done));
+        assert!(r.transition_to(TaskState::Done, 3).is_ok());
     }
 
     #[test]
