@@ -83,6 +83,12 @@ pub struct PoolContext {
     /// pre-project boot). Standalone append-only root — written by start/settle
     /// below; never joined into the Task transaction.
     pub audit: Option<Arc<InvocationAuditStore>>,
+    /// **EXPERIMENTAL (S3) · macOS-only.** When true, project the team Scope to a
+    /// `sandbox-exec` SBPL profile and confine the CLI worker subprocess. Default
+    /// false (unchanged behavior). Runtime only flips this bool — the SBPL idiom
+    /// is generated (via the Runners Scope policy) and consumed entirely inside
+    /// the Runners ACL. Live confinement is structural-only (UNVERIFIED) — opt-in.
+    pub sandbox: bool,
 }
 
 fn now_unix() -> i64 {
@@ -138,7 +144,13 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         .await,
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
-        sandbox_profile: None,
+        // S3 (EXPERIMENTAL · macOS-only): project the same Scope to an SBPL
+        // profile only when opted in. Off (default) = None = unchanged behavior.
+        sandbox_profile: if ctx.sandbox {
+            Some(runners::scope::sandbox_profile(&team.scope, &vars)?)
+        } else {
+            None
+        },
     };
 
     // Stream display-only log deltas when a sink factory is wired (R4); else use
@@ -605,6 +617,7 @@ mod tests {
             revision_reader: None,
             log_sink: None,
             audit: None,
+            sandbox: false,
         }
     }
 
@@ -869,17 +882,47 @@ mod tests {
     struct RecordingRunner {
         out: RunnerOutput,
         last: Mutex<String>,
+        last_sandbox: Mutex<Option<String>>,
     }
     impl RecordingRunner {
-        fn new(out: RunnerOutput) -> Self { Self { out, last: Mutex::new(String::new()) } }
+        fn new(out: RunnerOutput) -> Self { Self { out, last: Mutex::new(String::new()), last_sandbox: Mutex::new(None) } }
         fn last_message(&self) -> String { self.last.lock().unwrap().clone() }
+        fn last_sandbox_profile(&self) -> Option<String> { self.last_sandbox.lock().unwrap().clone() }
     }
     #[async_trait::async_trait]
     impl Runner for RecordingRunner {
         async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError> {
             *self.last.lock().unwrap() = req.user_message.clone();
+            *self.last_sandbox.lock().unwrap() = req.sandbox_profile.clone();
             Ok(self.out.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn sandbox_flag_off_leaves_profile_none_on_default() {
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("done"), None)], vec![]);
+        let recorder = Arc::new(RecordingRunner::new(approve_output()));
+        // ctx_with builds with sandbox = false (the default).
+        let ctx = ctx_with(pool.clone(), p.clone(), recorder.clone(), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "research".into(), "topic".into(), None, 100);
+        ctx.tasks.insert(&t).await.unwrap();
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+        assert_eq!(recorder.last_sandbox_profile(), None);
+    }
+
+    #[tokio::test]
+    async fn sandbox_flag_on_sets_a_profile() {
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("done"), None)], vec![]);
+        let recorder = Arc::new(RecordingRunner::new(approve_output()));
+        let mut ctx = ctx_with(pool.clone(), p.clone(), recorder.clone(), temp_root());
+        ctx.sandbox = true;
+        let t = Task::injected("proj".into(), "p".into(), "research".into(), "topic".into(), None, 100);
+        ctx.tasks.insert(&t).await.unwrap();
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+        let profile = recorder.last_sandbox_profile().expect("sandbox on => Some profile");
+        assert!(profile.contains("(deny default)"));
     }
 
     // ---- Sub-project 2: fork/join (Tasks 12 & 13) ----
