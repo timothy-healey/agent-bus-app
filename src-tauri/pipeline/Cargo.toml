@@ -6,11 +6,14 @@ edition.workspace = true
 [dependencies]
 agent_bus_core = { path = "../agent_bus_core" }
 workspace = { path = "../workspace" }
+llm_chat = { path = "../llm_chat" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
 tauri = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
-uuid = { workspace = true }
+tokio = { workspace = true }
