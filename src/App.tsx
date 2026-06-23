@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Topbar } from "./components/Topbar";
 import { ProjectList } from "./components/ProjectList";
 import { NewProjectWizard } from "./wizard/NewProjectWizard";
+import { PipelineEditor } from "./wizard/PipelineEditor";
 import { ViewSwitcher, type View } from "./components/ViewSwitcher";
 import { PipelineView } from "./components/PipelineView";
 import { useProjects } from "./hooks/useProjects";
@@ -14,7 +15,7 @@ import { CardDrawer } from "./components/CardDrawer";
 import { readArtifact, type Project } from "./ipc/workspace";
 import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
-import { listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
+import { listPipelines, loadPipeline, pipelineToDraft, type DraftPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
 import { setBudget, setAutoMeter } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
@@ -26,6 +27,8 @@ export default function App() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [view, setView] = useState<View>("board");
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
+  // A1: the seeded draft for the in-app pipeline editor (null = closed).
+  const [editorSeed, setEditorSeed] = useState<DraftPipeline | null>(null);
 
   const activeProject: Project | null = projects[0] ?? null;
 
@@ -157,30 +160,41 @@ export default function App() {
     [reload],
   );
 
-  // Load the active project's pipeline whenever the active project changes. The
-  // wizard is the only new-project path now (it always writes a pipeline), so a
-  // project with no pipeline file just shows the empty viewer.
-  useEffect(() => {
-    let cancelled = false;
+  // Load the active project's pipeline. The wizard is the only new-project path
+  // now (it always writes a pipeline), so a project with no pipeline file just
+  // shows the empty viewer. Extracted as a callback so save-edits can reload (A1).
+  const reloadPipeline = useCallback(async () => {
     if (!activeProject) {
       setPipeline(null);
       return;
     }
     const root = activeProject.root_path;
-    (async () => {
-      try {
-        const ids = await listPipelines(root);
-        const target = ids[0] ?? null;
-        const loaded = target ? await loadPipeline(root, target) : null;
-        if (!cancelled) setPipeline(loaded);
-      } catch {
-        if (!cancelled) setPipeline(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const ids = await listPipelines(root);
+      const target = ids[0] ?? null;
+      const loaded = target ? await loadPipeline(root, target) : null;
+      setPipeline(loaded);
+    } catch {
+      setPipeline(null);
+    }
   }, [activeProject]);
+
+  useEffect(() => {
+    reloadPipeline();
+  }, [reloadPipeline]);
+
+  // A1: open the in-app editor seeded from the active pipeline (read its prompt
+  // bodies back via pipeline_to_draft_cmd). On failure (e.g. pipeline missing on
+  // disk), stay on the viewer.
+  async function openEditor() {
+    if (!activeProject || !pipeline) return;
+    try {
+      const seed = await pipelineToDraft(activeProject.id, activeProject.root_path, pipeline.id);
+      setEditorSeed(seed);
+    } catch {
+      /* opening the editor failed; stay on the viewer */
+    }
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
@@ -195,7 +209,7 @@ export default function App() {
       <ViewSwitcher active={view} onChange={setView} />
       <main style={{ flex: 1, overflow: "auto" }}>
         {view === "pipeline" ? (
-          <PipelineView pipeline={pipeline} />
+          <PipelineView pipeline={pipeline} onEdit={activeProject && pipeline ? openEditor : undefined} />
         ) : view === "settings" ? (
           <SettingsView usage={usage} onSetBudget={setBudget} onSetAutoMeter={setAutoMeter} />
         ) : activeProject == null ? (
@@ -245,6 +259,17 @@ export default function App() {
           />
         )}
       </Drawer>
+      {editorSeed && activeProject && (
+        <PipelineEditor
+          projectId={activeProject.id}
+          seed={editorSeed}
+          onClose={() => setEditorSeed(null)}
+          onSaved={() => {
+            setEditorSeed(null);
+            reloadPipeline();
+          }}
+        />
+      )}
       <NewProjectWizard
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
