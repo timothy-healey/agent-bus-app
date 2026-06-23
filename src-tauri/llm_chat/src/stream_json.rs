@@ -18,8 +18,12 @@ struct ChatAccumulator {
 }
 
 impl ChatAccumulator {
-    fn feed(&mut self, v: &Value) -> Result<(), ChatError> {
+    /// Feed one parsed JSON line. Returns the prose text *this* event added
+    /// (empty for non-prose events) so a streaming caller can forward it; the
+    /// accumulator keeps the running full text for the final ChatReply.
+    fn feed(&mut self, v: &Value) -> Result<String, ChatError> {
         let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let mut delta = String::new();
 
         // Rate-limit detection: an error event whose message mentions rate/429/quota.
         if ty == "error" || v.get("is_error").and_then(|b| b.as_bool()) == Some(true) {
@@ -56,11 +60,12 @@ impl ChatAccumulator {
                     for block in content {
                         if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                             if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                self.text.push_str(t);
+                                delta.push_str(t);
                             }
                         }
                     }
                 }
+                self.text.push_str(&delta);
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                     self.add_usage(u);
                 }
@@ -82,7 +87,7 @@ impl ChatAccumulator {
             }
             _ => {}
         }
-        Ok(())
+        Ok(delta)
     }
 
     fn add_usage(&mut self, u: &Value) {
@@ -117,7 +122,33 @@ pub fn parse_chat_stream(raw: &str, model: &str) -> Result<(ChatReply, Option<St
         }
         let v: Value = serde_json::from_str(line)
             .map_err(|e| ChatError::Other(format!("bad stream-json line: {e}")))?;
-        acc.feed(&v)?;
+        let _ = acc.feed(&v)?;
+    }
+    acc.finish(model)
+}
+
+/// Streaming variant of `parse_chat_stream`. Parses the same newline-delimited
+/// JSON but invokes `on_delta` with each assistant *prose fragment* as it is
+/// parsed (display-only feel), then returns the identical final ChatReply +
+/// session id. The result line's authoritative prose is NOT forwarded as a
+/// delta — it has already been streamed via the assistant events.
+pub fn parse_chat_stream_streaming(
+    raw: &str,
+    model: &str,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<(ChatReply, Option<String>), ChatError> {
+    let mut acc = ChatAccumulator::default();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = serde_json::from_str(line)
+            .map_err(|e| ChatError::Other(format!("bad stream-json line: {e}")))?;
+        let delta = acc.feed(&v)?;
+        if !delta.is_empty() {
+            on_delta(&delta);
+        }
     }
     acc.finish(model)
 }
@@ -169,6 +200,51 @@ mod tests {
     fn malformed_line_is_other_error() {
         let err = parse_chat_stream("not json", "m").unwrap_err();
         assert!(matches!(err, crate::chat::ChatError::Other(_)));
+    }
+
+    #[test]
+    fn feed_returns_text_delta_for_assistant_event_only() {
+        let mut acc = ChatAccumulator::default();
+        let sys: Value = serde_json::from_str(
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#,
+        ).unwrap();
+        let asst: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello "}],"usage":{"output_tokens":1}}}"#,
+        ).unwrap();
+        let asst2: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"world"}],"usage":{"output_tokens":1}}}"#,
+        ).unwrap();
+        assert_eq!(acc.feed(&sys).unwrap(), "");
+        assert_eq!(acc.feed(&asst).unwrap(), "hello ");
+        assert_eq!(acc.feed(&asst2).unwrap(), "world");
+        assert_eq!(acc.text, "hello world");
+    }
+
+    #[test]
+    fn parse_streaming_forwards_assistant_deltas_in_order_and_returns_final() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-4-8"}"#, "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hel"}],"usage":{"output_tokens":1}}}"#, "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"lo"}],"usage":{"output_tokens":1}}}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Hello","usage":{"input_tokens":5,"output_tokens":2},"session_id":"s"}"#
+        );
+        let seen = std::sync::Mutex::new(Vec::<String>::new());
+        let (reply, session) = parse_chat_stream_streaming(raw, "m", &mut |d: &str| {
+            seen.lock().unwrap().push(d.to_string());
+        }).unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["Hel".to_string(), "lo".to_string()]);
+        assert_eq!(reply.text, "Hello");
+        assert_eq!(reply.usage.input_tokens, 5);
+        assert_eq!(session.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn parse_streaming_matches_non_streaming_for_fixtures() {
+        let mut on = |_: &str| {};
+        let (a, sa) = parse_chat_stream(FIRST, "m").unwrap();
+        let (b, sb) = parse_chat_stream_streaming(FIRST, "m", &mut on).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(sa, sb);
     }
 
     #[test]
