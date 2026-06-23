@@ -346,6 +346,10 @@ pub fn to_yaml(pipeline: &Pipeline) -> Result<String, serde_yaml::Error> {
     serde_yaml::to_string(pipeline)
 }
 
+/// The bytes a prepared pipeline write carries: `(yaml_rel_path, yaml,
+/// prompt_files)` — the exact tuple `write_project_pipeline` consumes.
+pub type PipelineWrite = (String, String, Vec<(String, String)>);
+
 /// The shared validate-then-serialize core for both the create-from-draft and the
 /// edit-mode save flows (A1; vet F2). HARD-validates the draft's Pipeline, then
 /// returns the bytes to write: the project-root-relative YAML path
@@ -353,9 +357,7 @@ pub fn to_yaml(pipeline: &Pipeline) -> Result<String, serde_yaml::Error> {
 /// An invalid draft is an `Err` and nothing is returned — the single home of the
 /// "nothing is written when invalid" gate. Pipeline Authoring serializes;
 /// Workspace writes (the caller passes these to `write_project_pipeline`).
-pub fn prepare_pipeline_write(
-    draft: &DraftPipeline,
-) -> Result<(String, String, Vec<(String, String)>), String> {
+pub fn prepare_pipeline_write(draft: &DraftPipeline) -> Result<PipelineWrite, String> {
     let pipeline = draft.to_pipeline();
     crate::validate::validate(&pipeline).map_err(|e| e.to_string())?;
     let yaml = to_yaml(&pipeline).map_err(|e| e.to_string())?;
