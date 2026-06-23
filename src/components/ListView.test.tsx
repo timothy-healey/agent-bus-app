@@ -27,9 +27,21 @@ describe("ListView", () => {
 
   it("filters when a pill is clicked", () => {
     render(<ListView tasks={tasks} tokensByTask={{}} now={100} onOpenCard={() => {}} />);
-    fireEvent.click(screen.getByText("running"));
+    // Target the filter pill button (the word "running" also appears as a row
+    // state label now that the dot carries a label, A7).
+    fireEvent.click(screen.getByRole("button", { name: "running" }));
     expect(screen.queryByText("alpha")).not.toBeInTheDocument();
     expect(screen.getByText("beta")).toBeInTheDocument();
+  });
+
+  it("shows the state as dot plus label, not colour alone (A7)", () => {
+    render(<ListView tasks={tasks} tokensByTask={{}} now={100} onOpenCard={() => {}} />);
+    // The gated row carries a text "needs you" label (a non-button cell), in
+    // addition to the filter pill of the same name.
+    const cellLabels = screen
+      .getAllByText("needs you")
+      .filter((el) => el.tagName !== "BUTTON");
+    expect(cellLabels.length).toBeGreaterThan(0);
   });
 
   it("filters by search box", () => {

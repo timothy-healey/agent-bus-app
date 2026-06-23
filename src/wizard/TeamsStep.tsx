@@ -2,6 +2,7 @@ import { useState } from "react";
 import type React from "react";
 import type { DraftPipeline, EffortMode } from "../ipc/pipeline";
 import { removeTeam, renameTeam, setTeamModel, setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
+import { Button } from "../components/ui/Button";
 
 interface TeamsStepProps {
   draft: DraftPipeline;
@@ -21,6 +22,11 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
 
   return (
     <div>
+      {draft.teams.length === 0 && (
+        <div style={{ padding: "var(--sp-5)", color: "var(--text-3)", fontSize: "var(--ts-base)", border: "1px dashed var(--border)", borderRadius: "var(--r-sm)" }}>
+          no teams yet. describe what you're building in the chat to generate teams, or start from a template.
+        </div>
+      )}
       {draft.teams.map((t) => (
         <div key={t.id} style={{ border: "1px solid var(--border)", borderRadius: "var(--r-sm)", padding: "var(--sp-3)", marginBottom: "var(--sp-2)" }}>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -28,11 +34,11 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
               aria-label={`name for ${t.id}`}
               value={t.name}
               onChange={(e) => onChange(renameTeam(draft, t.id, e.target.value))}
-              style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" }}
+              style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit" }}
             />
-            <span style={{ color: "var(--text-3)", fontSize: 11 }}>{t.id}</span>
-            <button aria-label={`advanced ${t.id}`} onClick={() => setOpenAdvanced((o) => (o === t.id ? null : t.id))}>⚙</button>
-            <button aria-label={`remove ${t.id}`} onClick={() => onChange(removeTeam(draft, t.id))}>✕</button>
+            <span style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)" }}>{t.id}</span>
+            <Button size="sm" variant="ghost" aria-label={`advanced ${t.id}`} aria-expanded={openAdvanced === t.id} onClick={() => setOpenAdvanced((o) => (o === t.id ? null : t.id))}>⚙</Button>
+            <Button size="sm" variant="ghost" aria-label={`remove ${t.id}`} onClick={() => onChange(removeTeam(draft, t.id))}>✕</Button>
           </div>
           {openAdvanced === t.id && (
             <div style={{ marginTop: 6, display: "grid", gap: 6 }}>
@@ -116,5 +122,5 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
   );
 }
 
-const advLbl: React.CSSProperties = { fontSize: 11, color: "var(--text-3)", display: "block" };
-const advInp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" };
+const advLbl: React.CSSProperties = { fontSize: "var(--ts-sm)", color: "var(--text-3)", display: "block" };
+const advInp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit" };

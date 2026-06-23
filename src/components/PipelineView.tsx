@@ -1,14 +1,18 @@
 import type React from "react";
 import type { EffortMode, Pipeline } from "../ipc/pipeline";
+import { Button } from "./ui/Button";
+import { PipelineGraph } from "./PipelineGraph";
 
 function effortLabel(e: EffortMode): string {
   return e.mode === "custom" ? `custom(${e.budget_tokens})` : e.mode;
 }
 
+// Lowercase section header per DESIGN.md §Table (D8: reconcile the two header
+// styles to one — lowercase / 0.04em).
 const sectionTitle: React.CSSProperties = {
-  fontSize: 11,
-  textTransform: "uppercase",
-  letterSpacing: "0.08em",
+  fontSize: "var(--ts-sm)",
+  textTransform: "lowercase",
+  letterSpacing: "0.04em",
   color: "var(--text-3)",
   margin: "var(--sp-7) 0 var(--sp-3)",
 };
@@ -56,14 +60,12 @@ export function PipelineView({ pipeline, onEdit }: PipelineViewProps) {
           <div style={meta}>schema v{pipeline.schema_version}</div>
         </div>
         {onEdit && (
-          <button
-            onClick={onEdit}
-            aria-label="edit pipeline"
-            style={{ flexShrink: 0, background: "var(--surface-2)", border: "1px solid var(--border-2)", color: "var(--text)", padding: "4px 14px", borderRadius: "var(--r-sm)", fontSize: 12, cursor: "pointer" }}
-          >
-            Edit pipeline
-          </button>
+          <Button size="sm" onClick={onEdit} aria-label="edit pipeline">Edit pipeline</Button>
         )}
+      </div>
+
+      <div style={{ marginTop: "var(--sp-5)" }}>
+        <PipelineGraph pipeline={pipeline} />
       </div>
 
       <div style={sectionTitle}>Teams ({pipeline.teams.length})</div>

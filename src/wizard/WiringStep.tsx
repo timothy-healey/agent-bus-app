@@ -3,6 +3,7 @@ import type React from "react";
 import type { DraftPipeline, Pipeline } from "../ipc/pipeline";
 import { PipelineView } from "../components/PipelineView";
 import { addForkJoin, addGate, setTeamApprove } from "./draft";
+import { Button } from "../components/ui/Button";
 
 /// Adapt a DraftPipeline to the Pipeline shape the read-only viewer expects:
 /// inline prompt bodies become placeholder paths; gates carry through (W3).
@@ -87,7 +88,7 @@ export function WiringStep({ draft, onChange }: WiringStepProps) {
             <option key={n.id} value={n.id}>{n.name} ({n.id})</option>
           ))}
         </select>
-        <button onClick={add} disabled={!canAdd} aria-label="add gate">Add gate</button>
+        <Button onClick={add} disabled={!canAdd} aria-label="add gate">Add gate</Button>
       </div>
       <div style={{ display: "grid", gap: 6, marginBottom: "var(--sp-3)", padding: "var(--sp-2)", border: "1px solid var(--border)", borderRadius: "var(--r-sm)" }}>
         <div style={{ fontSize: 11, color: "var(--text-3)" }}>Add a parallel fork (creates a paired fork + join)</div>
@@ -110,11 +111,11 @@ export function WiringStep({ draft, onChange }: WiringStepProps) {
             <option key={n.id} value={n.id}>{n.name} ({n.id})</option>
           ))}
         </select>
-        <button onClick={addFork} disabled={!canAddFork} aria-label="add fork">Add fork</button>
+        <Button onClick={addFork} disabled={!canAddFork} aria-label="add fork">Add fork</Button>
       </div>
       <PipelineView pipeline={draftToPipeline(draft)} />
     </div>
   );
 }
 
-const inp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" };
+const inp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit", fontSize: "var(--ts-base)" };

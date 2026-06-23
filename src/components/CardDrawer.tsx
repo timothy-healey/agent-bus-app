@@ -69,7 +69,7 @@ export function CardDrawer({
     const active = t === tab;
     return {
       padding: "9px 16px",
-      fontSize: 11.5,
+      fontSize: "var(--ts-sm)",
       color: active ? "var(--accent)" : "var(--text-3)",
       background: active ? "var(--surface)" : "transparent",
       border: "none",
@@ -78,6 +78,30 @@ export function CardDrawer({
       fontFamily: "inherit",
     };
   }
+  // Derive the live-log tab state from what the drawer already knows (S1). Avoids
+  // re-plumbing the telemetry pipeline: running == still producing output.
+  const logBody = logText?.trim() ?? "";
+  const logState: "loading" | "streaming" | "settled" | "error" | "empty" =
+    /\[error\]/i.test(logBody)
+      ? "error"
+      : task.state === "running"
+        ? logBody
+          ? "streaming"
+          : "loading"
+        : logBody
+          ? "settled"
+          : "empty";
+  const logBlock: CSSProperties = {
+    flex: 1,
+    margin: 0,
+    padding: "14px 18px",
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--ts-sm)",
+    color: "var(--text-3)",
+    overflowY: "auto",
+    whiteSpace: "pre-wrap",
+    background: "var(--bg-2)",
+  };
   const bodyWrap: CSSProperties = { flex: 1, display: "flex", minHeight: 0 };
   const actionBar: CSSProperties = {
     borderTop: "1px solid var(--border)",
@@ -102,16 +126,16 @@ export function CardDrawer({
       </div>
 
       <div style={tabBar} role="tablist">
-        <button role="tab" aria-selected={tab === "artifact"} style={tabStyle("artifact")} onClick={() => setTab("artifact")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "artifact"} style={tabStyle("artifact")} onClick={() => setTab("artifact")}>
           artifact{inlineCount > 0 ? ` (${inlineCount})` : ""}
         </button>
-        <button role="tab" aria-selected={tab === "live log"} style={tabStyle("live log")} onClick={() => setTab("live log")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "live log"} style={tabStyle("live log")} onClick={() => setTab("live log")}>
           live log
         </button>
-        <button role="tab" aria-selected={tab === "review"} style={tabStyle("review")} onClick={() => setTab("review")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "review"} style={tabStyle("review")} onClick={() => setTab("review")}>
           review
         </button>
-        <button role="tab" aria-selected={tab === "lineage"} style={tabStyle("lineage")} onClick={() => setTab("lineage")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "lineage"} style={tabStyle("lineage")} onClick={() => setTab("lineage")}>
           lineage
         </button>
       </div>
@@ -138,26 +162,43 @@ export function CardDrawer({
           </>
         )}
         {tab === "live log" && (
-          <pre
-            style={{
-              flex: 1,
-              margin: 0,
-              padding: "14px 18px",
-              fontFamily: "'Berkeley Mono','JetBrains Mono',ui-monospace,monospace",
-              fontSize: 11,
-              color: "var(--text-3)",
-              overflowY: "auto",
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {logText && logText.trim() ? logText : "no log captured for this task yet."}
-          </pre>
+          <div data-testid="live-log" data-log-state={logState} style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            {logState === "loading" && (
+              // Skeleton lines while the running worker has produced no output yet
+              // (DESIGN.md §States: skeleton, never a spinner in content).
+              <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 10 }} aria-label="log loading" role="status">
+                {[88, 72, 95, 60].map((w, i) => (
+                  <div key={i} className="abp-skeleton" style={{ width: `${w}%` }} />
+                ))}
+              </div>
+            )}
+            {(logState === "streaming" || logState === "settled") && (
+              <pre style={logBlock}>
+                {logBody}
+                {logState === "streaming" && <span className="abp-pulse" style={{ color: "var(--running)" }}>▌</span>}
+              </pre>
+            )}
+            {logState === "error" && (
+              <pre style={{ ...logBlock, color: "var(--danger)", borderLeft: "2px solid var(--danger)" }} role="alert">
+                {logBody}
+              </pre>
+            )}
+            {logState === "empty" && (
+              <div style={{ padding: "16px 18px", color: "var(--text-3)", fontSize: "var(--ts-base)", fontStyle: "italic" }}>
+                no log captured for this task yet.
+              </div>
+            )}
+          </div>
         )}
         {tab === "review" && (
-          <div style={{ flex: 1, padding: "14px 18px", color: "var(--text-2)", fontSize: 12 }}>
-            {task.review_artifact
-              ? `review artifact: ${task.review_artifact}`
-              : "no review artifact yet. gate actions are in the bar below."}
+          <div style={{ flex: 1, padding: "14px 18px", minWidth: 0 }}>
+            {task.review_artifact ? (
+              <ArtifactView markdown={artifactMarkdown} onAddComment={() => {}} />
+            ) : (
+              <div style={{ color: "var(--text-3)", fontSize: "var(--ts-base)", fontStyle: "italic" }}>
+                no review artifact yet. gate actions are in the bar below.
+              </div>
+            )}
           </div>
         )}
         {tab === "lineage" && (

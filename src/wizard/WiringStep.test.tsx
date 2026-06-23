@@ -10,7 +10,8 @@ describe("WiringStep", () => {
     render(<WiringStep draft={d} onChange={() => {}} />);
     expect(screen.getByText(/Forks \(1\)/)).toBeInTheDocument();
     expect(screen.getByText(/Joins \(1\)/)).toBeInTheDocument();
-    expect(screen.getByText(/fork-1/)).toBeInTheDocument();
+    // fork-1 now appears in both the graph node and the form card.
+    expect(screen.getAllByText(/fork-1/).length).toBeGreaterThan(0);
   });
 
   it("renders gates via PipelineView", () => {
@@ -18,7 +19,8 @@ describe("WiringStep", () => {
     d = { ...d, gates: [{ id: "gate-2", label: "Plan review", downstream: "implementers" }] };
     render(<WiringStep draft={d} onChange={() => {}} />);
     expect(screen.getByText(/Gates \(1\)/)).toBeInTheDocument();
-    expect(screen.getByText(/Plan review/)).toBeInTheDocument();
+    // "Plan review" gate label appears in both the graph node and the form card.
+    expect(screen.getAllByText(/Plan review/).length).toBeGreaterThan(0);
   });
 
   it("renders the add-fork control", () => {

@@ -3,6 +3,7 @@ import type { Task, TaskState } from "../ipc/runtime";
 import { filterTasks, FILTER_PILLS, type FilterPill } from "../lib/listFilter";
 import { formatAge } from "../lib/age";
 import { formatTokens, costColorVar, costBand } from "../lib/cost";
+import { stateLabel } from "./ui/StatePill";
 
 export interface ListViewProps {
   tasks: Task[];
@@ -50,14 +51,25 @@ export function ListView({ tasks, tokensByTask, now, onOpenCard }: ListViewProps
             {rows.map((task) => {
               const needsYou = task.state === "gated" || task.state === "needs_human";
               const tokens = tokensByTask[task.id] ?? 0;
+              // Needs-you reads via row tint + the state dot/label (Decision 4,
+              // option A); the banned 2px side-stripe is dropped.
               const rowStyle: CSSProperties = { cursor: "pointer", background: needsYou ? "oklch(18% 0.025 55)" : undefined };
-              const firstTd: CSSProperties = needsYou ? { ...td, borderLeft: "2px solid var(--accent)", color: "var(--text-3)" } : { ...td, color: "var(--text-3)" };
+              const firstTd: CSSProperties = { ...td, color: "var(--text-3)" };
               return (
                 <tr key={task.id} style={rowStyle} onClick={() => onOpenCard(task.id)}>
                   <td style={firstTd}>{task.id}</td>
                   <td style={{ ...td, color: "var(--text)" }}>{task.topic}</td>
                   <td style={td}>{task.current_stage}</td>
-                  <td style={td}><span title={task.state} style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: stateDot[task.state] }} /></td>
+                  <td style={td}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-2)" }}>
+                      <span
+                        aria-hidden="true"
+                        className={task.state === "running" ? "abp-pulse" : undefined}
+                        style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: stateDot[task.state], flexShrink: 0 }}
+                      />
+                      {stateLabel(task.state)}
+                    </span>
+                  </td>
                   <td style={numTd}>{formatAge(task.created_at, now)}</td>
                   <td style={{ ...numTd, color: costColorVar[costBand(tokens)] }}>{formatTokens(tokens)}</td>
                   <td style={numTd}>a{task.attempts}</td>

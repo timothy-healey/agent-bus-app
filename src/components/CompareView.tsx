@@ -49,7 +49,7 @@ export function CompareView({ left, right }: CompareViewProps) {
     flex: 1,
     overflowY: "auto",
     padding: "14px 18px",
-    fontFamily: "ui-sans-serif, -apple-system, system-ui, sans-serif",
+    fontFamily: "var(--font-reading)",
     fontSize: 13,
     lineHeight: 1.6,
     color: "var(--text-2)",
@@ -58,8 +58,8 @@ export function CompareView({ left, right }: CompareViewProps) {
   function badgeStyle(changed: number): CSSProperties {
     return {
       marginLeft: "auto",
-      fontSize: 10,
-      fontFamily: "'Berkeley Mono','JetBrains Mono',ui-monospace,monospace",
+      fontSize: "var(--ts-xs)",
+      fontFamily: "var(--font-mono)",
       color: changed > 0 ? "var(--accent)" : "var(--text-4)",
     };
   }

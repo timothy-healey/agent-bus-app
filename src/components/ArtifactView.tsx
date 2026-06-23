@@ -21,7 +21,7 @@ export function ArtifactView({ markdown, onAddComment }: ArtifactViewProps) {
 
   if (!markdown.trim()) {
     return (
-      <div style={{ padding: 22, color: "var(--text-4)", fontSize: 12, fontStyle: "italic" }}>
+      <div style={{ padding: 22, color: "var(--text-3)", fontSize: "var(--ts-base)", fontStyle: "italic" }}>
         no artifact produced yet.
       </div>
     );
@@ -32,7 +32,7 @@ export function ArtifactView({ markdown, onAddComment }: ArtifactViewProps) {
   const body: CSSProperties = {
     overflowY: "auto",
     padding: "18px 22px",
-    fontFamily: "ui-sans-serif, -apple-system, system-ui, sans-serif",
+    fontFamily: "var(--font-reading)",
     fontSize: 13.5,
     lineHeight: 1.6,
     color: "var(--text-2)",
@@ -40,6 +40,8 @@ export function ArtifactView({ markdown, onAddComment }: ArtifactViewProps) {
     height: "100%",
     boxSizing: "border-box",
   };
+  // Cap reading-body line length per DESIGN.md §Typography (75ch), D10.
+  const measure: CSSProperties = { maxWidth: "75ch" };
 
   function handleMouseUp() {
     const sel = typeof window !== "undefined" ? window.getSelection?.() : null;
@@ -52,7 +54,7 @@ export function ArtifactView({ markdown, onAddComment }: ArtifactViewProps) {
 
   return (
     <div data-testid="artifact-body" style={body} onMouseUp={handleMouseUp}>
-      {blocks.map(renderBlock)}
+      <div style={measure}>{blocks.map(renderBlock)}</div>
       {selection && (
         <div style={{ position: "sticky", bottom: 12, marginTop: 12 }}>
           <SelectionPopover
