@@ -51,8 +51,10 @@ export function ListView({ tasks, tokensByTask, now, onOpenCard }: ListViewProps
             {rows.map((task) => {
               const needsYou = task.state === "gated" || task.state === "needs_human";
               const tokens = tokensByTask[task.id] ?? 0;
+              // Needs-you reads via row tint + the state dot/label (Decision 4,
+              // option A); the banned 2px side-stripe is dropped.
               const rowStyle: CSSProperties = { cursor: "pointer", background: needsYou ? "oklch(18% 0.025 55)" : undefined };
-              const firstTd: CSSProperties = needsYou ? { ...td, borderLeft: "2px solid var(--accent)", color: "var(--text-3)" } : { ...td, color: "var(--text-3)" };
+              const firstTd: CSSProperties = { ...td, color: "var(--text-3)" };
               return (
                 <tr key={task.id} style={rowStyle} onClick={() => onOpenCard(task.id)}>
                   <td style={firstTd}>{task.id}</td>

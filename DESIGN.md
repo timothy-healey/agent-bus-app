@@ -404,7 +404,7 @@ border-collapse: collapse;
 
 - Header: `var(--bg-2)` background, `--text-3` colour, `text-transform: lowercase`, `letter-spacing: 0.02em`, font-size 11px
 - Row hover: `background: var(--surface)`, cursor: pointer
-- `needs-you` row: `background: oklch(18% 0.025 55)` (subtle ochre tint), first cell has `border-left: 2px solid var(--accent)`
+- `needs-you` row: `background: oklch(18% 0.025 55)` (subtle ochre tint), plus the state dot + label in the state column. **No side-stripe** — reconciled with §Anti-patterns (2026-06-24): the tint + dot + label carry the signal, and the global ban on accent side-stripes >1px wins. (Earlier drafts of this spec called for a `border-left: 2px solid var(--accent)` first cell; that contradicted §Anti-patterns and has been removed.)
 - Tabular numerals applied via `font-variant-numeric` on numeric columns
 
 ---

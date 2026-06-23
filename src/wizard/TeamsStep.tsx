@@ -34,7 +34,7 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
               aria-label={`name for ${t.id}`}
               value={t.name}
               onChange={(e) => onChange(renameTeam(draft, t.id, e.target.value))}
-              style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" }}
+              style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit" }}
             />
             <span style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)" }}>{t.id}</span>
             <Button size="sm" variant="ghost" aria-label={`advanced ${t.id}`} aria-expanded={openAdvanced === t.id} onClick={() => setOpenAdvanced((o) => (o === t.id ? null : t.id))}>⚙</Button>
@@ -122,5 +122,5 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
   );
 }
 
-const advLbl: React.CSSProperties = { fontSize: 11, color: "var(--text-3)", display: "block" };
-const advInp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" };
+const advLbl: React.CSSProperties = { fontSize: "var(--ts-sm)", color: "var(--text-3)", display: "block" };
+const advInp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit" };
