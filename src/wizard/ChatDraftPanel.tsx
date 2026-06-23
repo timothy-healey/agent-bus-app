@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import { designSessionTurn, type DraftPipeline, type Step } from "../ipc/pipeline";
+import { bestEffortValidate, designSessionTurn, type DraftPipeline, type Step } from "../ipc/pipeline";
 
 interface Msg {
   role: "you" | "claude";
@@ -16,11 +16,14 @@ interface ChatDraftPanelProps {
 
 /// The shared two-way-bound panel (layout A): chat left, live-editable draft
 /// right. A chat turn emits a slice that updates the draft + is narrated; manual
-/// edits (via renderDraft's onChange) mutate the draft so the next turn sends it.
+/// edits mutate the draft so the next turn sends it. W1: best-effort validation
+/// issues are surfaced inline — from the turn result, and re-fetched from the
+/// backend on every manual edit (the backend stays the validation authority).
 export function ChatDraftPanel({ sessionId, step, draft, onDraftChange, renderDraft }: ChatDraftPanelProps) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [issues, setIssues] = useState<string[]>([]);
 
   async function send() {
     const v = value.trim();
@@ -31,12 +34,20 @@ export function ChatDraftPanel({ sessionId, step, draft, onDraftChange, renderDr
     try {
       const out = await designSessionTurn(sessionId, step, draft, v);
       setMsgs((m) => [...m, { role: "claude", text: out.reply_text }]);
+      setIssues(out.issues);
       onDraftChange(out.updated_draft);
     } catch (e) {
       setMsgs((m) => [...m, { role: "claude", text: `[error] ${e instanceof Error ? e.message : String(e)}` }]);
     } finally {
       setBusy(false);
     }
+  }
+
+  // Manual edits bypass chat; re-fetch the backend's best-effort issues so the
+  // banner stays live without any validation logic in the frontend (W1).
+  function handleManualEdit(d: DraftPipeline) {
+    onDraftChange(d);
+    bestEffortValidate(d).then(setIssues).catch(() => {});
   }
 
   return (
@@ -61,7 +72,20 @@ export function ChatDraftPanel({ sessionId, step, draft, onDraftChange, renderDr
           <button onClick={send} disabled={busy} aria-label="send">Send</button>
         </div>
       </div>
-      <div style={{ flex: 1, overflowY: "auto", minWidth: 280 }}>{renderDraft(draft, onDraftChange)}</div>
+      <div style={{ flex: 1, overflowY: "auto", minWidth: 280 }}>
+        {issues.length > 0 && (
+          <div
+            role="status"
+            aria-label="validation issues"
+            style={{ marginBottom: "var(--sp-3)", padding: "var(--sp-2)", border: "1px solid var(--accent-bd)", background: "var(--accent-2)", borderRadius: "var(--r-sm)", color: "var(--text-2)", fontSize: 11 }}
+          >
+            {issues.map((iss, i) => (
+              <div key={i}>• {iss}</div>
+            ))}
+          </div>
+        )}
+        {renderDraft(draft, handleManualEdit)}
+      </div>
     </div>
   );
 }

@@ -37,4 +37,36 @@ describe("TeamsStep", () => {
     fireEvent.change(screen.getByLabelText(/model for research/i), { target: { value: "claude-haiku-4" } });
     expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("claude-haiku-4");
   });
+
+  it("the advanced panel sets an effort preset", () => {
+    const d = addTeam(emptyDraft(), "research", "Research");
+    const onChange = vi.fn();
+    render(<TeamsStep draft={d} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /advanced research/i }));
+    fireEvent.change(screen.getByLabelText(/effort for research/i), { target: { value: "extended-high" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.effort).toEqual({ mode: "extended-high" });
+  });
+
+  it("choosing custom effort reveals a budget input that sets budget_tokens", () => {
+    const d = { ...addTeam(emptyDraft(), "research", "Research") };
+    d.teams[0].runner.effort = { mode: "custom", budget_tokens: 12000 };
+    const onChange = vi.fn();
+    render(<TeamsStep draft={d} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /advanced research/i }));
+    fireEvent.change(screen.getByLabelText(/budget for research/i), { target: { value: "20000" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.effort).toEqual({ mode: "custom", budget_tokens: 20000 });
+  });
+
+  it("the advanced panel edits tools / reads / writes", () => {
+    const d = addTeam(emptyDraft(), "research", "Research");
+    const onChange = vi.fn();
+    render(<TeamsStep draft={d} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /advanced research/i }));
+    fireEvent.change(screen.getByLabelText(/tools for research/i), { target: { value: "Read, Grep" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.tools).toEqual(["Read", "Grep"]);
+    fireEvent.change(screen.getByLabelText(/reads for research/i), { target: { value: "src/**" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.reads).toEqual(["src/**"]);
+    fireEvent.change(screen.getByLabelText(/writes for research/i), { target: { value: "artifacts/**" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.writes).toEqual(["artifacts/**"]);
+  });
 });

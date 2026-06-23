@@ -1,4 +1,4 @@
-import type { DraftPipeline, DraftTeam } from "../ipc/pipeline";
+import type { DraftPipeline, DraftTeam, EffortMode, Gate } from "../ipc/pipeline";
 
 export const WIZARD_STEPS = ["basics", "teams", "prompts", "wiring", "review"] as const;
 export type WizardStep = (typeof WIZARD_STEPS)[number];
@@ -14,6 +14,7 @@ export function emptyDraft(): DraftPipeline {
     teams: [],
     forks: [],
     joins: [],
+    gates: [],
     escalations: [],
   };
 }
@@ -53,4 +54,40 @@ export function setPromptBody(d: DraftPipeline, id: string, body: string): Draft
 
 export function setTeamModel(d: DraftPipeline, id: string, model: string): DraftPipeline {
   return mapTeams(d, (t) => (t.id === id ? { ...t, runner: { ...t.runner, model } } : t));
+}
+
+/// Parse a comma-separated input into a trimmed, non-empty string list (the
+/// shape Scope.tools/reads/writes use).
+function parseCsv(raw: string): string[] {
+  return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+export function setTeamEffort(d: DraftPipeline, id: string, effort: EffortMode): DraftPipeline {
+  return mapTeams(d, (t) => (t.id === id ? { ...t, runner: { ...t.runner, effort } } : t));
+}
+
+export function setTeamTools(d: DraftPipeline, id: string, raw: string): DraftPipeline {
+  return mapTeams(d, (t) => (t.id === id ? { ...t, scope: { ...t.scope, tools: parseCsv(raw) } } : t));
+}
+
+export function setTeamReads(d: DraftPipeline, id: string, raw: string): DraftPipeline {
+  return mapTeams(d, (t) => (t.id === id ? { ...t, scope: { ...t.scope, reads: parseCsv(raw) } } : t));
+}
+
+export function setTeamWrites(d: DraftPipeline, id: string, raw: string): DraftPipeline {
+  return mapTeams(d, (t) => (t.id === id ? { ...t, scope: { ...t.scope, writes: parseCsv(raw) } } : t));
+}
+
+export function addGate(d: DraftPipeline, id: string, label: string, downstream: string): DraftPipeline {
+  if (d.gates.some((g) => g.id === id)) return d;
+  const gate: Gate = { id, label, downstream };
+  return { ...d, gates: [...d.gates, gate] };
+}
+
+export function removeGate(d: DraftPipeline, id: string): DraftPipeline {
+  return { ...d, gates: d.gates.filter((g) => g.id !== id) };
+}
+
+export function setTeamApprove(d: DraftPipeline, teamId: string, target: string | null): DraftPipeline {
+  return mapTeams(d, (t) => (t.id === teamId ? { ...t, outputs: { ...t.outputs, on_approve: target } } : t));
 }
