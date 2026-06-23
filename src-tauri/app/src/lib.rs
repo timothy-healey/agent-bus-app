@@ -37,6 +37,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (3, include_str!("../migrations/003_runtime.sql")),
         (4, include_str!("../migrations/004_comments_kind.sql")),
         (5, include_str!("../migrations/005_usage.sql")),
+        (6, include_str!("../migrations/006_fanout.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -255,6 +256,12 @@ pub fn run() {
             version: 5,
             description: "usage telemetry — worker_usage_log + cc_usage_log + usage_config",
             sql: include_str!("../migrations/005_usage.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 6,
+            description: "fanout — task lane columns + fanout_groups/fanout_lanes",
+            sql: include_str!("../migrations/006_fanout.sql"),
             kind: MigrationKind::Up,
         },
     ];
@@ -624,7 +631,7 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 5, "all five migrations recorded");
+        assert_eq!(version, 6, "all six migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
