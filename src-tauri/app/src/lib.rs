@@ -3,7 +3,9 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_sql::{Migration, MigrationKind};
 use workspace::{api::WorkspaceState, store::ProjectStore};
 
+use runners::anthropic_api::AnthropicApiRunner;
 use runners::claude_cli::ClaudeCliRunner;
+use runners::output::{Runner, RunnerError};
 use runtime::api::RuntimeState;
 use runtime::brake::Brake;
 use runtime::pool::{process_one_claim, PoolContext};
@@ -977,6 +979,33 @@ pub fn run() {
 
 /// Spawn a polling worker loop per team. v1 runs one loop per team (concurrent
 /// workers per team is v1.1). Each iteration runs process_one_claim; on a
+/// Composition-root factory: map a team's resolved RunnerConfig to a concrete
+/// Runner. claude-cli is the default and always available. anthropic-api
+/// resolves its per-team API key from `api_key_env` via the process
+/// environment; a team requesting anthropic-api with no resolvable key yields a
+/// clear RunnerError (NOT a panic) so the worker loop can surface it rather than
+/// crash. The runner kind is chosen per team — Runtime depends only on
+/// `Arc<dyn Runner>` and never learns which kind it got (the ACL seal).
+fn runner_for(config: &pipeline::model::RunnerConfig) -> Result<Arc<dyn Runner>, RunnerError> {
+    use agent_bus_core::RunnerKind;
+    match config.kind {
+        RunnerKind::ClaudeCli => Ok(Arc::new(ClaudeCliRunner::new())),
+        RunnerKind::AnthropicApi => {
+            let env_name = config.api_key_env.as_deref().ok_or_else(|| {
+                RunnerError::Other(
+                    "anthropic-api runner requires `api_key_env` to be set on the team's runner config".into(),
+                )
+            })?;
+            let key = std::env::var(env_name).map_err(|_| {
+                RunnerError::Other(format!(
+                    "anthropic-api runner: API key env var `{env_name}` is not set"
+                ))
+            })?;
+            Ok(Arc::new(AnthropicApiRunner::new(key)))
+        }
+    }
+}
+
 /// settle it emits a `task.changed` event the frontend listens for.
 #[allow(clippy::too_many_arguments)]
 fn spawn_worker_loops(
@@ -991,12 +1020,26 @@ fn spawn_worker_loops(
     log_sink: Option<Arc<runtime::pool::LogSinkFactory>>,
     audit: Option<Arc<runtime::invocation_audit::InvocationAuditStore>>,
 ) {
-    let runner: Arc<dyn runners::output::Runner> = Arc::new(ClaudeCliRunner::new());
     let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
     for team in pipeline.teams.clone() {
+        // Select the runner kind per team at the composition root. If a team
+        // requests anthropic-api but its key can't be resolved, keep the worker
+        // loop alive on the default claude-cli runner rather than panicking —
+        // we never crash the whole pool over one team's runner config.
+        let effective = team.effective_runner();
+        let runner: Arc<dyn Runner> = match runner_for(&effective) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "app: team `{}` runner selection failed ({e}); falling back to claude-cli",
+                    team.id
+                );
+                Arc::new(ClaudeCliRunner::new())
+            }
+        };
         let ctx = PoolContext {
             pipeline: pipeline.clone(),
-            runner: runner.clone(),
+            runner,
             tasks: tasks.clone(),
             fanout: fanout.clone(),
             brake: brake.clone(),
@@ -1035,6 +1078,57 @@ fn spawn_worker_loops(
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod runner_factory_tests {
+    use super::runner_for;
+    use agent_bus_core::{EffortMode, RunnerKind};
+    use pipeline::model::RunnerConfig;
+
+    fn cfg(kind: RunnerKind, api_key_env: Option<&str>) -> RunnerConfig {
+        RunnerConfig {
+            kind,
+            model: "claude-opus-4-7".into(),
+            effort: EffortMode::Standard,
+            api_key_env: api_key_env.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn claude_cli_kind_builds_a_runner() {
+        let r = runner_for(&cfg(RunnerKind::ClaudeCli, None));
+        assert!(r.is_ok(), "claude-cli must always build");
+    }
+
+    #[test]
+    fn anthropic_api_with_resolvable_key_builds_a_runner() {
+        std::env::set_var("R1_TEST_KEY_PRESENT", "sk-test-123");
+        let r = runner_for(&cfg(RunnerKind::AnthropicApi, Some("R1_TEST_KEY_PRESENT")));
+        std::env::remove_var("R1_TEST_KEY_PRESENT");
+        assert!(r.is_ok(), "anthropic-api with a resolvable key must build");
+    }
+
+    #[test]
+    fn anthropic_api_with_no_key_env_named_is_a_clear_error_not_a_panic() {
+        // Arc<dyn Runner> is not Debug, so match the Result rather than unwrap_err.
+        match runner_for(&cfg(RunnerKind::AnthropicApi, None)) {
+            Err(runners::output::RunnerError::Other(msg)) => {
+                assert!(msg.to_lowercase().contains("api_key_env"), "msg: {msg}");
+            }
+            Err(other) => panic!("expected Other, got {other:?}"),
+            Ok(_) => panic!("expected a clear error, got a runner"),
+        }
+    }
+
+    #[test]
+    fn anthropic_api_with_unresolvable_key_is_a_clear_error_not_a_panic() {
+        match runner_for(&cfg(RunnerKind::AnthropicApi, Some("R1_DEFINITELY_UNSET_ENV_VAR"))) {
+            Err(runners::output::RunnerError::Other(_)) => {}
+            Err(other) => panic!("expected Other, got {other:?}"),
+            Ok(_) => panic!("expected a clear error, got a runner"),
+        }
     }
 }
 
