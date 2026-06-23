@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { usageSnapshot, setBudget } from "./usage";
+import { usageSnapshot, setBudget, setAutoMeter } from "./usage";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
@@ -19,5 +19,11 @@ describe("usage ipc", () => {
     invokeMock.mockResolvedValueOnce({ window_budget: 5000000 });
     await setBudget(5_000_000);
     expect(invokeMock).toHaveBeenCalledWith("usage_set_budget", { budget: 5_000_000 });
+  });
+
+  it("setAutoMeter passes the enabled flag", async () => {
+    invokeMock.mockResolvedValueOnce({ auto_meter_enabled: true });
+    await setAutoMeter(true);
+    expect(invokeMock).toHaveBeenCalledWith("usage_set_auto_meter", { enabled: true });
   });
 });

@@ -16,7 +16,7 @@ import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as
 import { recordVerdict, addComment } from "./ipc/review";
 import { listPipelines, loadPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
-import { setBudget } from "./ipc/usage";
+import { setBudget, setAutoMeter } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
 import { useConversation } from "./hooks/useConversation";
 
@@ -163,7 +163,7 @@ export default function App() {
         {view === "pipeline" ? (
           <PipelineView pipeline={pipeline} />
         ) : view === "settings" ? (
-          <SettingsView usage={usage} onSetBudget={setBudget} />
+          <SettingsView usage={usage} onSetBudget={setBudget} onSetAutoMeter={setAutoMeter} />
         ) : activeProject == null ? (
           <ProjectList />
         ) : view === "list" ? (
