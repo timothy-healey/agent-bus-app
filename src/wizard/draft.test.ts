@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { emptyDraft, WIZARD_STEPS, renameTeam, setPromptBody, setTeamModel, addTeam, removeTeam } from "./draft";
 import { setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
 import { addGate, removeGate, setTeamApprove } from "./draft";
+import { addForkJoin, removeForkJoin } from "./draft";
 
 describe("wizard draft helpers", () => {
   it("emptyDraft has no teams + current schema version", () => {
@@ -99,5 +100,41 @@ describe("gate helpers (W3)", () => {
   it("removeGate drops the gate node", () => {
     const d = removeGate(addGate(base, "gate-2", "Plan review", "implementers"), "gate-2");
     expect(d.gates).toHaveLength(0);
+  });
+});
+
+describe("fork/join helpers (W4)", () => {
+  const base = addTeam(addTeam(addTeam(emptyDraft(), "a", "A"), "b", "B"), "c", "C");
+
+  it("addForkJoin creates a paired fork and join", () => {
+    const d = addForkJoin(base, "fork-1", "join-1", ["a", "b"], "c");
+    expect(d.forks).toEqual([{ id: "fork-1", lanes: ["a", "b"] }]);
+    expect(d.joins).toEqual([{ id: "join-1", waits_for: ["a", "b"], downstream: "c" }]);
+  });
+
+  it("addForkJoin is a no-op with fewer than 2 lanes", () => {
+    const d = addForkJoin(base, "fork-1", "join-1", ["a"], "c");
+    expect(d.forks).toHaveLength(0);
+    expect(d.joins).toHaveLength(0);
+  });
+
+  it("addForkJoin is a no-op on a duplicate fork id", () => {
+    const once = addForkJoin(base, "fork-1", "join-1", ["a", "b"], "c");
+    const twice = addForkJoin(once, "fork-1", "join-2", ["a", "c"], "b");
+    expect(twice.forks).toHaveLength(1);
+    expect(twice.joins).toHaveLength(1);
+  });
+
+  it("addForkJoin is a no-op on a duplicate join id", () => {
+    const once = addForkJoin(base, "fork-1", "join-1", ["a", "b"], "c");
+    const twice = addForkJoin(once, "fork-2", "join-1", ["a", "c"], "b");
+    expect(twice.forks).toHaveLength(1);
+    expect(twice.joins).toHaveLength(1);
+  });
+
+  it("removeForkJoin drops both the fork and its paired join", () => {
+    const d = removeForkJoin(addForkJoin(base, "fork-1", "join-1", ["a", "b"], "c"), "fork-1", "join-1");
+    expect(d.forks).toHaveLength(0);
+    expect(d.joins).toHaveLength(0);
   });
 });
