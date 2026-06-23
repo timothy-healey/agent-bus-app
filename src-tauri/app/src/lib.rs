@@ -45,6 +45,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (6, include_str!("../migrations/006_fanout.sql")),
         (7, include_str!("../migrations/007_invocation_audit.sql")),
         (8, include_str!("../migrations/008_nested_groups.sql")),
+        (9, include_str!("../migrations/009_git_config.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -850,6 +851,12 @@ pub fn run() {
             sql: include_str!("../migrations/008_nested_groups.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 9,
+            description: "git config — author name/email for worker worktree commits",
+            sql: include_str!("../migrations/009_git_config.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -885,6 +892,19 @@ pub fn run() {
                 // Workspace state (Plan 1).
                 let project_store = Arc::new(ProjectStore::new(pool.clone()));
                 handle.manage(WorkspaceState { store: project_store.clone() });
+
+                // Secrets / keychain (S1). Real OS keychain on macOS; an
+                // in-memory fake elsewhere keeps the seam usable in any build.
+                #[cfg(target_os = "macos")]
+                let keychain: Arc<dyn secrets::KeychainStore> =
+                    Arc::new(secrets::SecurityFrameworkKeychain::new());
+                #[cfg(not(target_os = "macos"))]
+                let keychain: Arc<dyn secrets::KeychainStore> =
+                    Arc::new(secrets::FakeKeychain::new());
+                handle.manage(secrets::api::KeychainState { store: keychain.clone() });
+
+                // Git author config (S1).
+                handle.manage(workspace::git_config::GitConfigState { pool: pool.clone() });
 
                 // Runtime state (Plan 3).
                 let (project_id, project_root, pipe) = load_active(&project_store).await;
@@ -942,6 +962,7 @@ pub fn run() {
                 specs.extend(usage_telemetry::api::tools());
                 specs.extend(runners::api::tools());
                 specs.extend(workspace::api::tools());
+                specs.extend(secrets::api::tools());
                 specs.extend(conversational_control::api::tools());
                 let catalog = Arc::new(ToolCatalog::new(specs));
                 debug_assert!(catalog.duplicate_names().is_empty(), "tool name collision in catalog");
@@ -1009,7 +1030,7 @@ pub fn run() {
                 if !pipe.teams.is_empty() {
                     let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                         Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())), Some(invocation_audit.clone()));
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())), Some(invocation_audit.clone()), Some(keychain.clone()));
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -1049,7 +1070,13 @@ pub fn run() {
             workspace::api::workspace_list_projects,
             workspace::api::workspace_get_project,
             workspace::api::workspace_set_active_pipeline,
+            workspace::api::workspace_remove_project,
             workspace::api::read_artifact,
+            workspace::git_config::git_config_get,
+            workspace::git_config::git_config_set,
+            secrets::api::runner_set_api_key,
+            secrets::api::runner_get_api_key_status,
+            secrets::api::runner_clear_api_key,
             pipeline::api::pipeline_list,
             pipeline::api::pipeline_load,
             kickoff_generate_cmd,
@@ -1093,20 +1120,23 @@ pub fn run() {
 /// clear RunnerError (NOT a panic) so the worker loop can surface it rather than
 /// crash. The runner kind is chosen per team — Runtime depends only on
 /// `Arc<dyn Runner>` and never learns which kind it got (the ACL seal).
-fn runner_for(config: &pipeline::model::RunnerConfig) -> Result<Arc<dyn Runner>, RunnerError> {
+fn runner_for(
+    config: &pipeline::model::RunnerConfig,
+    resolve_key: &dyn Fn(&pipeline::model::RunnerConfig) -> Option<String>,
+) -> Result<Arc<dyn Runner>, RunnerError> {
     use agent_bus_core::RunnerKind;
     match config.kind {
         RunnerKind::ClaudeCli => Ok(Arc::new(ClaudeCliRunner::new())),
         RunnerKind::AnthropicApi => {
-            let env_name = config.api_key_env.as_deref().ok_or_else(|| {
+            // Keychain-first, then api_key_env — both live in the injected
+            // resolver (built at the root). The resolved key is a plain String
+            // passed into AnthropicApiRunner::new: NO keychain/OS type crosses
+            // the Runner trait (the ACL seal). An unresolvable key is a clear
+            // error, NOT a panic.
+            let key = resolve_key(config).ok_or_else(|| {
                 RunnerError::Other(
-                    "anthropic-api runner requires `api_key_env` to be set on the team's runner config".into(),
+                    "anthropic-api runner: no API key found in the keychain or `api_key_env`".into(),
                 )
-            })?;
-            let key = std::env::var(env_name).map_err(|_| {
-                RunnerError::Other(format!(
-                    "anthropic-api runner: API key env var `{env_name}` is not set"
-                ))
             })?;
             Ok(Arc::new(AnthropicApiRunner::new(key)))
         }
@@ -1126,6 +1156,7 @@ fn spawn_worker_loops(
     pool: sqlx::SqlitePool,
     log_sink: Option<Arc<runtime::pool::LogSinkFactory>>,
     audit: Option<Arc<runtime::invocation_audit::InvocationAuditStore>>,
+    keychain: Option<Arc<dyn secrets::KeychainStore>>,
 ) {
     let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
     for team in pipeline.teams.clone() {
@@ -1134,7 +1165,20 @@ fn spawn_worker_loops(
         // loop alive on the default claude-cli runner rather than panicking —
         // we never crash the whole pool over one team's runner config.
         let effective = team.effective_runner();
-        let runner: Arc<dyn Runner> = match runner_for(&effective) {
+        let resolve_key = |c: &pipeline::model::RunnerConfig| -> Option<String> {
+            // Keychain-first: account = api_key_env name if present, else the
+            // default "anthropic-api" account. Then fall back to the env var.
+            let account = c.api_key_env.as_deref().unwrap_or("anthropic-api");
+            if let Some(kc) = keychain.as_ref() {
+                if let Ok(k) = kc.get(secrets::api::SERVICE, account) {
+                    if !k.is_empty() {
+                        return Some(k);
+                    }
+                }
+            }
+            c.api_key_env.as_ref().and_then(|n| std::env::var(n).ok())
+        };
+        let runner: Arc<dyn Runner> = match runner_for(&effective, &resolve_key) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
@@ -1203,36 +1247,45 @@ mod runner_factory_tests {
         }
     }
 
+    // A resolver that mimics the root's env fallback (no keychain in unit tests).
+    fn env_resolver(c: &RunnerConfig) -> Option<String> {
+        c.api_key_env.as_ref().and_then(|n| std::env::var(n).ok())
+    }
+
     #[test]
     fn claude_cli_kind_builds_a_runner() {
-        let r = runner_for(&cfg(RunnerKind::ClaudeCli, None));
+        let r = runner_for(&cfg(RunnerKind::ClaudeCli, None), &env_resolver);
         assert!(r.is_ok(), "claude-cli must always build");
     }
 
     #[test]
     fn anthropic_api_with_resolvable_key_builds_a_runner() {
         std::env::set_var("R1_TEST_KEY_PRESENT", "sk-test-123");
-        let r = runner_for(&cfg(RunnerKind::AnthropicApi, Some("R1_TEST_KEY_PRESENT")));
+        let r = runner_for(
+            &cfg(RunnerKind::AnthropicApi, Some("R1_TEST_KEY_PRESENT")),
+            &env_resolver,
+        );
         std::env::remove_var("R1_TEST_KEY_PRESENT");
         assert!(r.is_ok(), "anthropic-api with a resolvable key must build");
     }
 
     #[test]
-    fn anthropic_api_with_no_key_env_named_is_a_clear_error_not_a_panic() {
-        // Arc<dyn Runner> is not Debug, so match the Result rather than unwrap_err.
-        match runner_for(&cfg(RunnerKind::AnthropicApi, None)) {
-            Err(runners::output::RunnerError::Other(msg)) => {
-                assert!(msg.to_lowercase().contains("api_key_env"), "msg: {msg}");
-            }
-            Err(other) => panic!("expected Other, got {other:?}"),
-            Ok(_) => panic!("expected a clear error, got a runner"),
-        }
+    fn anthropic_api_resolves_via_keychain_first() {
+        // A resolver that returns a key WITHOUT any env var set proves the
+        // keychain-first path: the factory uses whatever the resolver yields.
+        let kc_resolver = |_c: &RunnerConfig| Some("sk-from-keychain".to_string());
+        let r = runner_for(&cfg(RunnerKind::AnthropicApi, None), &kc_resolver);
+        assert!(r.is_ok(), "a keychain-resolved key must build even with no api_key_env");
     }
 
     #[test]
-    fn anthropic_api_with_unresolvable_key_is_a_clear_error_not_a_panic() {
-        match runner_for(&cfg(RunnerKind::AnthropicApi, Some("R1_DEFINITELY_UNSET_ENV_VAR"))) {
-            Err(runners::output::RunnerError::Other(_)) => {}
+    fn anthropic_api_with_no_resolvable_key_is_a_clear_error_not_a_panic() {
+        // Arc<dyn Runner> is not Debug, so match the Result rather than unwrap_err.
+        let none_resolver = |_c: &RunnerConfig| None;
+        match runner_for(&cfg(RunnerKind::AnthropicApi, None), &none_resolver) {
+            Err(runners::output::RunnerError::Other(msg)) => {
+                assert!(msg.to_lowercase().contains("api key"), "msg: {msg}");
+            }
             Err(other) => panic!("expected Other, got {other:?}"),
             Ok(_) => panic!("expected a clear error, got a runner"),
         }
@@ -1382,7 +1435,7 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 8, "all eight migrations recorded");
+        assert_eq!(version, 9, "all nine migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
