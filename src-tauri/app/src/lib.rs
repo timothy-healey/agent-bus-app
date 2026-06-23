@@ -513,6 +513,13 @@ impl ToolDispatcher for RootDispatcher {
                     Err(e) => err(e),
                 }
             }
+            "usage_set_auto_meter" => {
+                let enabled = a.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                match usage_telemetry::api::set_auto_meter_inner(&self.usage.pool, enabled).await {
+                    Ok(()) => { let _ = self.app.emit("usage.changed", ()); ok(serde_json::json!({ "auto_meter_enabled": enabled })) }
+                    Err(e) => err(e),
+                }
+            }
             other => err(format!("tool not dispatchable in v1: {other}")),
         };
         result
@@ -808,6 +815,7 @@ pub fn run() {
             review::api::record_verdict,
             usage_telemetry::api::usage_snapshot,
             usage_telemetry::api::usage_set_budget,
+            usage_telemetry::api::usage_set_auto_meter,
             conversational_control::api::send_message,
             conversational_control::api::get_conversation,
         ])
@@ -1434,5 +1442,49 @@ mod composite_engine_tests {
 
         let reloaded = store.load("p").await.unwrap().unwrap();
         assert_eq!(reloaded.turns.len(), 4);
+    }
+
+    // R2: the auto-meter sweep applies a BrakeDecision to Runtime's brake by
+    // reason. These exercise the exact decision->apply path the root sweep runs.
+    #[test]
+    fn sweep_decision_trips_and_releases_brake_by_auto_meter_reason() {
+        use runtime::brake::Brake;
+        use usage_telemetry::brake_policy::{decide, BrakeDecision, AUTO_METER_REASON};
+
+        let brake = Brake::new();
+        fn apply(brake: &Brake, d: BrakeDecision) {
+            match d {
+                BrakeDecision::SetOn(reason) => brake.set_on(reason),
+                BrakeDecision::Release => brake.set_off(),
+                BrakeDecision::NoChange => {}
+            }
+        }
+
+        // over threshold, not auto-on -> trips on with the auto-meter reason
+        let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
+        apply(&brake, decide(0.96, auto_on, 0.95, 0.85));
+        assert!(brake.is_on());
+        assert_eq!(brake.state().reason.as_deref(), Some(AUTO_METER_REASON));
+
+        // dropped below off threshold, auto-on -> releases
+        let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
+        apply(&brake, decide(0.80, auto_on, 0.95, 0.85));
+        assert!(!brake.is_on());
+        assert_eq!(brake.state().reason, None);
+    }
+
+    #[test]
+    fn sweep_never_releases_a_manual_brake() {
+        use runtime::brake::Brake;
+        use usage_telemetry::brake_policy::{decide, BrakeDecision, AUTO_METER_REASON};
+
+        let brake = Brake::new();
+        brake.set_on("rate-limit"); // reactive/manual reason, NOT auto-meter
+        let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
+        // even with low pct, a non-auto brake must not be auto-released
+        let d = decide(0.10, auto_on, 0.95, 0.85);
+        assert_eq!(d, BrakeDecision::NoChange);
+        assert!(brake.is_on());
+        assert_eq!(brake.state().reason.as_deref(), Some("rate-limit"));
     }
 }
