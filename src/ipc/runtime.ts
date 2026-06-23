@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type TaskState =
   | "queued"
@@ -64,4 +65,17 @@ export async function brakeState(): Promise<BrakeState> {
 
 export async function scaleTeam(teamId: string): Promise<number> {
   return await invoke<number>("scale_team", { team_id: teamId });
+}
+
+/// Display-only live-log fragment for one running task. `delta` is a prose
+/// fragment streamed from the worker as it runs; the authoritative settled state
+/// still arrives via `task.changed`. Purely for feel — accumulate per task_id.
+export interface TaskLog {
+  task_id: string;
+  delta: string;
+}
+
+/// Subscribe to backend display-only worker log fragments (R4).
+export async function onTaskLog(cb: (log: TaskLog) => void): Promise<UnlistenFn> {
+  return await listen<TaskLog>("task.log", (e) => cb(e.payload));
 }
