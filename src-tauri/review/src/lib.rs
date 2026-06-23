@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod comment;
+pub mod reanchor;
 pub mod store;
 
 #[cfg(test)]
