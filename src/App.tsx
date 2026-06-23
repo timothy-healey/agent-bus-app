@@ -34,7 +34,15 @@ export default function App() {
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   // A lineage click overrides which artifact the pane shows (D5: single pane).
   const [lineagePath, setLineagePath] = useState<string | null>(null);
-  useEffect(() => setLineagePath(null), [openTaskId]);
+  // B2: two chosen artifact paths to compare side-by-side, and their loaded
+  // bodies (read via the same read_artifact OHS command as the single pane).
+  const [comparePaths, setComparePaths] = useState<{ a: string; b: string } | null>(null);
+  const [compareMarkdown, setCompareMarkdown] = useState<{ left: string; right: string } | null>(null);
+  useEffect(() => {
+    setLineagePath(null);
+    setComparePaths(null);
+    setCompareMarkdown(null);
+  }, [openTaskId]);
 
   const openTask: Task | null =
     openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
@@ -80,6 +88,30 @@ export default function App() {
       cancelled = true;
     };
   }, [openTask, activeProject, lineagePath]);
+
+  // B2: load both chosen artifact bodies when comparePaths is set. Reuses the
+  // Workspace read_artifact OHS command — no new backend edge.
+  useEffect(() => {
+    let cancelled = false;
+    if (!comparePaths || !activeProject) {
+      setCompareMarkdown(null);
+      return;
+    }
+    (async () => {
+      try {
+        const [left, right] = await Promise.all([
+          readArtifact(activeProject.id, comparePaths.a),
+          readArtifact(activeProject.id, comparePaths.b),
+        ]);
+        if (!cancelled) setCompareMarkdown({ left, right });
+      } catch {
+        if (!cancelled) setCompareMarkdown(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [comparePaths, activeProject]);
 
   // The upstream writer a gate's revise routes back to: the team whose
   // on_approve points at this gate (best-effort; falls back to a label).
@@ -193,6 +225,20 @@ export default function App() {
             logText={liveLog.logFor(openTask.id)}
             reviseTarget={reviseTargetFor(openTask)}
             onOpenArtifact={setLineagePath}
+            compareMarkdown={compareMarkdown}
+            compareLabels={
+              comparePaths
+                ? {
+                    left: comparePaths.a.split("/").pop() ?? comparePaths.a,
+                    right: comparePaths.b.split("/").pop() ?? comparePaths.b,
+                  }
+                : undefined
+            }
+            onCompare={(a, b) => setComparePaths({ a, b })}
+            onExitCompare={() => {
+              setComparePaths(null);
+              setCompareMarkdown(null);
+            }}
             onApprove={handleApprove}
             onRevise={handleRevise}
             onReject={handleReject}
