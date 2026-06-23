@@ -208,6 +208,62 @@ impl FanOutStore {
         let g = self.load(group_id).await?;
         Ok(BarrierOutcome::Completed(g.early_cancel_continuation()))
     }
+
+    /// Quorum path (P3): record this lane's verdict, then ask the aggregate
+    /// whether the quorum is decided. The aggregate resolves to Downstream once
+    /// `quorum` lanes approve (early, without waiting for the rest) or to
+    /// needs-human once that becomes impossible; until then it returns None and
+    /// this lane parks. When decided, the SAME completes-once conditional UPDATE
+    /// guard the full barrier uses arbitrates the single winner — exactly-once is
+    /// preserved against concurrent settles and stragglers.
+    pub async fn record_and_try_quorum(
+        &self,
+        group_id: &str,
+        lane: &str,
+        verdict: Verdict,
+        quorum: u32,
+    ) -> Result<BarrierOutcome, FanOutStoreError> {
+        // 1. Upsert this lane's verdict (idempotent on re-record — D6).
+        sqlx::query(
+            "INSERT INTO fanout_lanes (group_id, lane, verdict) VALUES (?,?,?)
+             ON CONFLICT(group_id, lane) DO UPDATE SET verdict=excluded.verdict",
+        )
+        .bind(group_id)
+        .bind(lane)
+        .bind(verdict_str(verdict))
+        .execute(&self.pool)
+        .await?;
+
+        // 2. Read settled (non-pending) lane verdicts + ask the aggregate.
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT lane, verdict FROM fanout_lanes WHERE group_id = ? AND verdict != 'pending'")
+                .bind(group_id)
+                .fetch_all(&self.pool)
+                .await?;
+        let recorded: Vec<LaneVerdict> = rows
+            .into_iter()
+            .map(|(lane, v)| {
+                parse_verdict(&v)
+                    .map(|verdict| LaneVerdict { lane, verdict })
+                    .ok_or_else(|| FanOutStoreError::BadVerdict(v.clone()))
+            })
+            .collect::<Result<_, _>>()?;
+        let g = self.load(group_id).await?;
+        let decided = match g.quorum_continuation(&recorded, quorum) {
+            Some(c) => c,
+            None => return Ok(BarrierOutcome::Parked),
+        };
+
+        // 3. Quorum decided — attempt the completes-once guard.
+        let res = sqlx::query("UPDATE fanout_groups SET completed=1 WHERE id=? AND completed=0")
+            .bind(group_id)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Ok(BarrierOutcome::Parked);
+        }
+        Ok(BarrierOutcome::Completed(decided))
+    }
 }
 
 #[cfg(test)]
@@ -334,6 +390,68 @@ mod tests {
         // a straggler lane settles later -> group already completed -> parks
         let again = store.record_and_try_complete("G-1", "lane-b", Verdict::Reject).await.unwrap();
         assert_eq!(again, BarrierOutcome::Parked);
+    }
+
+    fn group3() -> FanOutGroup {
+        FanOutGroup {
+            id: "G-3".into(), pipeline: "pipe".into(), join_target: "join-1".into(),
+            downstream: "after".into(),
+            expected_lanes: vec!["lane-a".into(), "lane-b".into(), "lane-c".into()],
+            completed: false,
+        }
+    }
+
+    async fn seeded3(store: &FanOutStore) {
+        store.create(&group3()).await.unwrap();
+        for l in ["lane-a", "lane-b", "lane-c"] {
+            store.seed_lane("G-3", l).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn quorum_reached_early_completes_to_downstream() {
+        let store = FanOutStore::new(fresh_pool().await);
+        seeded3(&store).await; // 3 lanes
+        let first = store.record_and_try_quorum("G-3", "lane-a", Verdict::Approve, 2).await.unwrap();
+        assert_eq!(first, BarrierOutcome::Parked); // 1 of 2
+        let second = store.record_and_try_quorum("G-3", "lane-b", Verdict::Approve, 2).await.unwrap();
+        assert_eq!(second, BarrierOutcome::Completed(Continuation::Downstream("after".into())));
+        assert!(store.load("G-3").await.unwrap().completed);
+    }
+
+    #[tokio::test]
+    async fn quorum_impossible_completes_to_needs_human() {
+        let store = FanOutStore::new(fresh_pool().await);
+        seeded3(&store).await; // 3 lanes, quorum 2
+        store.record_and_try_quorum("G-3", "lane-a", Verdict::Reject, 2).await.unwrap();
+        // after second reject: 0 approvals, 1 unsettled < 2 => needs-human
+        let out = store.record_and_try_quorum("G-3", "lane-b", Verdict::Reject, 2).await.unwrap();
+        assert_eq!(out, BarrierOutcome::Completed(Continuation::NeedsHuman));
+    }
+
+    #[tokio::test]
+    async fn quorum_straggler_after_completion_parks() {
+        let store = FanOutStore::new(fresh_pool().await);
+        seeded3(&store).await;
+        store.record_and_try_quorum("G-3", "lane-a", Verdict::Approve, 2).await.unwrap();
+        store.record_and_try_quorum("G-3", "lane-b", Verdict::Approve, 2).await.unwrap(); // completes
+        let straggler = store.record_and_try_quorum("G-3", "lane-c", Verdict::Approve, 2).await.unwrap();
+        assert_eq!(straggler, BarrierOutcome::Parked);
+    }
+
+    #[tokio::test]
+    async fn quorum_concurrent_settle_yields_exactly_one_completion() {
+        let store = std::sync::Arc::new(FanOutStore::new(fresh_pool().await));
+        seeded3(&store).await;
+        store.record_and_try_quorum("G-3", "lane-a", Verdict::Approve, 2).await.unwrap();
+        let s1 = store.clone();
+        let s2 = store.clone();
+        // two lanes approve concurrently; both observe quorum reached
+        let h1 = tokio::spawn(async move { s1.record_and_try_quorum("G-3", "lane-b", Verdict::Approve, 2).await.unwrap() });
+        let h2 = tokio::spawn(async move { s2.record_and_try_quorum("G-3", "lane-c", Verdict::Approve, 2).await.unwrap() });
+        let (a, b) = (h1.await.unwrap(), h2.await.unwrap());
+        let completions = [&a, &b].iter().filter(|o| matches!(o, BarrierOutcome::Completed(_))).count();
+        assert_eq!(completions, 1, "exactly one caller completes the quorum barrier");
     }
 
     #[tokio::test]
