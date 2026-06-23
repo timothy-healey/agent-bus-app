@@ -9,6 +9,8 @@ use runtime::brake::Brake;
 use runtime::pool::{process_one_claim, PoolContext};
 use runtime::task_store::TaskStore;
 use pipeline::model::{Pipeline, Team};
+use pipeline::draft::DraftPipeline;
+use pipeline::design_session::{design_session_turn, kickoff_generate, Step, TurnResult};
 
 use conversational_control::catalog::ToolCatalog;
 use conversational_control::dispatch::ToolDispatcher;
@@ -145,6 +147,34 @@ impl ConversationEngine for LlmEngine {
             Err(e) => EngineReply { text: format!("[terminal error] {e}"), tool_calls: vec![] },
         }
     }
+}
+
+/// Holds the chat runner for the wizard's Design Session (ephemeral; no
+/// persistence). The same Arc<dyn ChatRunner> the terminal uses can be shared.
+pub struct DesignSessionState {
+    pub runner: Arc<dyn ChatRunner>,
+}
+
+/// OHS: one-shot kickoff — generate a full DraftPipeline from the description.
+#[tauri::command(rename_all = "snake_case")]
+async fn kickoff_generate_cmd(
+    state: tauri::State<'_, DesignSessionState>,
+    session_id: String,
+    description: String,
+) -> Result<DraftPipeline, String> {
+    Ok(kickoff_generate(state.runner.as_ref(), &session_id, &description).await)
+}
+
+/// OHS: one Design Session turn — apply a slice + return prose + updated draft.
+#[tauri::command(rename_all = "snake_case")]
+async fn design_session_turn_cmd(
+    state: tauri::State<'_, DesignSessionState>,
+    session_id: String,
+    step: Step,
+    draft: DraftPipeline,
+    user_message: String,
+) -> Result<TurnResult, String> {
+    Ok(design_session_turn(state.runner.as_ref(), &session_id, step, draft, &user_message).await)
 }
 
 #[async_trait]
@@ -375,6 +405,7 @@ pub fn run() {
                 // operating prompt; model + budget are v1 defaults.
                 let chat_runner: Arc<dyn llm_chat::chat::ChatRunner> =
                     Arc::new(llm_chat::claude_cli::ClaudeChatRunner::new());
+                handle.manage(DesignSessionState { runner: chat_runner.clone() });
                 let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
                     Arc::new(LlmEngine::new(
                         chat_runner.clone(),
@@ -455,6 +486,8 @@ pub fn run() {
             pipeline::api::pipeline_list_templates,
             pipeline::api::pipeline_list,
             pipeline::api::pipeline_load,
+            kickoff_generate_cmd,
+            design_session_turn_cmd,
             pipeline::api::pipeline_instantiate_template,
             runtime::api::inject_topic,
             runtime::api::approve_gate,
@@ -713,5 +746,33 @@ mod llm_engine_tests {
         // a clear error turn, no panic, no tool calls
         assert!(reply.text.contains("spawn failed") || reply.text.contains("error"));
         assert!(reply.tool_calls.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod design_session_tests {
+    use super::*;
+    use llm_chat::chat::{ChatReply, ChatUsage};
+    use llm_chat::fake::FakeChatRunner;
+    use pipeline::design_session::{design_session_turn, kickoff_generate, Step};
+
+    #[tokio::test]
+    async fn root_kickoff_produces_a_draft_from_a_canned_reply() {
+        let canned = "two teams.\n```json\n{\"kind\":\"teams\",\"teams\":[{\"id\":\"research\",\"name\":\"Research\"}]}\n```";
+        let runner = FakeChatRunner::new(vec![ChatReply { text: canned.into(), usage: ChatUsage::default() }]);
+        let draft = kickoff_generate(&runner, "s1", "design a flow").await;
+        assert_eq!(draft.teams.len(), 1);
+        assert_eq!(draft.teams[0].id, "research");
+    }
+
+    #[tokio::test]
+    async fn root_turn_applies_a_teams_slice() {
+        let runner = FakeChatRunner::new(vec![ChatReply {
+            text: "ok\n```json\n{\"kind\":\"teams\",\"teams\":[{\"id\":\"a\",\"name\":\"A\"},{\"id\":\"b\",\"name\":\"B\"}]}\n```".into(),
+            usage: ChatUsage::default(),
+        }]);
+        let draft = pipeline::draft::DraftPipeline::empty();
+        let out = design_session_turn(&runner, "s1", Step::Teams, draft, "add two teams").await;
+        assert_eq!(out.updated_draft.teams.len(), 2);
     }
 }
