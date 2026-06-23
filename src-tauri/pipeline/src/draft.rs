@@ -252,25 +252,6 @@ pub fn best_effort_validate(draft: &DraftPipeline) -> Vec<String> {
             issues.push(format!("gate '{}' downstream '{}' is unknown", g.id, g.downstream));
         }
     }
-    // Parallel-flow v1 rule: no gate may sit inside a fork lane. A lane team whose
-    // on_approve points at a gate violates it (hard validate rejects this via
-    // LaneNotLinear; surface it live too).
-    let mut lane_teams: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for f in &draft.forks {
-        for lane in &f.lanes {
-            lane_teams.insert(lane.as_str());
-        }
-    }
-    let gate_ids: std::collections::HashSet<&str> = draft.gates.iter().map(|g| g.id.as_str()).collect();
-    for t in &draft.teams {
-        if lane_teams.contains(t.id.as_str()) {
-            if let Some(target) = t.outputs.on_approve.as_deref() {
-                if gate_ids.contains(target) {
-                    issues.push(format!("team '{}' in a fork lane routes to gate '{}' (no gates inside a lane)", t.id, target));
-                }
-            }
-        }
-    }
     issues
 }
 
@@ -495,10 +476,10 @@ mod tests {
     }
 
     #[test]
-    fn best_effort_flags_a_gate_inside_a_fork_lane() {
+    fn best_effort_allows_a_gate_inside_a_fork_lane() {
         use crate::model::{Fork, Gate, Join};
-        // a fork lane team whose on_approve points at a gate (not the join) violates
-        // the parallel-flow v1 rule "no gates inside a lane" — surface it live.
+        // P1: gates (and nested forks) may sit inside a lane; best-effort no longer
+        // flags it. (Hard validate confirms hierarchical reachability + depth.)
         let mut d = DraftPipeline::empty();
         let mut entry = DraftTeam::new("entry", "Entry");
         entry.prompt_body = "x".into();
@@ -519,7 +500,10 @@ mod tests {
         d.joins.push(Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: None });
         d.gates.push(Gate { id: "gate-x".into(), label: "X".into(), downstream: "join-1".into() });
         let issues = best_effort_validate(&d);
-        assert!(issues.iter().any(|i| i.to_lowercase().contains("lane") && i.contains("gate-x")));
+        assert!(
+            !issues.iter().any(|i| i.contains("no gates inside a lane")),
+            "gate-in-lane is allowed under P1; issues were: {issues:?}"
+        );
     }
 
     #[test]
