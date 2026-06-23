@@ -3,6 +3,7 @@ import type { UsageSnapshot } from "../ipc/usage";
 import type { GitConfig, Project, WorktreeEntry } from "../ipc/workspace";
 import { Button } from "./ui/Button";
 import { formatTokens } from "../lib/cost";
+import { useTheme } from "../hooks/useTheme";
 
 export interface SettingsViewProps {
   usage: UsageSnapshot | null;
@@ -22,12 +23,6 @@ export interface SettingsViewProps {
   // Worktree cleanup (S2)
   onListWorktrees: (projectId: string) => Promise<WorktreeEntry[]>;
   onRemoveWorktree: (projectId: string, path: string) => Promise<void>;
-}
-
-type Theme = "dark" | "light";
-
-function currentTheme(): Theme {
-  return (document.documentElement.getAttribute("data-theme") as Theme) ?? "dark";
 }
 
 function basename(p: string): string {
@@ -93,7 +88,7 @@ function ProjectWorktrees(props: {
           {busy && entries === null && (
             <div style={{ fontSize: 11, color: "var(--text-3)" }}>loading…</div>
           )}
-          {error && <div style={{ fontSize: 11, color: "var(--danger, #d66)" }}>{error}</div>}
+          {error && <div role="alert" style={{ fontSize: 11, color: "var(--danger)" }}>{error}</div>}
           {entries !== null && entries.length === 0 && (
             <div style={{ fontSize: 11, color: "var(--text-3)" }}>no worktrees to clean up.</div>
           )}
@@ -107,8 +102,8 @@ function ProjectWorktrees(props: {
               </div>
               {confirmPath === w.path ? (
                 <>
-                  <Button disabled={busy} onClick={() => remove(w.path)}>confirm remove</Button>
-                  <Button disabled={busy} onClick={() => setConfirmPath(null)}>cancel</Button>
+                  <Button variant="danger" disabled={busy} onClick={() => remove(w.path)}>confirm remove</Button>
+                  <Button variant="ghost" disabled={busy} onClick={() => setConfirmPath(null)}>cancel</Button>
                 </>
               ) : (
                 <Button disabled={busy} onClick={() => setConfirmPath(w.path)}>remove</Button>
@@ -130,7 +125,7 @@ export function SettingsView(props: SettingsViewProps) {
     onListWorktrees, onRemoveWorktree,
   } = props;
 
-  const [theme, setTheme] = useState<Theme>(currentTheme());
+  const [theme, setTheme] = useTheme();
   const [budgetInput, setBudgetInput] = useState(String(usage?.window_budget ?? 2_600_000));
   const [saving, setSaving] = useState(false);
   const [autoMeter, setAutoMeter] = useState<boolean>(usage?.auto_meter_enabled ?? false);
@@ -153,11 +148,6 @@ export function SettingsView(props: SettingsViewProps) {
     } finally {
       setAutoSaving(false);
     }
-  }
-
-  function applyTheme(next: Theme) {
-    document.documentElement.setAttribute("data-theme", next);
-    setTheme(next);
   }
 
   async function saveBudget() {
@@ -215,8 +205,8 @@ export function SettingsView(props: SettingsViewProps) {
         <div style={h}>general</div>
         <span style={label}>theme</span>
         <div style={{ display: "flex", gap: 8 }}>
-          <Button variant={theme === "dark" ? "primary" : "default"} onClick={() => applyTheme("dark")}>dark</Button>
-          <Button variant={theme === "light" ? "primary" : "default"} onClick={() => applyTheme("light")}>light</Button>
+          <Button variant={theme === "dark" ? "primary" : "default"} onClick={() => setTheme("dark")}>dark</Button>
+          <Button variant={theme === "light" ? "primary" : "default"} onClick={() => setTheme("light")}>light</Button>
         </div>
       </div>
 
@@ -240,7 +230,7 @@ export function SettingsView(props: SettingsViewProps) {
           auto-brake when the window crosses the threshold
         </label>
         <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
-          off by default — manual + reactive (rate-limit) braking stays on either way.
+          off by default. manual + reactive (rate-limit) braking stays on either way.
         </div>
       </div>
 
@@ -255,7 +245,7 @@ export function SettingsView(props: SettingsViewProps) {
           {keyPresent && <Button disabled={keySaving} onClick={clearApiKey}>clear</Button>}
         </div>
         <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
-          {keyPresent ? "a key is stored in the keychain." : "no key stored — the anthropic-api runner falls back to the api_key_env var."}
+          {keyPresent ? "a key is stored in the keychain." : "no key stored. the anthropic-api runner falls back to the api_key_env var."}
         </div>
       </div>
 

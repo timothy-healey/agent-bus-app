@@ -46,7 +46,7 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
             fontStyle: "italic",
           }}
         >
-          none yet — select text to comment
+          none yet. select text to comment.
         </div>
       </div>
     );
@@ -119,7 +119,7 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
                       fontSize: 9.5,
                       color: "var(--accent)",
                       border: "1px solid var(--accent)",
-                      borderRadius: 6,
+                      borderRadius: "var(--r-xs)",
                       padding: "0 5px",
                       textTransform: "lowercase",
                     }}
@@ -130,6 +130,7 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
               </span>
               <button
                 type="button"
+                className="abp-icon-delete"
                 aria-label="delete comment"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -138,7 +139,7 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
                 style={{
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-4)",
+                  color: "var(--text-3)",
                   cursor: "pointer",
                   fontFamily: "inherit",
                 }}
