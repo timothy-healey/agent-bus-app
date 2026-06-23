@@ -72,8 +72,11 @@ noting the two copies must be kept in sync (a one-line comment cross-referencing
 the council recommends making that choice explicit, and prefers (a) if the
 extraction logic is expected to evolve (native tool-use, per the roadmap).
 
-**Status:** open — operator to rule (a) shared extractor vs (b) explicit
-documented duplication. Low blast radius; not a build blocker.
+**Status:** RESOLVED (2026-06-23, implementation) — operator chose (b) explicit
+documented duplication. `extract_tool_call_block` is kept local to
+`app/src/lib.rs` with a doc-comment cross-referencing
+`pipeline::design_session::extract_json_block` ("keep the two in sync"). Low
+blast radius; not a build blocker.
 
 ### F2 [low] off-language-naming — `AgenticChatEngine` / `CompositeEngine` / `ParsedToolCall` are not in the ubiquitous language
 
@@ -108,8 +111,12 @@ kernel's tool-call concept. Optionally add a one-line note in D4/D7 stating thes
 are root-composition strategy types, not additions to the Conversational Control
 ubiquitous language.
 
-**Status:** open — operator to rule on `ParsedToolCall` rename; the two `*Engine`
-names are acknowledged sound. Not a build blocker.
+**Status:** RESOLVED (2026-06-23, implementation) — operator chose to DROP
+`ParsedToolCall` entirely. The fenced `{ "tool", "args" }` block is parsed
+directly into the kernel's `ToolCallRequest { tool_name, args }` via a local
+`parse_tool_call` helper, so there is no second name for the kernel's tool-call
+concept. The two `*Engine` names are kept (acknowledged sound). Not a build
+blocker.
 
 ### F3 [low] contradicts-DOMAIN.md (history-budget) — the composite Turn's token estimate ignores args + results
 
