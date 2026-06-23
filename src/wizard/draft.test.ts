@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { emptyDraft, WIZARD_STEPS, renameTeam, setPromptBody, setTeamModel, addTeam, removeTeam } from "./draft";
+import { setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
+import { addGate, removeGate, setTeamApprove } from "./draft";
 
 describe("wizard draft helpers", () => {
   it("emptyDraft has no teams + current schema version", () => {
     const d = emptyDraft();
     expect(d.teams).toEqual([]);
     expect(d.schema_version).toBeGreaterThanOrEqual(2);
+  });
+
+  it("emptyDraft seeds an empty gates array", () => {
+    expect(emptyDraft().gates).toEqual([]);
   });
 
   it("WIZARD_STEPS lists the five steps in order", () => {
@@ -38,5 +44,60 @@ describe("wizard draft helpers", () => {
   it("removeTeam drops the team", () => {
     const d = removeTeam(addTeam(emptyDraft(), "research", "Research"), "research");
     expect(d.teams).toHaveLength(0);
+  });
+});
+
+describe("advanced team config helpers (W2)", () => {
+  const base = addTeam(emptyDraft(), "research", "Research");
+
+  it("setTeamEffort sets a preset EffortMode", () => {
+    const d = setTeamEffort(base, "research", { mode: "extended-high" });
+    expect(d.teams[0].runner.effort).toEqual({ mode: "extended-high" });
+  });
+
+  it("setTeamEffort sets a custom EffortMode with a budget", () => {
+    const d = setTeamEffort(base, "research", { mode: "custom", budget_tokens: 16000 });
+    expect(d.teams[0].runner.effort).toEqual({ mode: "custom", budget_tokens: 16000 });
+  });
+
+  it("setTeamTools parses a comma list into a trimmed string array", () => {
+    const d = setTeamTools(base, "research", "Read, Grep ,  Bash ");
+    expect(d.teams[0].scope.tools).toEqual(["Read", "Grep", "Bash"]);
+  });
+
+  it("setTeamTools drops empty entries", () => {
+    const d = setTeamTools(base, "research", "Read,,");
+    expect(d.teams[0].scope.tools).toEqual(["Read"]);
+  });
+
+  it("setTeamReads / setTeamWrites set scope.reads / scope.writes", () => {
+    const d1 = setTeamReads(base, "research", "src/**, docs/**");
+    expect(d1.teams[0].scope.reads).toEqual(["src/**", "docs/**"]);
+    const d2 = setTeamWrites(base, "research", "artifacts/**");
+    expect(d2.teams[0].scope.writes).toEqual(["artifacts/**"]);
+  });
+});
+
+describe("gate helpers (W3)", () => {
+  const base = addTeam(addTeam(emptyDraft(), "plan-writers", "Plan Writers"), "implementers", "Implementers");
+
+  it("addGate appends a gate node", () => {
+    const d = addGate(base, "gate-2", "Plan review", "implementers");
+    expect(d.gates).toEqual([{ id: "gate-2", label: "Plan review", downstream: "implementers" }]);
+  });
+
+  it("addGate is a no-op on a duplicate id", () => {
+    const d = addGate(addGate(base, "gate-2", "Plan review", "implementers"), "gate-2", "again", "implementers");
+    expect(d.gates).toHaveLength(1);
+  });
+
+  it("setTeamApprove repoints a team's on_approve", () => {
+    const d = setTeamApprove(base, "plan-writers", "gate-2");
+    expect(d.teams.find((t) => t.id === "plan-writers")?.outputs.on_approve).toBe("gate-2");
+  });
+
+  it("removeGate drops the gate node", () => {
+    const d = removeGate(addGate(base, "gate-2", "Plan review", "implementers"), "gate-2");
+    expect(d.gates).toHaveLength(0);
   });
 });

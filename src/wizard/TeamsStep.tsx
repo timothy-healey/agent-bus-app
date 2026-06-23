@@ -1,10 +1,17 @@
 import { useState } from "react";
-import type { DraftPipeline } from "../ipc/pipeline";
-import { removeTeam, renameTeam, setTeamModel } from "./draft";
+import type React from "react";
+import type { DraftPipeline, EffortMode } from "../ipc/pipeline";
+import { removeTeam, renameTeam, setTeamModel, setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
 
 interface TeamsStepProps {
   draft: DraftPipeline;
   onChange: (d: DraftPipeline) => void;
+}
+
+const EFFORT_PRESETS: EffortMode["mode"][] = ["off", "standard", "extended-low", "extended-high", "custom"];
+
+function effortFromSelect(mode: EffortMode["mode"], currentBudget: number): EffortMode {
+  return mode === "custom" ? { mode: "custom", budget_tokens: currentBudget } : { mode };
 }
 
 /// Step 2 draft view: team cards with rename/remove + a per-team advanced panel
@@ -28,14 +35,77 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
             <button aria-label={`remove ${t.id}`} onClick={() => onChange(removeTeam(draft, t.id))}>✕</button>
           </div>
           {openAdvanced === t.id && (
-            <div style={{ marginTop: 6 }}>
-              <label style={{ fontSize: 11, color: "var(--text-3)" }}>
+            <div style={{ marginTop: 6, display: "grid", gap: 6 }}>
+              <label style={advLbl}>
                 model
                 <input
                   aria-label={`model for ${t.id}`}
                   value={t.runner.model}
                   onChange={(e) => onChange(setTeamModel(draft, t.id, e.target.value))}
-                  style={{ width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" }}
+                  style={advInp}
+                />
+              </label>
+              <label style={advLbl}>
+                effort
+                <select
+                  aria-label={`effort for ${t.id}`}
+                  value={t.runner.effort.mode}
+                  onChange={(e) =>
+                    onChange(
+                      setTeamEffort(
+                        draft,
+                        t.id,
+                        effortFromSelect(
+                          e.target.value as EffortMode["mode"],
+                          t.runner.effort.mode === "custom" ? t.runner.effort.budget_tokens : 16000,
+                        ),
+                      ),
+                    )
+                  }
+                  style={advInp}
+                >
+                  {EFFORT_PRESETS.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </label>
+              {t.runner.effort.mode === "custom" && (
+                <label style={advLbl}>
+                  budget (tokens)
+                  <input
+                    type="number"
+                    aria-label={`budget for ${t.id}`}
+                    value={t.runner.effort.budget_tokens}
+                    onChange={(e) => onChange(setTeamEffort(draft, t.id, { mode: "custom", budget_tokens: Number(e.target.value) || 0 }))}
+                    style={advInp}
+                  />
+                </label>
+              )}
+              <label style={advLbl}>
+                tools (comma-separated)
+                <input
+                  aria-label={`tools for ${t.id}`}
+                  value={t.scope.tools.join(", ")}
+                  onChange={(e) => onChange(setTeamTools(draft, t.id, e.target.value))}
+                  style={advInp}
+                />
+              </label>
+              <label style={advLbl}>
+                reads (comma-separated)
+                <input
+                  aria-label={`reads for ${t.id}`}
+                  value={t.scope.reads.join(", ")}
+                  onChange={(e) => onChange(setTeamReads(draft, t.id, e.target.value))}
+                  style={advInp}
+                />
+              </label>
+              <label style={advLbl}>
+                writes (comma-separated)
+                <input
+                  aria-label={`writes for ${t.id}`}
+                  value={t.scope.writes.join(", ")}
+                  onChange={(e) => onChange(setTeamWrites(draft, t.id, e.target.value))}
+                  style={advInp}
                 />
               </label>
             </div>
@@ -45,3 +115,6 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
     </div>
   );
 }
+
+const advLbl: React.CSSProperties = { fontSize: 11, color: "var(--text-3)", display: "block" };
+const advInp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" };
