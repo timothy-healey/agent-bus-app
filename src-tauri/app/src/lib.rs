@@ -15,7 +15,6 @@ use workspace::project::Project;
 
 use conversational_control::catalog::ToolCatalog;
 use conversational_control::dispatch::ToolDispatcher;
-#[allow(unused_imports)]
 use conversational_control::engine::CommandEngine;
 use conversational_control::engine::{ConversationEngine, EngineReply};
 use conversational_control::store::ConversationStore;
@@ -684,10 +683,11 @@ pub fn run() {
                 let catalog = Arc::new(ToolCatalog::new(specs));
                 debug_assert!(catalog.duplicate_names().is_empty(), "tool name collision in catalog");
 
-                // Constructed for the v1.1 slash-command merge (CommandEngine
-                // over RootDispatcher). v1 free-form chat dispatches no tools, so
-                // it is intentionally unused for now (one rename away from live).
-                let _dispatcher: Arc<dyn ToolDispatcher> = Arc::new(RootDispatcher {
+                // The real dispatcher both CompositeEngine branches reach: the
+                // slash branch (parser -> dispatch) and the agentic loop (model
+                // -> dispatch -> feed result back). Routes a ToolCallRequest to
+                // the owning supplier's logic (C1).
+                let dispatcher: Arc<dyn ToolDispatcher> = Arc::new(RootDispatcher {
                     runtime: runtime_state_arc.clone(),
                     usage: usage_state_arc.clone(),
                     app: handle.clone(),
@@ -700,16 +700,26 @@ pub fn run() {
                 let chat_runner: Arc<dyn llm_chat::chat::ChatRunner> =
                     Arc::new(llm_chat::claude_cli::ClaudeChatRunner::new());
                 handle.manage(DesignSessionState { runner: chat_runner.clone() });
-                let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
-                    Arc::new(LlmEngine::new(
+                // The slash branch: parser -> RootDispatcher (restores the full
+                // slash tool surface). The agentic branch: the bounded,
+                // brake-aware within-turn loop over the same dispatcher + the
+                // chat runner + the catalog. CompositeEngine routes by leading '/'.
+                let command_engine: Arc<dyn conversational_control::engine::ConversationEngine> =
+                    Arc::new(CommandEngine::new(dispatcher.clone()));
+                let agentic_engine: Arc<dyn conversational_control::engine::ConversationEngine> =
+                    Arc::new(AgenticChatEngine::new(
                         chat_runner.clone(),
+                        dispatcher.clone(),
+                        brake.clone(),
                         project_id.clone(),
-                        "You are the god terminal for the Agent Bus app. Answer the operator's \
-                         questions about the pipeline, tasks, and usage concisely."
+                        "You are the god terminal for the Agent Bus app. Help the operator run \
+                         and inspect the pipeline (tasks, gates, usage, the brake). Be concise."
                             .into(),
                         "claude-opus-4-8".into(),
                         8192,
                     ));
+                let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
+                    Arc::new(CompositeEngine::new(command_engine, agentic_engine));
 
                 let convo_store = Arc::new(ConversationStore::new(pool.clone()));
 
