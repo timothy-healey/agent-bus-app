@@ -6,7 +6,7 @@
 //! its to_pipeline()) becomes a `Pipeline`. Prompt text is held inline as
 //! `prompt_body`; to_pipeline() converts it to a `prompts/<id>.md` path.
 
-use crate::model::{Escalation, Fork, Join, Pipeline, Routes, RunnerConfig, Scope, Team, Workers, SCHEMA_VERSION};
+use crate::model::{Escalation, Fork, Gate, Join, Pipeline, Routes, RunnerConfig, Scope, Team, Workers, SCHEMA_VERSION};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +68,8 @@ pub struct DraftPipeline {
     #[serde(default)]
     pub joins: Vec<Join>,
     #[serde(default)]
+    pub gates: Vec<Gate>,
+    #[serde(default)]
     pub escalations: Vec<Escalation>,
 }
 
@@ -87,6 +89,7 @@ impl DraftPipeline {
             teams: vec![],
             forks: vec![],
             joins: vec![],
+            gates: vec![],
             escalations: vec![],
         }
     }
@@ -308,6 +311,22 @@ mod tests {
         assert_eq!(d.schema_version, crate::model::SCHEMA_VERSION);
         assert!(d.forks.is_empty());
         assert!(d.joins.is_empty());
+    }
+
+    #[test]
+    fn empty_draft_has_no_gates() {
+        assert!(DraftPipeline::empty().gates.is_empty());
+    }
+
+    #[test]
+    fn draft_with_gates_round_trips_through_serde_json() {
+        use crate::model::Gate;
+        let mut d = DraftPipeline::empty();
+        d.gates.push(Gate { id: "gate-2".into(), label: "Plan review".into(), downstream: "implementers".into() });
+        let s = serde_json::to_string(&d).unwrap();
+        let back: DraftPipeline = serde_json::from_str(&s).unwrap();
+        assert_eq!(d, back);
+        assert_eq!(back.gates[0].id, "gate-2");
     }
 
     #[test]

@@ -165,7 +165,7 @@ fn draft_pipeline_key_set_matches_ts() {
     let v = serde_json::to_value(&d).unwrap();
     assert_eq!(
         keys(&v),
-        set(&["id", "name", "description", "schema_version", "teams", "forks", "joins", "escalations"]),
+        set(&["id", "name", "description", "schema_version", "teams", "gates", "forks", "joins", "escalations"]),
     );
 }
 
