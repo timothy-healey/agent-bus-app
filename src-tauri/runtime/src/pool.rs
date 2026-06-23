@@ -363,13 +363,40 @@ async fn resolve_barrier(
     let group_id = task.group_id.clone().ok_or(PoolError::Route(RouteError::NoRoute))?;
     let lane = task.lane.clone().unwrap_or_default();
     let now = now_unix();
-    let outcome = ctx.fanout.record_and_try_complete(&group_id, &lane, verdict).await?;
+
+    // Does this lane's join opt into early-cancel? (P2) Read it from the pipeline
+    // by the lane task's join_target. Default false => full-barrier behavior.
+    let early_cancel = task
+        .join_target
+        .as_deref()
+        .and_then(|jt| ctx.pipeline.joins.iter().find(|j| j.id == jt))
+        .map(|j| j.cancel_on_reject)
+        .unwrap_or(false);
+
+    let is_failure = verdict == agent_bus_core::Verdict::Reject;
+
+    let outcome = if early_cancel && is_failure {
+        ctx.fanout
+            .record_failure_and_early_cancel(&group_id, &lane, verdict)
+            .await?
+    } else {
+        ctx.fanout
+            .record_and_try_complete(&group_id, &lane, verdict)
+            .await?
+    };
+
     // Park this lane task as terminal for the lane.
     task.state = TaskState::Done;
     task.current_stage = task.join_target.clone().unwrap_or_else(|| task.current_stage.clone());
     task.updated_at = now;
     ctx.tasks.update(task).await?;
     if let BarrierOutcome::Completed(cont) = outcome {
+        // If WE won the early-cancel guard, stop the outstanding lanes so queued
+        // siblings aren't claimed+run wastefully (DD4/DD5). The continuation is
+        // created regardless; cancellation only trims waste.
+        if early_cancel && is_failure {
+            ctx.tasks.cancel_outstanding_lanes(&group_id, now_unix()).await?;
+        }
         let (stage, state) = match cont {
             Continuation::Downstream(ds) => (ds, TaskState::Queued),
             Continuation::NeedsHuman => ("needs-human".to_string(), TaskState::NeedsHuman),
@@ -853,5 +880,86 @@ mod tests {
 
         let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
         assert_eq!(queued.iter().filter(|q| q.current_stage == "after").count(), 1);
+    }
+
+    // ---- P2: early-cancel on first reject ----
+
+    fn pipeline_v2_forkjoin_cancel_on_reject() -> Pipeline {
+        let mut p = pipeline_v2_forkjoin();
+        p.joins[0].cancel_on_reject = true;
+        p
+    }
+
+    #[tokio::test]
+    async fn early_cancel_resolves_to_needs_human_before_other_lane_runs() {
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin_cancel_on_reject();
+        let reject = RunnerOutput { verdict: Verdict::Reject, artifact_path: None, final_text: "VERDICT: reject".into(), usage: RunnerUsage::default() };
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(StageRunner::new(reject)), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // entry -> fork -> lane-a, lane-b queued
+        // lane-b rejects FIRST, before lane-a ever runs.
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // lane-b reject -> early-cancel
+
+        // the joined task escalates to needs-human immediately
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 1);
+        assert_eq!(nh[0].current_stage, "needs-human");
+
+        // lane-a was parked (cancelled) — it is no longer queued, so a worker
+        // claiming lane-a finds nothing to run.
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert!(queued.iter().all(|q| q.current_stage != "lane-a"),
+            "outstanding lane-a is cancelled, not left queued");
+        let idle = process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a
+        assert_eq!(idle, ClaimOutcome::Idle, "no outstanding lane work remains");
+    }
+
+    #[tokio::test]
+    async fn early_cancel_straggler_settle_creates_no_second_continuation() {
+        // lane-a parks (approve) first; lane-b then rejects with cancel_on_reject.
+        // Exactly one needs-human continuation; the early-cancel guard arbitrates.
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin_cancel_on_reject();
+        let reject = RunnerOutput { verdict: Verdict::Reject, artifact_path: None, final_text: "VERDICT: reject".into(), usage: RunnerUsage::default() };
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(StageRunner::new(reject)), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a approve (parks; group not complete yet)
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // lane-b reject -> early-cancel completes
+
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 1, "exactly one needs-human continuation");
+    }
+
+    #[tokio::test]
+    async fn default_join_keeps_full_barrier_even_with_a_reject() {
+        // cancel_on_reject = false (default): the reject does NOT short-circuit;
+        // both lanes settle, then the group routes to needs-human as before.
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin(); // cancel_on_reject defaults false
+        let reject = RunnerOutput { verdict: Verdict::Reject, artifact_path: None, final_text: "VERDICT: reject".into(), usage: RunnerUsage::default() };
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(StageRunner::new(reject)), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // lane-b reject FIRST
+
+        // full barrier: NOT yet escalated — lane-a is still outstanding (queued).
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert!(nh.is_empty(), "full barrier waits for all lanes before escalating");
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert!(queued.iter().any(|q| q.current_stage == "lane-a"),
+            "lane-a remains queued under the full barrier");
+
+        // lane-a settles -> NOW the group completes to needs-human.
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap();
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 1);
     }
 }
