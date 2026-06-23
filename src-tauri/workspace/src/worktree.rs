@@ -49,7 +49,7 @@ pub fn parse_porcelain(porcelain: &str, project_root: &Path) -> Vec<WorktreeEntr
     let mut head = String::new();
     let mut branch = String::new();
 
-    let mut flush =
+    let flush =
         |path: &mut Option<String>, head: &mut String, branch: &mut String, out: &mut Vec<WorktreeEntry>| {
             if let Some(p) = path.take() {
                 if is_under(Path::new(&p), &worktrees_root) {
