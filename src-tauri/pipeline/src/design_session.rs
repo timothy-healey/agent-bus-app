@@ -115,12 +115,15 @@ fn turn_user_message(user_message: &str, draft: &DraftPipeline) -> String {
     format!("{user_message}\n\nCurrent draft (JSON):\n{draft_json}")
 }
 
-/// The result of one Design Session turn: the assistant's prose + the draft after
-/// applying any extracted slice (unchanged if none/invalid).
+/// The result of one Design Session turn: the assistant's prose, the draft after
+/// applying any extracted slice (unchanged if none/invalid), and the live
+/// best-effort validation issues for that draft (W1 — surfaced inline; never
+/// blocks). Issues mirror `draft::best_effort_validate`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnResult {
     pub reply_text: String,
     pub updated_draft: DraftPipeline,
+    pub issues: Vec<String>,
 }
 
 /// One-shot kickoff (Decision D7): generate a full team set from the description.
@@ -183,10 +186,9 @@ pub async fn design_session_turn(
         }
         Err(e) => format!("[design session error] {e}"),
     };
-    // best-effort issues are computed for completeness (live-display capability,
-    // D3/D9); they do not block and are not returned in v1's TurnResult.
-    let _issues = best_effort_validate(&draft);
-    TurnResult { reply_text, updated_draft: draft }
+    // best-effort issues are surfaced inline in the wizard (W1); never block.
+    let issues = best_effort_validate(&draft);
+    TurnResult { reply_text, updated_draft: draft, issues }
 }
 
 /// Slugify a description into a pipeline id; fall back to a fresh id when blank.
@@ -300,5 +302,31 @@ mod tests {
         let _ = design_session_turn(&runner, "sess-9", Step::Teams, draft, "hi").await;
         let received = runner.received.lock().unwrap();
         assert_eq!(received[0].dialogue_id, "sess-9:teams");
+    }
+
+    #[tokio::test]
+    async fn turn_returns_best_effort_issues_for_the_resulting_draft() {
+        // a draft with one team and NO prompt -> best_effort flags the missing prompt
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        // a reply with no fenced block -> draft unchanged, still missing the prompt
+        let runner = FakeChatRunner::new(vec![reply("noted, nothing to change.")]);
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "hi").await;
+        assert!(out.issues.iter().any(|i| i.contains("research") && i.contains("prompt")));
+    }
+
+    #[tokio::test]
+    async fn turn_returns_empty_issues_for_a_complete_draft() {
+        let mut draft = DraftPipeline::empty();
+        let mut a = DraftTeam::new("research", "Research");
+        a.prompt_body = "investigate".into();
+        a.outputs.on_approve = Some("writers".into());
+        let mut b = DraftTeam::new("writers", "Writers");
+        b.prompt_body = "write".into();
+        draft.teams.push(a);
+        draft.teams.push(b);
+        let runner = FakeChatRunner::new(vec![reply("looks good.")]);
+        let out = design_session_turn(&runner, "sess-1", Step::Wiring, draft, "ok").await;
+        assert!(out.issues.is_empty());
     }
 }
