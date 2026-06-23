@@ -9,6 +9,7 @@ use crate::fanout_store::{BarrierOutcome, FanOutStore};
 use crate::revision::{compose_invocation_message, RevisionBundleReader};
 use crate::router::{route, RouteError};
 use crate::task::{Task, TaskState};
+use crate::invocation_audit::{AuditUsage, ErrorClass, InvocationAuditStore, InvocationOutcome};
 use crate::task_store::{TaskStore, TaskStoreError};
 use agent_bus_core::{UsageEvent, UsageSink};
 use pipeline::model::{Pipeline, Team};
@@ -78,6 +79,10 @@ pub struct PoolContext {
     /// Per-task log-sink factory (R4 live-log streaming). None = use the runner's
     /// non-streaming `invoke`. Display-only side channel; settle/route ignore it.
     pub log_sink: Option<Arc<LogSinkFactory>>,
+    /// Per-invocation audit store (R3). None = no audit (runtime-only tests /
+    /// pre-project boot). Standalone append-only root — written by start/settle
+    /// below; never joined into the Task transaction.
+    pub audit: Option<Arc<InvocationAuditStore>>,
 }
 
 fn now_unix() -> i64 {
@@ -95,6 +100,18 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
     let now = now_unix();
     let Some(mut task) = ctx.tasks.claim_next_for_stage(&team.id, now).await? else {
         return Ok(ClaimOutcome::Idle);
+    };
+
+    // R3: open an audit record for this invocation (outcome NULL = in-flight).
+    // Best-effort: an audit write must never fail a settle (mirrors UsageSink).
+    let effective_for_audit = team.effective_runner();
+    let audit_id = match &ctx.audit {
+        Some(store) => store
+            .record_start(&task.id.0, &team.id, &effective_for_audit.model, task.attempts, now)
+            .await
+            .map_err(|e| eprintln!("runtime: invocation audit start failed: {e}"))
+            .ok(),
+        None => None,
     };
 
     // 2. PREPARE scope
@@ -140,13 +157,15 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
     let output = match result {
         Ok(o) => o,
         Err(e) if e.is_rate_limited() => {
+            settle_audit(ctx, &audit_id, &InvocationOutcome::Error(ErrorClass::of(&e)), &AuditUsage::default()).await;
             // Release the task back to queued (spec: rate-limit releases the
             // held task). Don't bump attempts.
             task.transition_to(TaskState::Queued, now_unix())?;
             ctx.tasks.update(&task).await?;
             return Ok(ClaimOutcome::RateLimited { task_id: task.id.0 });
         }
-        Err(_e) => {
+        Err(e) => {
+            settle_audit(ctx, &audit_id, &InvocationOutcome::Error(ErrorClass::of(&e)), &AuditUsage::default()).await;
             // Non-rate-limit failure (spawn/parse/NoResult): this is an
             // OPERATIONAL failure — the invocation broke and produced NO
             // verdict. We reuse the *revise* route (send back, bump attempts)
@@ -156,7 +175,8 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
             // synthetic revise is NOT a model-produced `Verdict::Revise` (canon:
             // a settled judgment); it is an operational fallback reusing the
             // route. Plan 5 telemetry/diagnostics should not read it as a real
-            // model verdict. (See Decision D10.)
+            // model verdict. (See Decision D10.) The AUDIT records the error
+            // class, not `revise` (R3 D4), so the trail reflects the failure.
             let _ = settle_and_route(ctx, &mut task, agent_bus_core::Verdict::Revise).await?;
             let reloaded = ctx.tasks.get(&task.id).await?;
             return Ok(ClaimOutcome::Settled {
@@ -191,6 +211,22 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         });
     }
 
+    // R3: settle the audit record with the model's verdict + usage. This is the
+    // invocation outcome, recorded outside the Task transaction (VET F1 / D2).
+    settle_audit(
+        ctx,
+        &audit_id,
+        &InvocationOutcome::Verdict(output.verdict),
+        &AuditUsage {
+            model: output.usage.model.clone(),
+            input_tokens: output.usage.input_tokens,
+            output_tokens: output.usage.output_tokens,
+            cache_creation: output.usage.cache_creation,
+            cache_read: output.usage.cache_read,
+        },
+    )
+    .await;
+
     // 6. ROUTE per verdict.
     settle_and_route(ctx, &mut task, output.verdict).await?;
     let reloaded = ctx.tasks.get(&task.id).await?;
@@ -199,6 +235,28 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         next_stage: reloaded.current_stage,
         next_state: reloaded.state,
     })
+}
+
+/// Best-effort settle of an audit row (R3). No-op when audit is unwired or the
+/// start write was lost; a failure is logged, never propagated — an audit write
+/// must never fail a settle (mirrors UsageSink discipline).
+///
+/// VET F1: this records the *invocation* outcome (the Claude call's verdict/error
+/// — DOMAIN.md "Invocation = one Claude call"), which is true independent of
+/// whether the subsequent Task transition (`settle_and_route`) persists. It is
+/// DELIBERATELY outside the Task transaction (D2) — do NOT move it inside, that
+/// would reintroduce the cross-root coupling the two-aggregate model forbids.
+async fn settle_audit(
+    ctx: &PoolContext,
+    audit_id: &Option<String>,
+    outcome: &InvocationOutcome,
+    usage: &AuditUsage,
+) {
+    if let (Some(store), Some(id)) = (&ctx.audit, audit_id) {
+        if let Err(e) = store.record_settle(id, outcome, usage, now_unix()).await {
+            eprintln!("runtime: invocation audit settle failed: {e}");
+        }
+    }
 }
 
 /// Settle the task (DOMAIN.md canon verb **Settle** — "the worker finishing;
@@ -352,6 +410,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
         pool
     }
 
@@ -384,6 +443,7 @@ mod tests {
             usage_sink: None,
             revision_reader: None,
             log_sink: None,
+            audit: None,
         }
     }
 
@@ -552,6 +612,57 @@ mod tests {
             (t.id.0.clone(), "chunk-a ".to_string()),
             (t.id.0.clone(), "chunk-b".to_string()),
         ]);
+    }
+
+    #[tokio::test]
+    async fn settle_writes_an_audit_record_with_verdict_and_usage() {
+        use crate::invocation_audit::InvocationAuditStore;
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("gate-1"), None)],
+            vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "research".into() }]);
+        let out = RunnerOutput {
+            verdict: Verdict::Approve,
+            artifact_path: Some("artifacts/analyses/a.md".into()),
+            final_text: "VERDICT: approve".into(),
+            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3 },
+        };
+        let mut ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(out)), temp_root());
+        let audit = Arc::new(InvocationAuditStore::new(pool.clone()));
+        ctx.audit = Some(audit.clone());
+        let t = Task::injected("proj".into(), "p".into(), "research".into(), "topic".into(), None, 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+
+        let rows = audit.list_for_task(&t.id.0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.team_id, "research");
+        assert_eq!(row.outcome_kind.as_deref(), Some("verdict"));
+        assert_eq!(row.outcome.as_deref(), Some("approve"));
+        assert!(row.settled_at.is_some());
+        assert_eq!(row.usage.input_tokens, 100);
+        assert_eq!(row.usage.output_tokens, 20);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_audits_error_class_and_leaves_no_verdict() {
+        use crate::invocation_audit::InvocationAuditStore;
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("done"), None)], vec![]);
+        let runner = Arc::new(FakeRunner::new(vec![Err(RunnerError::RateLimited("429".into()))]));
+        let mut ctx = ctx_with(pool.clone(), p.clone(), runner, temp_root());
+        let audit = Arc::new(InvocationAuditStore::new(pool.clone()));
+        ctx.audit = Some(audit.clone());
+        let t = Task::injected("proj".into(), "p".into(), "research".into(), "topic".into(), None, 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+
+        let rows = audit.list_for_task(&t.id.0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome_kind.as_deref(), Some("error"));
+        assert_eq!(rows[0].outcome.as_deref(), Some("error:rate_limited"));
     }
 
     #[tokio::test]
