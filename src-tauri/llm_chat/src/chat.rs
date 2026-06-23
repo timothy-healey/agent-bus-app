@@ -68,12 +68,27 @@ impl fmt::Display for ChatError {
 
 impl std::error::Error for ChatError {}
 
+/// A display-only prose sink. The streaming chat path forwards each assistant
+/// text fragment here as it parses. Deliberately a plain `&str` callback: NO
+/// stream-json idiom, session id, or event name crosses the ACL through it —
+/// the composition root maps fragments to whatever UI event it likes (F3).
+pub type DeltaSink = Box<dyn Fn(&str) + Send + Sync>;
+
 /// The ACL seam. Chat consumers depend only on this trait; the concrete runner
 /// is selected once at the composition root. Object-safe so it is held as
 /// `Arc<dyn ChatRunner>`.
 #[async_trait]
 pub trait ChatRunner: Send + Sync {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatReply, ChatError>;
+
+    /// Streaming variant: identical contract to `chat` (same final `ChatReply`),
+    /// but assistant prose fragments are forwarded to `sink` as they arrive for
+    /// live display. The default delegates to `chat` (no deltas), so existing
+    /// runners keep working; streaming runners override this.
+    async fn chat_stream(&self, req: &ChatRequest, sink: &DeltaSink) -> Result<ChatReply, ChatError> {
+        let _ = sink;
+        self.chat(req).await
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +108,22 @@ mod tests {
         assert!(ChatError::RateLimited("429".into()).is_rate_limited());
         assert!(!ChatError::Spawn("no binary".into()).is_rate_limited());
         assert!(!ChatError::NoResult.is_rate_limited());
+    }
+
+    #[tokio::test]
+    async fn default_chat_stream_delegates_to_chat_with_no_deltas() {
+        use crate::fake::FakeChatRunner;
+        let fake = FakeChatRunner::new(vec![ChatReply { text: "hi".into(), usage: ChatUsage::default() }]);
+        let req = ChatRequest {
+            dialogue_id: "d".into(), system_prompt: "s".into(), user_message: "u".into(),
+            model: "m".into(), thinking_budget: 0,
+        };
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s = seen.clone();
+        let sink: DeltaSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let reply = fake.chat_stream(&req, &sink).await.unwrap();
+        assert_eq!(reply.text, "hi");
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[test]
