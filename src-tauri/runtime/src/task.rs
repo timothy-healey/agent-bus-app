@@ -21,6 +21,10 @@ pub enum TaskState {
     NeedsHuman,
     Done,
     Braked,
+    /// Transient router→pool signal: an approve hit a join; the pool resolves the
+    /// barrier. Never rests on a persisted task row (Decision D1/D7). Serialises
+    /// to "joining" for completeness only.
+    Joining,
 }
 
 impl TaskState {
@@ -33,6 +37,7 @@ impl TaskState {
             TaskState::NeedsHuman => "needs_human",
             TaskState::Done => "done",
             TaskState::Braked => "braked",
+            TaskState::Joining => "joining",
         }
     }
 
@@ -45,6 +50,7 @@ impl TaskState {
             "needs_human" => TaskState::NeedsHuman,
             "done" => TaskState::Done,
             "braked" => TaskState::Braked,
+            "joining" => TaskState::Joining,
             _ => return None,
         })
     }
@@ -65,6 +71,12 @@ pub struct Task {
     pub review_artifact: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub lane: Option<String>,
+    #[serde(default)]
+    pub join_target: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -102,6 +114,40 @@ impl Task {
             review_artifact: None,
             created_at: now_unix,
             updated_at: now_unix,
+            group_id: None,
+            lane: None,
+            join_target: None,
+        }
+    }
+
+    /// Construct a lane sibling task for a fork expansion (Decision D3). Inherits
+    /// the parent's lineage (project/pipeline/topic/repo/scope/parent_artifact),
+    /// mints a fresh id, and is queued at the lane's entry team carrying its
+    /// group/lane/join membership.
+    pub fn forked(
+        parent: &Task,
+        lane_entry_team: &str,
+        group_id: &str,
+        join_target: &str,
+        now_unix: i64,
+    ) -> Self {
+        Self {
+            id: TaskId(format!("T-{}", uuid::Uuid::new_v4())),
+            project_id: parent.project_id.clone(),
+            pipeline: parent.pipeline.clone(),
+            topic: parent.topic.clone(),
+            target_repo: parent.target_repo.clone(),
+            target_scope: parent.target_scope.clone(),
+            current_stage: lane_entry_team.to_string(),
+            state: TaskState::Queued,
+            attempts: 1,
+            parent_artifact: parent.parent_artifact.clone(),
+            review_artifact: None,
+            created_at: now_unix,
+            updated_at: now_unix,
+            group_id: Some(group_id.to_string()),
+            lane: Some(lane_entry_team.to_string()),
+            join_target: Some(join_target.to_string()),
         }
     }
 
@@ -218,6 +264,37 @@ mod tests {
         assert_eq!(task.bump_attempts().unwrap(), 2);
         assert_eq!(task.bump_attempts().unwrap(), 3);
         assert_eq!(task.bump_attempts().unwrap_err(), TaskTransitionError::AttemptsCapReached);
+    }
+
+    #[test]
+    fn injected_task_has_no_lane_fields() {
+        let task = t();
+        assert_eq!(task.group_id, None);
+        assert_eq!(task.lane, None);
+        assert_eq!(task.join_target, None);
+    }
+
+    #[test]
+    fn forked_sibling_inherits_lineage_and_carries_lane_fields() {
+        let parent = t();
+        let sib = Task::forked(&parent, "lane-a", "G-1", "join-1", 500);
+        assert_ne!(sib.id, parent.id);
+        assert!(sib.id.0.starts_with("T-"));
+        assert_eq!(sib.project_id, parent.project_id);
+        assert_eq!(sib.pipeline, parent.pipeline);
+        assert_eq!(sib.topic, parent.topic);
+        assert_eq!(sib.current_stage, "lane-a");
+        assert_eq!(sib.state, TaskState::Queued);
+        assert_eq!(sib.attempts, 1);
+        assert_eq!(sib.group_id.as_deref(), Some("G-1"));
+        assert_eq!(sib.lane.as_deref(), Some("lane-a"));
+        assert_eq!(sib.join_target.as_deref(), Some("join-1"));
+    }
+
+    #[test]
+    fn joining_state_string_round_trips() {
+        assert_eq!(TaskState::parse("joining"), Some(TaskState::Joining));
+        assert_eq!(TaskState::Joining.as_str(), "joining");
     }
 
     #[test]

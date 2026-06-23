@@ -4,6 +4,8 @@
 //! composition root) just calls process_one_claim repeatedly per team.
 
 use crate::brake::Brake;
+use crate::fanout_group::{Continuation, FanOutGroup};
+use crate::fanout_store::{BarrierOutcome, FanOutStore};
 use crate::revision::{compose_invocation_message, RevisionBundleReader};
 use crate::router::{route, RouteError};
 use crate::task::{Task, TaskState};
@@ -29,6 +31,8 @@ pub enum PoolError {
     Route(RouteError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    FanOut(#[from] crate::fanout_store::FanOutStoreError),
 }
 
 /// What an iteration did — surfaced so the loop + tests can assert behaviour.
@@ -50,6 +54,8 @@ pub struct PoolContext {
     pub pipeline: Arc<Pipeline>,
     pub runner: Arc<dyn Runner>,
     pub tasks: Arc<TaskStore>,
+    /// The fan-out barrier store (sub-project 2). Linear pipelines never touch it.
+    pub fanout: Arc<FanOutStore>,
     pub brake: Arc<Brake>,
     pub project_root: PathBuf,
     /// Reads the team's prompt file content. Injected so tests don't touch disk
@@ -186,17 +192,124 @@ async fn settle_and_route(
 ) -> Result<Option<(String, TaskState)>, PoolError> {
     let routed = route(&ctx.pipeline, &task.current_stage, verdict, task.attempts)
         .map_err(PoolError::Route)?;
+
+    // FORK EXPANSION: an approve whose target is a Fork node fans the task out
+    // into one sibling task per lane, then terminates the original (forked).
+    if let Some(fork) = ctx.pipeline.forks.iter().find(|f| f.id == routed.next_stage) {
+        let join = ctx
+            .pipeline
+            .joins
+            .iter()
+            .find(|j| fork.lanes.iter().all(|lane| lane_reaches(&ctx.pipeline, lane, &j.id)))
+            .ok_or(PoolError::Route(RouteError::NoRoute))?;
+        let group_id = format!("G-{}", uuid::Uuid::new_v4());
+        let group = FanOutGroup {
+            id: group_id.clone(),
+            pipeline: task.pipeline.clone(),
+            join_target: join.id.clone(),
+            downstream: join.downstream.clone(),
+            expected_lanes: fork.lanes.clone(),
+            completed: false,
+        };
+        ctx.fanout.create(&group).await?;
+        let now = now_unix();
+        for lane in &fork.lanes {
+            ctx.fanout.seed_lane(&group_id, lane).await?;
+            let sib = Task::forked(task, lane, &group_id, &join.id, now);
+            ctx.tasks.insert(&sib).await?;
+        }
+        // Terminate the original: its work is done; the continuation past the
+        // join is a fresh task the barrier creates.
+        task.state = TaskState::Done;
+        task.current_stage = fork.id.clone();
+        task.updated_at = now;
+        ctx.tasks.update(task).await?;
+        return Ok(Some((fork.id.clone(), TaskState::Done)));
+    }
+
+    // JOIN BARRIER: an approve whose target is a Join node hits the barrier.
+    if routed.next_state == TaskState::Joining {
+        return resolve_barrier(ctx, task, agent_bus_core::Verdict::Approve).await;
+    }
+
     if routed.bump_attempts {
         // Cap is enforced inside route(); bump is safe here.
         let _ = task.bump_attempts();
     }
     let now = now_unix();
+
+    // A lane task routing to needs-human reports a reject verdict to its barrier
+    // before parking (Decision D5). Return directly — resolve_barrier owns the
+    // lane task's terminal persistence + any continuation (no double-write).
+    if task.group_id.is_some() && routed.next_state == TaskState::NeedsHuman {
+        return resolve_barrier(ctx, task, agent_bus_core::Verdict::Reject).await;
+    }
+
     // The task is currently `running`; move it to the routed next_state.
     task.state = routed.next_state;
     task.current_stage = routed.next_stage.clone();
     task.updated_at = now;
     ctx.tasks.update(task).await?;
     Ok(Some((routed.next_stage, routed.next_state)))
+}
+
+/// Walk a lane from its entry team following on_approve to the join id (mirrors
+/// the validator's linearity walk; here it pairs a fork with its join).
+fn lane_reaches(p: &Pipeline, entry: &str, join_id: &str) -> bool {
+    let mut current = entry.to_string();
+    for _ in 0..=p.teams.len() {
+        if current == join_id {
+            return true;
+        }
+        match p.teams.iter().find(|t| t.id == current) {
+            Some(t) => match t.outputs.on_approve.as_deref() {
+                Some(next) => current = next.to_string(),
+                None => return false,
+            },
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Resolve a lane settlement against its fan-out group barrier. Records the lane
+/// verdict, parks the lane task as terminal at its join, and — if this caller
+/// completes the group — creates the single continuation task (downstream on
+/// all-approve, needs-human otherwise). The completes-once guard lives in the
+/// store (vet F1); this never creates more than one continuation.
+async fn resolve_barrier(
+    ctx: &PoolContext,
+    task: &mut Task,
+    verdict: agent_bus_core::Verdict,
+) -> Result<Option<(String, TaskState)>, PoolError> {
+    let group_id = task.group_id.clone().ok_or(PoolError::Route(RouteError::NoRoute))?;
+    let lane = task.lane.clone().unwrap_or_default();
+    let now = now_unix();
+    let outcome = ctx.fanout.record_and_try_complete(&group_id, &lane, verdict).await?;
+    // Park this lane task as terminal for the lane.
+    task.state = TaskState::Done;
+    task.current_stage = task.join_target.clone().unwrap_or_else(|| task.current_stage.clone());
+    task.updated_at = now;
+    ctx.tasks.update(task).await?;
+    if let BarrierOutcome::Completed(cont) = outcome {
+        let (stage, state) = match cont {
+            Continuation::Downstream(ds) => (ds, TaskState::Queued),
+            Continuation::NeedsHuman => ("needs-human".to_string(), TaskState::NeedsHuman),
+        };
+        let mut next = Task::injected(
+            task.project_id.clone(),
+            task.pipeline.clone(),
+            stage.clone(),
+            task.topic.clone(),
+            task.target_repo.clone(),
+            now,
+        );
+        next.state = state;
+        next.parent_artifact = task.parent_artifact.clone();
+        ctx.tasks.insert(&next).await?;
+        return Ok(Some((stage, state)));
+    }
+    Ok(Some((task.current_stage.clone(), TaskState::Done)))
 }
 
 #[cfg(test)]
@@ -218,6 +331,7 @@ mod tests {
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         pool
     }
 
@@ -233,14 +347,16 @@ mod tests {
 
     fn pipeline_with(teams: Vec<Team>, gates: Vec<Gate>) -> Pipeline {
         Pipeline { id: "p".into(), name: "P".into(), description: String::new(), schema_version: 1,
-            teams, gates, escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }] }
+            teams, gates, escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![], joins: vec![] }
     }
 
     fn ctx_with(pool: SqlitePool, pipeline: Pipeline, runner: Arc<dyn Runner>, root: PathBuf) -> PoolContext {
         PoolContext {
             pipeline: Arc::new(pipeline),
             runner,
-            tasks: Arc::new(TaskStore::new(pool)),
+            tasks: Arc::new(TaskStore::new(pool.clone())),
+            fanout: Arc::new(FanOutStore::new(pool)),
             brake: Arc::new(Brake::new()),
             project_root: root,
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
@@ -432,5 +548,138 @@ mod tests {
             *self.last.lock().unwrap() = req.user_message.clone();
             Ok(self.out.clone())
         }
+    }
+
+    // ---- Sub-project 2: fork/join (Tasks 12 & 13) ----
+
+    use pipeline::model::{Fork, Join};
+
+    fn pipeline_v2_forkjoin() -> Pipeline {
+        Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            teams: vec![
+                team("entry", Some("fork-1"), None),
+                team("lane-a", Some("join-1"), None),
+                team("lane-b", Some("join-1"), None),
+                team("after", Some("done"), None),
+            ],
+            gates: vec![],
+            escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into() }],
+        }
+    }
+
+    /// A runner that returns a seeded reject for the `lane-b` team and approve
+    /// for everything else — used to exercise the one-reject barrier path.
+    struct StageRunner { reject: RunnerOutput }
+    impl StageRunner { fn new(reject: RunnerOutput) -> Self { Self { reject } } }
+    #[async_trait::async_trait]
+    impl Runner for StageRunner {
+        async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError> {
+            if req.team_id == "lane-b" {
+                Ok(self.reject.clone())
+            } else {
+                Ok(RunnerOutput { verdict: Verdict::Approve, artifact_path: Some("a.md".into()), final_text: "VERDICT: approve".into(), usage: RunnerUsage::default() })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn approve_into_fork_spawns_one_sibling_per_lane_and_terminates_original() {
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin();
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+
+        let original = ctx.tasks.get(&t.id).await.unwrap();
+        assert_eq!(original.state, TaskState::Done);
+
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.len(), 2);
+        let mut stages: Vec<String> = queued.iter().map(|q| q.current_stage.clone()).collect();
+        stages.sort();
+        assert_eq!(stages, vec!["lane-a".to_string(), "lane-b".to_string()]);
+        let group = queued[0].group_id.clone().unwrap();
+        assert!(queued.iter().all(|q| q.group_id.as_deref() == Some(group.as_str())));
+        assert!(queued.iter().all(|q| q.join_target.as_deref() == Some("join-1")));
+    }
+
+    #[tokio::test]
+    async fn all_lanes_approve_creates_one_downstream_continuation() {
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin();
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // entry -> fork -> 2 siblings
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a approves into join (parks)
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // lane-b approves into join (completes)
+
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        let at_after: Vec<_> = queued.iter().filter(|q| q.current_stage == "after").collect();
+        assert_eq!(at_after.len(), 1, "exactly one continuation past the join");
+        assert_eq!(at_after[0].group_id, None, "continuation is back in linear flow");
+    }
+
+    #[tokio::test]
+    async fn one_lane_reject_routes_join_to_needs_human() {
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin();
+        let reject = RunnerOutput { verdict: Verdict::Reject, artifact_path: None, final_text: "VERDICT: reject".into(), usage: RunnerUsage::default() };
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(StageRunner::new(reject)), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // entry -> fork
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a approve (parks)
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // lane-b reject -> barrier reject
+
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 1, "the joined task escalates to needs-human");
+        assert_eq!(nh[0].current_stage, "needs-human");
+    }
+
+    #[tokio::test]
+    async fn partial_completion_parks_without_continuing() {
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin();
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // only lane-a settles
+
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert!(queued.iter().all(|q| q.current_stage != "after"), "no continuation while a lane is outstanding");
+        assert!(queued.iter().any(|q| q.current_stage == "lane-b"), "lane-b still queued");
+    }
+
+    #[tokio::test]
+    async fn restart_mid_group_re_evaluates_idempotently() {
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_forkjoin();
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a parks
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // lane-b completes -> 1 continuation
+
+        let group = {
+            let done = ctx.tasks.list_by_state(TaskState::Done).await.unwrap();
+            done.iter().find_map(|d| d.group_id.clone()).unwrap()
+        };
+        let again = ctx.fanout.record_and_try_complete(&group, "lane-b", Verdict::Approve).await.unwrap();
+        assert_eq!(again, BarrierOutcome::Parked, "re-settle after completion creates nothing");
+
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.iter().filter(|q| q.current_stage == "after").count(), 1);
     }
 }

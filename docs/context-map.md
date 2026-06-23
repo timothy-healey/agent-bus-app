@@ -73,7 +73,7 @@ flowchart TB
 | From → To | Pattern | Surface / contract |
 |---|---|---|
 | Workspace → all six others | **Shared Kernel** | Path-resolution variables: `${project}`, `${target_repo}`, `${task_id}`, `${agent_bus}` |
-| Pipeline Authoring ↔ Runtime | **Shared Kernel** (with `schema_version`) | The live pipeline graph; hot-reload supported with save-validation preventing orphan in-flight tasks |
+| Pipeline Authoring ↔ Runtime | **Shared Kernel** (`schema_version: 2`) | The live pipeline graph (now incl. fork/join parallel lanes); hot-reload supported with save-validation preventing orphan in-flight tasks |
 | Runtime → Review | **Customer-Supplier** | Runtime publishes "task reached a gate" events; Review consumes |
 | Review → Runtime | **Conformist** | Review emits verdicts in Runtime's vocabulary (`approve` / `revise` / `reject`); Runtime owns the state machine |
 | Runtime → Runners | **Anti-Corruption Layer** | Runners insulates Runtime from Claude's idiom (CLI flags, API params, stream-json shape) |
@@ -92,7 +92,7 @@ flowchart TB
 | | |
 |---|---|
 | **Root identity** | `pipeline_id` (string, unique per project) |
-| **Composition** | `schema_version`, `teams[]`, `gates[]`, `escalations[]` |
+| **Composition** | `schema_version`, `teams[]`, `gates[]`, `escalations[]`, `forks[]`, `joins[]` |
 | **Invariants protected by the root** | • Every `on_approve` / `on_revise` / `on_reject` resolves to an existing node id <br> • Every team is reachable from at least one entry point <br> • No node references itself <br> • Team ids are unique within the pipeline <br> • `schema_version` is present and supported by the current Runtime <br> • **A save must not orphan an in-flight task** (Pipeline rejects writes that would leave a Runtime task pointing at a removed node) |
 | **Domain events** | `PipelineSaved(id, version, diff)` · `PipelineHotReloaded(id, prev_version, new_version)` |
 

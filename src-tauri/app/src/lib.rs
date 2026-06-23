@@ -37,6 +37,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (3, include_str!("../migrations/003_runtime.sql")),
         (4, include_str!("../migrations/004_comments_kind.sql")),
         (5, include_str!("../migrations/005_usage.sql")),
+        (6, include_str!("../migrations/006_fanout.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -210,6 +211,7 @@ async fn load_active(
         id: String::new(), name: String::new(), description: String::new(),
         schema_version: pipeline::model::SCHEMA_VERSION,
         teams: vec![], gates: vec![], escalations: vec![],
+        forks: vec![], joins: vec![],
     };
     let Ok(projects) = project_store.list().await else { return (String::new(), String::new(), empty); };
     let Some(project) = projects.into_iter().next() else { return (String::new(), String::new(), empty); };
@@ -255,6 +257,12 @@ pub fn run() {
             version: 5,
             description: "usage telemetry — worker_usage_log + cc_usage_log + usage_config",
             sql: include_str!("../migrations/005_usage.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 6,
+            description: "fanout — task lane columns + fanout_groups/fanout_lanes",
+            sql: include_str!("../migrations/006_fanout.sql"),
             kind: MigrationKind::Up,
         },
     ];
@@ -403,7 +411,7 @@ pub fn run() {
                 if !pipe.teams.is_empty() {
                     let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                         Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader);
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone());
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -473,6 +481,7 @@ pub fn run() {
 /// Spawn a polling worker loop per team. v1 runs one loop per team (concurrent
 /// workers per team is v1.1). Each iteration runs process_one_claim; on a
 /// settle it emits a `task.changed` event the frontend listens for.
+#[allow(clippy::too_many_arguments)]
 fn spawn_worker_loops(
     handle: tauri::AppHandle,
     pipeline: Arc<Pipeline>,
@@ -481,13 +490,16 @@ fn spawn_worker_loops(
     project_root: String,
     usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
     revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
+    pool: sqlx::SqlitePool,
 ) {
     let runner: Arc<dyn runners::output::Runner> = Arc::new(ClaudeCliRunner::new());
+    let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
     for team in pipeline.teams.clone() {
         let ctx = PoolContext {
             pipeline: pipeline.clone(),
             runner: runner.clone(),
             tasks: tasks.clone(),
+            fanout: fanout.clone(),
             brake: brake.clone(),
             project_root: std::path::PathBuf::from(&project_root),
             read_prompt: Arc::new({
@@ -624,7 +636,7 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 5, "all five migrations recorded");
+        assert_eq!(version, 6, "all six migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }

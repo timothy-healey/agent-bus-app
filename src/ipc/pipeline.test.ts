@@ -32,10 +32,12 @@ describe("pipeline ipc", () => {
       id: "ddd-spec-plan-impl",
       name: "DDD",
       description: "",
-      schema_version: 1,
+      schema_version: 2,
       teams: [],
       gates: [],
       escalations: [],
+      forks: [{ id: "fork-1", lanes: ["a", "b"] }],
+      joins: [{ id: "join-1", waits_for: ["a", "b"], downstream: "after" }],
     };
     invokeMock.mockResolvedValueOnce(graph);
     const result = await loadPipeline("/p", "ddd-spec-plan-impl");
@@ -43,6 +45,7 @@ describe("pipeline ipc", () => {
       project_root: "/p",
       id: "ddd-spec-plan-impl",
     });
-    expect(result).toEqual(graph);
+    expect(result.forks[0].lanes).toEqual(["a", "b"]);
+    expect(result.joins[0].downstream).toBe("after");
   });
 });

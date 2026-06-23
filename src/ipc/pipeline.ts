@@ -54,6 +54,17 @@ export interface Escalation {
   triggers: string[];
 }
 
+export interface Fork {
+  id: string;
+  lanes: string[];
+}
+
+export interface Join {
+  id: string;
+  waits_for: string[];
+  downstream: string;
+}
+
 export interface Pipeline {
   id: string;
   name: string;
@@ -62,6 +73,8 @@ export interface Pipeline {
   teams: Team[];
   gates: Gate[];
   escalations: Escalation[];
+  forks: Fork[];
+  joins: Join[];
 }
 
 export interface TemplateInfo {

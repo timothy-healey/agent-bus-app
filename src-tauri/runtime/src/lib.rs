@@ -24,6 +24,12 @@ pub mod pool;
 
 pub use pool::*;
 
+pub mod fanout_group;
+pub use fanout_group::*;
+
+pub mod fanout_store;
+pub use fanout_store::*;
+
 pub mod revision;
 
 pub mod api;
