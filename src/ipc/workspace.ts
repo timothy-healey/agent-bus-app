@@ -36,6 +36,33 @@ export async function readArtifact(
   });
 }
 
+export interface GitConfig {
+  author_name: string;
+  author_email: string;
+}
+
+export async function setActivePipeline(
+  id: string,
+  pipelineId: string | null,
+): Promise<void> {
+  await invoke<void>("workspace_set_active_pipeline", { id, pipeline_id: pipelineId });
+}
+
+export async function removeProject(id: string): Promise<void> {
+  await invoke<void>("workspace_remove_project", { id });
+}
+
+export async function getGitConfig(): Promise<GitConfig> {
+  return await invoke<GitConfig>("git_config_get");
+}
+
+export async function setGitConfig(authorName: string, authorEmail: string): Promise<GitConfig> {
+  return await invoke<GitConfig>("git_config_set", {
+    author_name: authorName,
+    author_email: authorEmail,
+  });
+}
+
 export async function writeProjectPipeline(
   projectId: string,
   yamlRelPath: string,
