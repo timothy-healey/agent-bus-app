@@ -59,6 +59,8 @@ fn pipeline_key_set_matches_ts() {
         teams: vec![full_team()],
         gates: vec![Gate { id: "gate-1".into(), label: "Gate".into(), downstream: "research".into() }],
         escalations: vec![Escalation { id: "needs-human".into(), triggers: vec!["timeout".into()] }],
+        forks: vec![],
+        joins: vec![],
     };
     let v = serde_json::to_value(&p).unwrap();
     assert_eq!(

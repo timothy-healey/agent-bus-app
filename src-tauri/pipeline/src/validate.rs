@@ -7,8 +7,22 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PipelineValidationError {
-    #[error("unsupported schema_version {found} (this build supports {supported})")]
-    UnsupportedSchemaVersion { found: u32, supported: u32 },
+    #[error("unsupported schema_version {found} (this build supports 1 and {max})")]
+    UnsupportedSchemaVersion { found: u32, max: u32 },
+    #[error("fork/join nodes require schema_version: 2")]
+    ForkRequiresV2,
+    #[error("fork '{fork}' lane '{lane}' does not resolve to a team")]
+    ForkLaneNotTeam { fork: String, lane: String },
+    #[error("join '{join}' waits_for '{team}' does not resolve to a team")]
+    JoinWaitsForNotTeam { join: String, team: String },
+    #[error("fork '{0}' must have at least 2 lanes")]
+    ForkTooFewLanes(String),
+    #[error("join '{join}' downstream points at unknown node '{target}'")]
+    UnresolvedJoinDownstream { join: String, target: String },
+    #[error("lane entered at '{entry}' is not linear (encountered non-team '{node}' before join '{join}')")]
+    LaneNotLinear { entry: String, node: String, join: String },
+    #[error("fork '{fork}' lanes do not match a join's waits_for")]
+    ForkJoinMismatch { fork: String },
     #[error("duplicate node id: {0}")]
     DuplicateNodeId(String),
     #[error("route on node '{node}' ({route}) points at unknown node '{target}'")]
@@ -27,11 +41,14 @@ pub enum PipelineValidationError {
 /// the graph is well-formed.
 pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
     // schema_version supported
-    if p.schema_version != SCHEMA_VERSION {
+    if p.schema_version != 1 && p.schema_version != SCHEMA_VERSION {
         return Err(PipelineValidationError::UnsupportedSchemaVersion {
             found: p.schema_version,
-            supported: SCHEMA_VERSION,
+            max: SCHEMA_VERSION,
         });
+    }
+    if p.schema_version < 2 && (!p.forks.is_empty() || !p.joins.is_empty()) {
+        return Err(PipelineValidationError::ForkRequiresV2);
     }
 
     if p.teams.is_empty() {
@@ -136,6 +153,8 @@ mod tests {
             teams: vec![team("research", Some("gate-1")), team("writers", Some("needs-human"))],
             gates: vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "writers".into() }],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![],
+            joins: vec![],
         }
     }
 
@@ -148,10 +167,10 @@ mod tests {
     fn unsupported_schema_version_is_rejected() {
         let mut p = valid_pipeline();
         p.schema_version = 99;
-        assert_eq!(
+        assert!(matches!(
             validate(&p),
-            Err(PipelineValidationError::UnsupportedSchemaVersion { found: 99, supported: 1 })
-        );
+            Err(PipelineValidationError::UnsupportedSchemaVersion { found: 99, .. })
+        ));
     }
 
     #[test]
@@ -197,5 +216,55 @@ mod tests {
         let mut p = valid_pipeline();
         p.teams.clear();
         assert_eq!(validate(&p), Err(PipelineValidationError::NoTeams));
+    }
+
+    use crate::model::{Fork, Join};
+
+    fn lane_team(id: &str, approve: &str) -> Team {
+        let mut t = team(id, Some(approve));
+        t.outputs.on_revise = None;
+        t.outputs.on_reject = Some("needs-human".into());
+        t
+    }
+
+    fn valid_v2_pipeline() -> Pipeline {
+        Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            teams: vec![
+                team("entry", Some("fork-1")),
+                lane_team("lane-a", "join-1"),
+                lane_team("lane-b", "join-1"),
+                team("after", Some("needs-human")),
+            ],
+            gates: vec![],
+            escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into() }],
+        }
+    }
+
+    #[test]
+    fn schema_version_one_is_still_accepted() {
+        assert_eq!(validate(&valid_pipeline()), Ok(()));
+    }
+
+    #[test]
+    #[ignore]
+    fn schema_version_two_is_accepted() {
+        assert_eq!(validate(&valid_v2_pipeline()), Ok(()));
+    }
+
+    #[test]
+    fn an_unsupported_version_is_still_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.schema_version = 99;
+        assert!(matches!(validate(&p), Err(PipelineValidationError::UnsupportedSchemaVersion { found: 99, .. })));
+    }
+
+    #[test]
+    fn v1_with_a_fork_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.schema_version = 1;
+        assert_eq!(validate(&p), Err(PipelineValidationError::ForkRequiresV2));
     }
 }
