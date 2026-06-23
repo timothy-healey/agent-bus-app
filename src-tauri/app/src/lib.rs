@@ -41,6 +41,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (4, include_str!("../migrations/004_comments_kind.sql")),
         (5, include_str!("../migrations/005_usage.sql")),
         (6, include_str!("../migrations/006_fanout.sql")),
+        (7, include_str!("../migrations/007_invocation_audit.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -739,6 +740,12 @@ pub fn run() {
             sql: include_str!("../migrations/006_fanout.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            description: "invocation audit — per-invocation persistence/audit trail",
+            sql: include_str!("../migrations/007_invocation_audit.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -779,6 +786,7 @@ pub fn run() {
                 let (project_id, project_root, pipe) = load_active(&project_store).await;
                 let pipe = Arc::new(pipe);
                 let tasks = Arc::new(TaskStore::new(pool.clone()));
+                let invocation_audit = Arc::new(runtime::invocation_audit::InvocationAuditStore::new(pool.clone()));
                 let brake = Arc::new(Brake::new());
 
                 // F4 crash recovery: release any tasks stuck in `running`.
@@ -897,7 +905,7 @@ pub fn run() {
                 if !pipe.teams.is_empty() {
                     let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                         Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())));
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())), Some(invocation_audit.clone()));
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -981,6 +989,7 @@ fn spawn_worker_loops(
     revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
     pool: sqlx::SqlitePool,
     log_sink: Option<Arc<runtime::pool::LogSinkFactory>>,
+    audit: Option<Arc<runtime::invocation_audit::InvocationAuditStore>>,
 ) {
     let runner: Arc<dyn runners::output::Runner> = Arc::new(ClaudeCliRunner::new());
     let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
@@ -1002,6 +1011,7 @@ fn spawn_worker_loops(
             usage_sink: usage_sink.clone(),
             revision_reader: revision_reader.clone(),
             log_sink: log_sink.clone(),
+            audit: audit.clone(),
         };
         let handle = handle.clone();
         let team = team.clone();
@@ -1171,7 +1181,7 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 6, "all six migrations recorded");
+        assert_eq!(version, 7, "all seven migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
