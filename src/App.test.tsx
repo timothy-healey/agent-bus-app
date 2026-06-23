@@ -53,6 +53,7 @@ vi.mock("./ipc/terminal", () => ({
     project_id: "p", session_id: "s", started_at: 0, last_message_at: 0,
     turns: [], summary_of_prior_sessions: null, history_budget_tokens: 8000,
   }),
+  onConversationDelta: vi.fn().mockResolvedValue(() => {}),
 }));
 
 import App from "./App";
