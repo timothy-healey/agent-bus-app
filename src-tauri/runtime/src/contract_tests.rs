@@ -32,6 +32,9 @@ fn full_task() -> Task {
     t.parent_artifact = Some("artifacts/specs/T-1-v1.md".into());
     t.review_artifact = Some("artifacts/review/T-1-v1.md".into());
     t.state = TaskState::Gated;
+    t.group_id = Some("G-1".into());
+    t.lane = Some("lane-a".into());
+    t.join_target = Some("join-1".into());
     t
 }
 
@@ -57,6 +60,9 @@ fn task_key_set_matches_ts() {
             "review_artifact",
             "created_at",
             "updated_at",
+            "group_id",
+            "lane",
+            "join_target",
         ]),
     );
     // newtype id → bare string; counters → numbers.
