@@ -40,16 +40,32 @@ impl Turn {
         Turn { role: Role::Assistant, text: text.into(), tool_calls, at }
     }
     /// Rough token estimate for history-budget math (D: ~4 chars/token, plus a
-    /// small per-tool-call constant). Deterministic so budget tests are stable.
+    /// small per-tool-call constant). Folds in each embedded tool-call's args
+    /// and result payload so fat agentic composite turns are counted accurately
+    /// (C3). Deterministic so budget tests are stable.
     pub fn estimated_tokens(&self) -> usize {
         let text = self.text.chars().count() / 4;
-        let tools: usize = self
-            .tool_calls
-            .iter()
-            .map(|tc| tc.request.tool_name.chars().count() / 4 + 8)
-            .sum();
+        let tools: usize = self.tool_calls.iter().map(tool_call_tokens).sum();
         text + tools + 4
     }
+}
+
+/// Coarse token estimate for one embedded tool-call: the tool name, the
+/// serialized args, and the serialized result payload (the Ok value or the Err
+/// message), plus a small structural constant for the call's JSON envelope.
+/// Byte length is used for serialized JSON (an upper bound on char count), which
+/// biases the estimate conservatively — the safe direction for a budget cap.
+fn tool_call_tokens(tc: &ToolCall) -> usize {
+    let name = tc.request.tool_name.chars().count() / 4;
+    let args = serde_json::to_string(&tc.request.args).map_or(0, |s| s.len()) / 4;
+    let result = match &tc.result {
+        Some(ToolCallResult::Ok { result }) => {
+            serde_json::to_string(result).map_or(0, |s| s.len()) / 4
+        }
+        Some(ToolCallResult::Err { error }) => error.chars().count() / 4,
+        None => 0,
+    };
+    name + args + result + 8
 }
 
 #[cfg(test)]
@@ -88,5 +104,104 @@ mod tests {
             0,
         );
         assert!(withtool.estimated_tokens() > bare.estimated_tokens());
+    }
+
+    #[test]
+    fn estimated_tokens_counts_tool_call_args() {
+        let small = Turn::assistant(
+            "",
+            vec![ToolCall {
+                request: ToolCallRequest { tool_name: "t".into(), args: json!({}) },
+                result: None,
+            }],
+            0,
+        );
+        let fat_args = Turn::assistant(
+            "",
+            vec![ToolCall {
+                request: ToolCallRequest {
+                    tool_name: "t".into(),
+                    args: json!({ "blob": "x".repeat(400) }),
+                },
+                result: None,
+            }],
+            0,
+        );
+        // ~400 chars of args => ~100 extra tokens; must clearly exceed the small call.
+        assert!(
+            fat_args.estimated_tokens() > small.estimated_tokens() + 50,
+            "fat args ({}) should dwarf empty args ({})",
+            fat_args.estimated_tokens(),
+            small.estimated_tokens()
+        );
+    }
+
+    #[test]
+    fn estimated_tokens_counts_tool_call_result() {
+        let no_result = Turn::assistant(
+            "",
+            vec![ToolCall {
+                request: ToolCallRequest { tool_name: "t".into(), args: json!({}) },
+                result: None,
+            }],
+            0,
+        );
+        let fat_result = Turn::assistant(
+            "",
+            vec![ToolCall {
+                request: ToolCallRequest { tool_name: "t".into(), args: json!({}) },
+                result: Some(ToolCallResult::Ok { result: json!({ "out": "y".repeat(400) }) }),
+            }],
+            0,
+        );
+        assert!(
+            fat_result.estimated_tokens() > no_result.estimated_tokens() + 50,
+            "fat result ({}) should dwarf no result ({})",
+            fat_result.estimated_tokens(),
+            no_result.estimated_tokens()
+        );
+    }
+
+    #[test]
+    fn estimated_tokens_counts_err_result_message() {
+        let no_result = Turn::assistant(
+            "",
+            vec![ToolCall {
+                request: ToolCallRequest { tool_name: "t".into(), args: json!({}) },
+                result: None,
+            }],
+            0,
+        );
+        let fat_err = Turn::assistant(
+            "",
+            vec![ToolCall {
+                request: ToolCallRequest { tool_name: "t".into(), args: json!({}) },
+                result: Some(ToolCallResult::Err { error: "e".repeat(400) }),
+            }],
+            0,
+        );
+        assert!(
+            fat_err.estimated_tokens() > no_result.estimated_tokens() + 50,
+            "fat err ({}) should dwarf no result ({})",
+            fat_err.estimated_tokens(),
+            no_result.estimated_tokens()
+        );
+    }
+
+    #[test]
+    fn estimated_tokens_unresolved_call_charges_only_structural_constant() {
+        // A None result must not add result-size tokens; only the per-call
+        // constant + name + (empty) args. Guards against the estimate ballooning
+        // on dispatched-but-unresolved calls.
+        let t = Turn::assistant(
+            "",
+            vec![ToolCall {
+                request: ToolCallRequest { tool_name: "approve_gate".into(), args: json!({}) },
+                result: None,
+            }],
+            0,
+        );
+        // name (12 chars /4 = 3) + args "{}" (2 bytes /4 = 0) + 8 constant + 4 turn base = 15.
+        assert_eq!(t.estimated_tokens(), 15);
     }
 }
