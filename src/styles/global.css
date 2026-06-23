@@ -86,6 +86,10 @@ code, .mono {
 .abp-tab { transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out); }
 .abp-tab:hover { color: var(--text-2); }
 
+/* Inline delete glyph (CommentRail, LineageTab): readable default, danger hover */
+.abp-icon-delete { transition: color var(--dur-fast) var(--ease-out); }
+.abp-icon-delete:hover { color: var(--danger); }
+
 /* Motion — DESIGN.md §Motion. State, never decoration. */
 @keyframes abp-pulse {
   0%, 100% { opacity: 1; }

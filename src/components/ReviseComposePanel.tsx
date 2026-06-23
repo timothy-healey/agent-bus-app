@@ -68,6 +68,7 @@ export function ReviseComposePanel({
       </div>
       <h5 style={h5}>overall direction (optional)</h5>
       <textarea
+        aria-label="overall revise direction"
         style={textarea}
         placeholder={`anything ${target} should know beyond the inline comments?`}
         value={direction}
