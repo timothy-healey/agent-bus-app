@@ -7,6 +7,7 @@ pub mod store;
 pub mod draft;
 pub mod resolve;
 pub mod design_session;
+pub mod seed_template;
 pub mod api;
 
 pub use model::*;

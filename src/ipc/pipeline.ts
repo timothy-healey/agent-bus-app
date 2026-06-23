@@ -153,6 +153,22 @@ export async function kickoffGenerate(sessionId: string, description: string): P
   });
 }
 
+/** A bundled seed template summary for the kickoff picker (A2). */
+export interface SeedTemplateSummary {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export async function listSeedTemplates(): Promise<SeedTemplateSummary[]> {
+  return await invoke<SeedTemplateSummary[]>("list_seed_templates_cmd");
+}
+
+/** Return a populated DraftPipeline seed for a template id; the wizard refines it. */
+export async function seedTemplate(id: string): Promise<DraftPipeline> {
+  return await invoke<DraftPipeline>("seed_template_cmd", { id });
+}
+
 export async function designSessionTurn(
   sessionId: string,
   step: Step,
