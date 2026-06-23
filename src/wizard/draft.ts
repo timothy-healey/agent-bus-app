@@ -1,4 +1,4 @@
-import type { DraftPipeline, DraftTeam, EffortMode } from "../ipc/pipeline";
+import type { DraftPipeline, DraftTeam, EffortMode, Gate } from "../ipc/pipeline";
 
 export const WIZARD_STEPS = ["basics", "teams", "prompts", "wiring", "review"] as const;
 export type WizardStep = (typeof WIZARD_STEPS)[number];
@@ -76,4 +76,18 @@ export function setTeamReads(d: DraftPipeline, id: string, raw: string): DraftPi
 
 export function setTeamWrites(d: DraftPipeline, id: string, raw: string): DraftPipeline {
   return mapTeams(d, (t) => (t.id === id ? { ...t, scope: { ...t.scope, writes: parseCsv(raw) } } : t));
+}
+
+export function addGate(d: DraftPipeline, id: string, label: string, downstream: string): DraftPipeline {
+  if (d.gates.some((g) => g.id === id)) return d;
+  const gate: Gate = { id, label, downstream };
+  return { ...d, gates: [...d.gates, gate] };
+}
+
+export function removeGate(d: DraftPipeline, id: string): DraftPipeline {
+  return { ...d, gates: d.gates.filter((g) => g.id !== id) };
+}
+
+export function setTeamApprove(d: DraftPipeline, teamId: string, target: string | null): DraftPipeline {
+  return mapTeams(d, (t) => (t.id === teamId ? { ...t, outputs: { ...t.outputs, on_approve: target } } : t));
 }

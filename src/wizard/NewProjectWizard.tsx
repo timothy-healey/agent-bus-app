@@ -78,7 +78,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
                 step={STEP_TO_API[step]}
                 draft={draft}
                 onDraftChange={setDraft}
-                renderDraft={(d) => <WiringStep draft={d} />}
+                renderDraft={(d, onChange) => <WiringStep draft={d} onChange={onChange} />}
               />
             ) : (
               <ChatDraftPanel
