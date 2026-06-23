@@ -18,13 +18,40 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+/// Expand a leading `~` or `~/…` in a user-supplied path to the home dir.
+/// `home` is injected for testability; pure. Only the current-user `~` is
+/// handled (not `~otheruser`); non-tilde paths are returned unchanged. An empty
+/// home leaves the input untouched (no silent rewrite to a wrong root).
+pub fn expand_tilde(input: &str, home: &str) -> String {
+    if home.is_empty() {
+        return input.to_string();
+    }
+    if input == "~" {
+        home.to_string()
+    } else if let Some(rest) = input.strip_prefix("~/") {
+        format!("{}/{}", home.trim_end_matches('/'), rest)
+    } else {
+        input.to_string()
+    }
+}
+
+fn home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default()
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_create_project(
     state: tauri::State<'_, WorkspaceState>,
     name: String,
     root_path: String,
 ) -> Result<Project, String> {
-    let project = Project::new(name, PathBuf::from(root_path), now_unix());
+    // Expand a leading ~ so a root like "~/DDD-effort" resolves to the home dir
+    // instead of being stored as a literal "~" path (which scattered files under
+    // the app's cwd).
+    let root = expand_tilde(&root_path, &home_dir());
+    let project = Project::new(name, PathBuf::from(root), now_unix());
     state.store.insert(&project).await.map_err(|e| e.to_string())?;
     Ok(project)
 }
@@ -190,5 +217,23 @@ mod tests {
     fn tools_publishes_read_artifact_under_workspace() {
         let t = tools();
         assert!(t.iter().any(|s| s.name == "read_artifact" && s.supplier_context == "workspace"));
+    }
+
+    #[test]
+    fn expand_tilde_expands_leading_home() {
+        assert_eq!(expand_tilde("~/DDD-effort", "/Users/tim"), "/Users/tim/DDD-effort");
+        assert_eq!(expand_tilde("~", "/Users/tim"), "/Users/tim");
+        // a trailing slash on home doesn't double up
+        assert_eq!(expand_tilde("~/a/b", "/Users/tim/"), "/Users/tim/a/b");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_other_paths_unchanged() {
+        assert_eq!(expand_tilde("/abs/path", "/Users/tim"), "/abs/path");
+        assert_eq!(expand_tilde("relative/x", "/Users/tim"), "relative/x");
+        // only the current-user ~ is handled
+        assert_eq!(expand_tilde("~otheruser/x", "/Users/tim"), "~otheruser/x");
+        // empty home: leave untouched rather than rewrite to a wrong root
+        assert_eq!(expand_tilde("~/x", ""), "~/x");
     }
 }
