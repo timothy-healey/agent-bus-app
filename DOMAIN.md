@@ -66,6 +66,9 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Gate** — a node where execution pauses until the operator approves/revises/rejects
 - **Escalation** — a sink for tasks that can't proceed (≥3 revises or explicit reject)
 - **Route** — an edge: `on_approve` / `on_revise` / `on_reject` pointing at another node
+- **Fork** — a node that fans one task out into parallel lanes (routes stay single-target; the multiplicity is the fork's `lanes`)
+- **Join** — a barrier node that waits for all lanes, then continues — all must approve, else needs-human
+- **Lane** — a linear team chain between a fork and its join; named to avoid colliding with git/worktree *branch*
 - **Design Session** — an ephemeral authoring dialogue used to design a pipeline, conducted over the LLM Chat ACL; distinct from the terminal's `Conversation` aggregate (one `dialogue_id` per wizard step). *(Full definition lands with sub-project 3 — the wizard.)*
 
 ### Runtime
@@ -76,6 +79,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Verdict** — `approve` | `revise` | `reject`
 - **Attempts** — counter incremented on revise; capped at 3
 - **Brake** — system-wide flag halting new claims (in-flight workers complete)
+- **Fan-out group** — the `FanOutGroup` aggregate (root `group_id`) owning the *completes-exactly-once* barrier invariant; the lane sibling Tasks reference it
 
 ### Review
 - **Artifact** — a markdown document produced by a team (spec, plan, critique, review report). Versioned (`v1`, `v2`, …); immutable per version

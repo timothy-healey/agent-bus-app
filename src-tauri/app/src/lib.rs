@@ -411,7 +411,7 @@ pub fn run() {
                 if !pipe.teams.is_empty() {
                     let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                         Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader);
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone());
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -489,13 +489,16 @@ fn spawn_worker_loops(
     project_root: String,
     usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
     revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
+    pool: sqlx::SqlitePool,
 ) {
     let runner: Arc<dyn runners::output::Runner> = Arc::new(ClaudeCliRunner::new());
+    let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
     for team in pipeline.teams.clone() {
         let ctx = PoolContext {
             pipeline: pipeline.clone(),
             runner: runner.clone(),
             tasks: tasks.clone(),
+            fanout: fanout.clone(),
             brake: brake.clone(),
             project_root: std::path::PathBuf::from(&project_root),
             read_prompt: Arc::new({
