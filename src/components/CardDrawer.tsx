@@ -5,6 +5,7 @@ import { ArtifactView } from "./ArtifactView";
 import { CommentRail } from "./CommentRail";
 import { ReviseComposePanel } from "./ReviseComposePanel";
 import { LineageTab } from "./LineageTab";
+import { CompareView, type ComparePane } from "./CompareView";
 import { Button } from "./ui/Button";
 
 type Tab = "artifact" | "live log" | "review" | "lineage";
@@ -19,6 +20,15 @@ export interface CardDrawerProps {
   /// Open an upstream artifact from the lineage tab (D5). When omitted, clicking
   /// a lineage entry just switches to the artifact tab showing the current body.
   onOpenArtifact?: (path: string) => void;
+  /// Two artifact bodies to compare side-by-side (B2). Set by the host once the
+  /// operator has picked two versions; cleared (null) when not comparing.
+  compareMarkdown?: { left: string; right: string } | null;
+  /// Labels for the two compare panes (basenames of the chosen paths). Optional.
+  compareLabels?: { left: string; right: string };
+  /// Raise the two chosen artifact paths so the host can load + supply bodies.
+  onCompare?: (pathA: string, pathB: string) => void;
+  /// Leave compare mode (host clears compareMarkdown).
+  onExitCompare?: () => void;
   onApprove: (taskId: string) => void;
   onRevise: (taskId: string, direction: string) => void;
   onReject: (taskId: string) => void;
@@ -30,6 +40,10 @@ export function CardDrawer({
   logText,
   reviseTarget = "the writer",
   onOpenArtifact,
+  compareMarkdown,
+  compareLabels,
+  onCompare,
+  onExitCompare,
   onApprove,
   onRevise,
   onReject,
@@ -145,13 +159,23 @@ export function CardDrawer({
           </div>
         )}
         {tab === "lineage" && (
-          <LineageTab
-            task={task}
-            onOpenArtifact={(path) => {
-              onOpenArtifact?.(path);
-              setTab("artifact");
-            }}
-          />
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <LineageTab
+              task={task}
+              onOpenArtifact={(path) => {
+                onExitCompare?.();
+                onOpenArtifact?.(path);
+                setTab("artifact");
+              }}
+              onCompare={onCompare}
+            />
+            {compareMarkdown && (
+              <CompareView
+                left={{ label: compareLabels?.left ?? "version A", markdown: compareMarkdown.left } as ComparePane}
+                right={{ label: compareLabels?.right ?? "version B", markdown: compareMarkdown.right } as ComparePane}
+              />
+            )}
+          </div>
         )}
       </div>
 
