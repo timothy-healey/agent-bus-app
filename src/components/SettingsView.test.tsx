@@ -1,3 +1,4 @@
+import React from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { SettingsView } from "./SettingsView";
@@ -9,46 +10,85 @@ const snap: UsageSnapshot = {
   by_team: [], tokens_by_task: {}, braked: false, auto_meter_enabled: false,
 };
 
+function baseProps(over: Partial<React.ComponentProps<typeof SettingsView>> = {}) {
+  return {
+    usage: snap,
+    onSetBudget: vi.fn().mockResolvedValue(snap),
+    onSetAutoMeter: vi.fn().mockResolvedValue(snap),
+    apiKeyPresent: false,
+    onSetApiKey: vi.fn().mockResolvedValue(undefined),
+    onClearApiKey: vi.fn().mockResolvedValue(undefined),
+    gitConfig: { author_name: "", author_email: "" },
+    onSaveGitConfig: vi.fn().mockResolvedValue({ author_name: "", author_email: "" }),
+    projects: [],
+    activeProjectId: null,
+    onRemoveProject: vi.fn().mockResolvedValue(undefined),
+    ...over,
+  } as React.ComponentProps<typeof SettingsView>;
+}
+
 beforeEach(() => {
   document.documentElement.setAttribute("data-theme", "dark");
 });
 
 describe("SettingsView", () => {
   it("renders General and Usage section headings", () => {
-    render(<SettingsView usage={snap} onSetBudget={vi.fn().mockResolvedValue(snap)} onSetAutoMeter={vi.fn().mockResolvedValue(snap)} />);
+    render(<SettingsView {...baseProps()} />);
     expect(screen.getByText(/general/i)).toBeInTheDocument();
     expect(screen.getByText(/usage/i)).toBeInTheDocument();
   });
 
   it("toggles the theme attribute when the theme control is used", () => {
-    render(<SettingsView usage={snap} onSetBudget={vi.fn().mockResolvedValue(snap)} onSetAutoMeter={vi.fn().mockResolvedValue(snap)} />);
+    render(<SettingsView {...baseProps()} />);
     fireEvent.click(screen.getByRole("button", { name: /light/i }));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
   it("calls onSetBudget with the entered number", async () => {
     const onSetBudget = vi.fn().mockResolvedValue(snap);
-    render(<SettingsView usage={snap} onSetBudget={onSetBudget} onSetAutoMeter={vi.fn().mockResolvedValue(snap)} />);
+    render(<SettingsView {...baseProps({ onSetBudget })} />);
     fireEvent.change(screen.getByLabelText(/window budget/i), { target: { value: "5000000" } });
     fireEvent.click(screen.getByRole("button", { name: /save budget/i }));
     await waitFor(() => expect(onSetBudget).toHaveBeenCalledWith(5_000_000));
   });
 
-  it("shows the current budget from the snapshot", () => {
-    render(<SettingsView usage={snap} onSetBudget={vi.fn().mockResolvedValue(snap)} onSetAutoMeter={vi.fn().mockResolvedValue(snap)} />);
-    expect(screen.getByText(/v1.1/i)).toBeInTheDocument(); // deferred sections note
-  });
-
   it("renders the auto-brake toggle reflecting snapshot state", () => {
-    render(<SettingsView usage={{ ...snap, auto_meter_enabled: false }} onSetBudget={vi.fn().mockResolvedValue(snap)} onSetAutoMeter={vi.fn().mockResolvedValue(snap)} />);
+    render(<SettingsView {...baseProps({ usage: { ...snap, auto_meter_enabled: false } })} />);
     const toggle = screen.getByRole("checkbox", { name: /auto-brake/i });
     expect(toggle).not.toBeChecked();
   });
 
   it("calls onSetAutoMeter when the toggle is flipped", async () => {
     const onSetAutoMeter = vi.fn().mockResolvedValue({ ...snap, auto_meter_enabled: true });
-    render(<SettingsView usage={{ ...snap, auto_meter_enabled: false }} onSetBudget={vi.fn().mockResolvedValue(snap)} onSetAutoMeter={onSetAutoMeter} />);
+    render(<SettingsView {...baseProps({ usage: { ...snap, auto_meter_enabled: false }, onSetAutoMeter })} />);
     fireEvent.click(screen.getByRole("checkbox", { name: /auto-brake/i }));
     await waitFor(() => expect(onSetAutoMeter).toHaveBeenCalledWith(true));
+  });
+
+  it("shows the runners api-key section with a save control", () => {
+    render(<SettingsView {...baseProps()} />);
+    expect(screen.getByText(/runners/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/api key/i)).toBeInTheDocument();
+  });
+
+  it("saves the api key via onSetApiKey", async () => {
+    const onSetApiKey = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView {...baseProps({ onSetApiKey })} />);
+    fireEvent.change(screen.getByLabelText(/api key/i), { target: { value: "sk-xyz" } });
+    fireEvent.click(screen.getByRole("button", { name: /save key/i }));
+    await waitFor(() => expect(onSetApiKey).toHaveBeenCalledWith("sk-xyz"));
+  });
+
+  it("shows the git author section", () => {
+    render(<SettingsView {...baseProps()} />);
+    expect(screen.getByText(/git/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/author name/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/author email/i)).toBeInTheDocument();
+  });
+
+  it("lists projects and exposes remove", () => {
+    render(<SettingsView {...baseProps({ projects: [{ id: "p1", name: "Alpha", root_path: "/a", active_pipeline_id: null, created_at: 0, updated_at: 0 }] })} />);
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /remove/i })).toBeInTheDocument();
   });
 });
