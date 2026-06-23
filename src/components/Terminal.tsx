@@ -127,11 +127,11 @@ export function Terminal({ turns, contextLine, onSend, streaming = "" }: Termina
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
               placeholder="ask, inject, approve, brake, scale, anything…"
+              aria-label="terminal command input"
               style={{
                 flex: 1,
                 background: "transparent",
                 border: "none",
-                outline: "none",
                 color: "var(--text)",
                 fontFamily: "inherit",
                 fontSize: "inherit",

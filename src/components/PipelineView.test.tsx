@@ -34,7 +34,8 @@ describe("PipelineView", () => {
 
   it("renders each team with model + effort", () => {
     render(<PipelineView pipeline={pipeline} />);
-    expect(screen.getByText("Research")).toBeInTheDocument();
+    // "Research" appears in both the graph node and the form card.
+    expect(screen.getAllByText("Research").length).toBeGreaterThan(0);
     expect(screen.getByText(/claude-opus-4-7/)).toBeInTheDocument();
     expect(screen.getByText(/extended-high/)).toBeInTheDocument();
   });
@@ -51,8 +52,24 @@ describe("PipelineView", () => {
 
   it("renders escalations with triggers", () => {
     render(<PipelineView pipeline={pipeline} />);
-    expect(screen.getByText("needs-human")).toBeInTheDocument();
+    // "needs-human" appears in both the graph node and the escalation card.
+    expect(screen.getAllByText("needs-human").length).toBeGreaterThan(0);
     expect(screen.getByText(/attempts >= 3/)).toBeInTheDocument();
+  });
+
+  it("renders a read-only static graph honouring node roles + edges (Decision 2)", () => {
+    const p: Pipeline = {
+      id: "p", name: "Flow", description: "", schema_version: 1,
+      teams: [
+        { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { default: 1, max: 1 } },
+      ],
+      gates: [{ id: "gate-1", label: "Gate 1", downstream: "writer" }],
+      escalations: [], forks: [], joins: [],
+    };
+    const { container } = render(<PipelineView pipeline={p} />);
+    expect(screen.getByTestId("pipeline-graph")).toBeInTheDocument();
+    expect(container.querySelector('[data-node-role="gate"]')).not.toBeNull();
+    expect(container.querySelector('[data-edge-kind="forward"]')).not.toBeNull();
   });
 
   it("shows an empty-state when pipeline is null", () => {
@@ -73,9 +90,10 @@ describe("PipelineView", () => {
       joins: [{ id: "join-1", waits_for: ["lane-a", "lane-b"], downstream: "after" }],
     };
     render(<PipelineView pipeline={p} />);
-    expect(screen.getByText(/fork-1/)).toBeInTheDocument();
+    // fork-1 / join-1 now appear in both the graph and the form cards.
+    expect(screen.getAllByText(/fork-1/).length).toBeGreaterThan(0);
     expect(screen.getByText(/lanes: lane-a, lane-b/)).toBeInTheDocument();
-    expect(screen.getByText(/join-1/)).toBeInTheDocument();
+    expect(screen.getAllByText(/join-1/).length).toBeGreaterThan(0);
     expect(screen.getByText(/→ after/)).toBeInTheDocument();
   });
 

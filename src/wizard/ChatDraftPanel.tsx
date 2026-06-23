@@ -1,9 +1,11 @@
 import { type ReactNode, useState } from "react";
 import { bestEffortValidate, designSessionTurn, type DraftPipeline, type Step } from "../ipc/pipeline";
+import { Button } from "../components/ui/Button";
 
 interface Msg {
   role: "you" | "claude";
   text: string;
+  error?: boolean;
 }
 
 interface ChatDraftPanelProps {
@@ -37,7 +39,7 @@ export function ChatDraftPanel({ sessionId, step, draft, onDraftChange, renderDr
       setIssues(out.issues);
       onDraftChange(out.updated_draft);
     } catch (e) {
-      setMsgs((m) => [...m, { role: "claude", text: `[error] ${e instanceof Error ? e.message : String(e)}` }]);
+      setMsgs((m) => [...m, { role: "claude", text: `[error] ${e instanceof Error ? e.message : String(e)}`, error: true }]);
     } finally {
       setBusy(false);
     }
@@ -54,35 +56,53 @@ export function ChatDraftPanel({ sessionId, step, draft, onDraftChange, renderDr
     <div style={{ display: "flex", gap: "var(--sp-5)", height: "100%" }}>
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 280 }}>
         <div style={{ flex: 1, overflowY: "auto", border: "1px solid var(--border)", borderRadius: "var(--r-sm)", padding: "var(--sp-3)" }}>
+          {msgs.length === 0 && !busy && (
+            <div style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)", fontStyle: "italic" }}>
+              describe a change and the design session will update the draft.
+            </div>
+          )}
           {msgs.map((m, i) => (
             <div key={i} style={{ marginBottom: 8 }}>
-              <div style={{ color: "var(--text-3)", fontSize: 11 }}>{m.role}</div>
-              <div style={{ color: "var(--text)" }}>{m.text}</div>
+              <div style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)" }}>{m.role}</div>
+              <div
+                style={m.error ? { color: "var(--danger)" } : { color: "var(--text)" }}
+                role={m.error ? "alert" : undefined}
+              >
+                {m.text}
+              </div>
             </div>
           ))}
+          {busy && (
+            // Pending/streaming affordance while the turn is in flight (S2).
+            <div data-testid="chat-pending" style={{ marginBottom: 8 }}>
+              <div style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)" }}>claude</div>
+              <div className="abp-pulse" style={{ color: "var(--text-3)", fontStyle: "italic" }}>thinking…</div>
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
           <input
+            aria-label="refine this step"
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") send(); }}
             placeholder="refine this step…"
-            style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)" }}
+            style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit" }}
           />
-          <button onClick={send} disabled={busy} aria-label="send">Send</button>
+          <Button onClick={send} disabled={busy} aria-label="send">{busy ? "…" : "Send"}</Button>
         </div>
       </div>
       <div style={{ flex: 1, overflowY: "auto", minWidth: 280 }}>
         {issues.length > 0 && (
-          <div
+          <ul
             role="status"
             aria-label="validation issues"
-            style={{ marginBottom: "var(--sp-3)", padding: "var(--sp-2)", border: "1px solid var(--accent-bd)", background: "var(--accent-2)", borderRadius: "var(--r-sm)", color: "var(--text-2)", fontSize: 11 }}
+            style={{ listStyle: "none", margin: "0 0 var(--sp-3)", padding: "var(--sp-2)", border: "1px solid var(--warn)", background: "var(--warn-2)", borderRadius: "var(--r-sm)", color: "var(--text-2)", fontSize: "var(--ts-sm)" }}
           >
             {issues.map((iss, i) => (
-              <div key={i}>• {iss}</div>
+              <li key={i}>{iss}</li>
             ))}
-          </div>
+          </ul>
         )}
         {renderDraft(draft, handleManualEdit)}
       </div>

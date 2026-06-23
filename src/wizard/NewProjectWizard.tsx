@@ -1,5 +1,5 @@
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { kickoffGenerate, listSeedTemplates, seedTemplate, type DraftPipeline, type SeedTemplateSummary, type Step } from "../ipc/pipeline";
 import type { Project } from "../ipc/workspace";
 import { emptyDraft, WIZARD_STEPS, type WizardStep } from "./draft";
@@ -8,6 +8,8 @@ import { TeamsStep } from "./TeamsStep";
 import { PromptsStep } from "./PromptsStep";
 import { WiringStep } from "./WiringStep";
 import { ReviewStep } from "./ReviewStep";
+import { Button } from "../components/ui/Button";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 interface NewProjectWizardProps {
   open: boolean;
@@ -43,10 +45,24 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
     return () => { active = false; };
   }, [open]);
 
-  if (!open) return null;
-
   const idx = WIZARD_STEPS.indexOf(step);
   const go = (next: WizardStep) => setStep(next);
+
+  // Overlay-click / Escape discards all wizard state, so confirm when the draft
+  // is dirty (audit A3). Dirty = past the first step, or any basics typed.
+  const dirty =
+    step !== "basics" || name.trim() !== "" || root.trim() !== "" || description.trim() !== "";
+  const requestClose = useCallback(() => {
+    if (!dirty || window.confirm("Discard this draft project? Your changes will be lost.")) {
+      onClose();
+    }
+  }, [dirty, onClose]);
+
+  // Focus trap + Escape + restore-focus (audit A3). Escape routes through the
+  // dirty-confirm close.
+  const dialogRef = useModalA11y<HTMLDivElement>(open, requestClose);
+
+  if (!open) return null;
 
   async function generate() {
     setBusy(true);
@@ -74,11 +90,18 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
   }
 
   return (
-    <div role="dialog" aria-modal="true" style={overlay} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={panel}>
+    <div style={overlay} onClick={requestClose}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="New project"
+        onClick={(e) => e.stopPropagation()}
+        style={panel}
+      >
         <div style={{ display: "flex", gap: 8, marginBottom: "var(--sp-4)" }}>
           {WIZARD_STEPS.map((s) => (
-            <span key={s} style={{ color: s === step ? "var(--text)" : "var(--text-3)", fontSize: 12, textTransform: "capitalize" }}>{s}</span>
+            <span key={s} style={{ color: s === step ? "var(--text)" : "var(--text-3)", fontSize: "var(--ts-base)", textTransform: "capitalize" }}>{s}</span>
           ))}
         </div>
 
@@ -87,20 +110,22 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
             <label style={lbl}>Project name<input aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} style={inp} /></label>
             <label style={lbl}>Root path<input aria-label="Root path" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="~/projects/example" style={inp} /></label>
             <label style={lbl}>Describe what you're building<textarea aria-label="Describe what you're building" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} style={inp} /></label>
-            <button onClick={generate} disabled={busy || !name.trim() || !root.trim() || !description.trim()}>Generate</button>
+            <Button variant="primary" onClick={generate} disabled={busy || !name.trim() || !root.trim() || !description.trim()}>
+              {busy ? "Generating…" : "Generate"}
+            </Button>
             {templates.length > 0 && (
               <div style={{ marginTop: "var(--sp-4)" }}>
-                <div style={{ fontSize: 11, color: "var(--text-3)", marginBottom: "var(--sp-2)" }}>Or start from a template</div>
+                <div style={{ fontSize: "var(--ts-sm)", color: "var(--text-3)", marginBottom: "var(--sp-2)" }}>Or start from a template</div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {templates.map((t) => (
-                    <button
+                    <Button
                       key={t.id}
                       title={t.description}
                       onClick={() => startFromTemplate(t.id)}
                       disabled={busy || !name.trim() || !root.trim()}
                     >
                       {t.name}
-                    </button>
+                    </Button>
                   ))}
                 </div>
               </div>
@@ -110,7 +135,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
 
         {(step === "teams" || step === "prompts" || step === "wiring") && (
           <div style={{ height: 420 }}>
-            <h3 style={{ fontSize: 13, textTransform: "capitalize" }}>{step}</h3>
+            <h3 style={{ fontSize: "var(--ts-md)", textTransform: "capitalize" }}>{step}</h3>
             {step === "wiring" ? (
               // Wiring's draft view is the read-only viewer; chat still drives edits.
               <ChatDraftPanel
@@ -137,10 +162,10 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
         )}
 
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: "var(--sp-5)" }}>
-          <button onClick={onClose}>Cancel</button>
+          <Button variant="ghost" onClick={requestClose}>Cancel</Button>
           <div style={{ display: "flex", gap: 8 }}>
-            {idx > 0 && step !== "review" && <button onClick={() => go(WIZARD_STEPS[idx - 1])}>Back</button>}
-            {step !== "basics" && step !== "review" && <button onClick={() => go(WIZARD_STEPS[idx + 1])}>Next</button>}
+            {idx > 0 && step !== "review" && <Button onClick={() => go(WIZARD_STEPS[idx - 1])}>Back</Button>}
+            {step !== "basics" && step !== "review" && <Button onClick={() => go(WIZARD_STEPS[idx + 1])}>Next</Button>}
           </div>
         </div>
       </div>
@@ -148,7 +173,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
   );
 }
 
-const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 };
+const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "var(--scrim)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 };
 const panel: React.CSSProperties = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: "var(--sp-7)", minWidth: 720, maxWidth: 900 };
-const lbl: React.CSSProperties = { display: "block", fontSize: 11, color: "var(--text-3)", marginBottom: "var(--sp-3)" };
+const lbl: React.CSSProperties = { display: "block", fontSize: "var(--ts-sm)", color: "var(--text-3)", marginBottom: "var(--sp-3)" };
 const inp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit", fontSize: 12 };

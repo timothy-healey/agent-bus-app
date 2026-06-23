@@ -86,6 +86,34 @@ describe("CardDrawer", () => {
     expect(screen.getByText(/no log/i)).toBeInTheDocument();
   });
 
+  it("shows a loading skeleton in the live log while running with no output (S1)", () => {
+    render(
+      <CardDrawer task={task({ state: "running" })} artifactMarkdown="" logText="" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /live log/i }));
+    expect(screen.getByTestId("live-log").getAttribute("data-log-state")).toBe("loading");
+  });
+
+  it("shows a streaming caret in the live log while running with output (S1)", () => {
+    render(
+      <CardDrawer task={task({ state: "running" })} artifactMarkdown="" logText="working on it" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /live log/i }));
+    const log = screen.getByTestId("live-log");
+    expect(log.getAttribute("data-log-state")).toBe("streaming");
+    expect(log.textContent).toContain("working on it");
+  });
+
+  it("renders an error treatment when the log contains an error (S1)", () => {
+    render(
+      <CardDrawer task={task({ state: "gated" })} artifactMarkdown="" logText="[error] runner crashed" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /live log/i }));
+    const log = screen.getByTestId("live-log");
+    expect(log.getAttribute("data-log-state")).toBe("error");
+    expect(screen.getByRole("alert").textContent).toContain("runner crashed");
+  });
+
   it("shows an empty artifact hint when there is no markdown", () => {
     render(
       <CardDrawer task={task()} artifactMarkdown="" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />,

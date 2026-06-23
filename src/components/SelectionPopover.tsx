@@ -13,12 +13,12 @@ export function SelectionPopover({ quote, onAdd, onCancel }: SelectionPopoverPro
   const root: CSSProperties = {
     background: "var(--surface-3)",
     border: "1px solid var(--border-2)",
-    borderRadius: "var(--r-md)",
+    borderRadius: "var(--r-sm)",
     padding: "10px 12px",
-    boxShadow: "var(--shadow-card)",
+    boxShadow: "var(--shadow-popover)",
     width: 260,
     fontFamily: "inherit",
-    fontSize: 11.5,
+    fontSize: "var(--ts-sm)",
   };
   const label: CSSProperties = {
     fontSize: 10,
@@ -28,9 +28,9 @@ export function SelectionPopover({ quote, onAdd, onCancel }: SelectionPopoverPro
   const quoted: CSSProperties = {
     color: "var(--text-3)",
     fontFamily: "ui-sans-serif, system-ui, sans-serif",
-    fontSize: 11,
+    fontSize: "var(--ts-sm)",
     padding: "4px 6px",
-    borderLeft: "2px solid var(--accent)",
+    borderLeft: "1px solid var(--border)",
     background: "var(--bg-2)",
     marginBottom: 8,
   };
@@ -60,6 +60,8 @@ export function SelectionPopover({ quote, onAdd, onCancel }: SelectionPopoverPro
       <div style={quoted}>"{quote}"</div>
       <textarea
         autoFocus
+        aria-label="comment note"
+        placeholder="your note…"
         style={textarea}
         value={note}
         onChange={(e) => setNote(e.target.value)}

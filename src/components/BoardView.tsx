@@ -13,15 +13,19 @@ export interface BoardViewProps {
 }
 
 function laneHeaderStyle(lane: Lane): CSSProperties {
-  const accent = lane.kind !== "team";
+  // Only the gate lane earns the one accent (Decision 5): it is the truly
+  // actionable "needs you" lane. Other non-team lanes differentiate by weight.
+  const isGate = lane.kind === "gate";
+  const emphasized = lane.kind !== "team";
   return {
-    fontSize: 10,
-    color: accent ? "var(--accent)" : "var(--text-3)",
+    fontSize: "var(--ts-xs)",
+    color: isGate ? "var(--accent)" : emphasized ? "var(--text-2)" : "var(--text-3)",
+    fontWeight: emphasized ? 500 : 400,
     textTransform: "lowercase",
     letterSpacing: "0.04em",
     marginBottom: 8,
-    padding: accent ? "4px 8px" : "0 2px",
-    background: accent ? "var(--accent-2)" : "transparent",
+    padding: isGate ? "4px 8px" : "0 2px",
+    background: isGate ? "var(--accent-2)" : "transparent",
     borderRadius: "var(--r-sm)",
   };
 }

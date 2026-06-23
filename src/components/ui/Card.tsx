@@ -17,7 +17,7 @@ function shell(state: Task["state"]): CSSProperties {
       return {
         borderColor: "var(--accent-bd)",
         background: "var(--surface)",
-        boxShadow: "var(--shadow-card)",
+        boxShadow: "var(--shadow-needs-you)",
       };
     case "revising":
       return { borderColor: "var(--revise)", background: "var(--revise-2)" };

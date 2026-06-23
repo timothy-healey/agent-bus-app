@@ -21,15 +21,26 @@ describe("Button", () => {
     expect(onClick).not.toHaveBeenCalled();
   });
 
-  it("uses the accent background for the primary variant", () => {
+  it("uses the primary variant class (carries accent styling in CSS)", () => {
     render(<Button variant="primary">go</Button>);
     const btn = screen.getByRole("button", { name: /go/i });
-    expect(btn.style.background).toContain("--accent");
+    expect(btn.className).toContain("abp-btn-primary");
+    expect(btn.className).toContain("abp-btn");
   });
 
-  it("uses the danger colour for the danger variant", () => {
+  it("uses the danger variant class for the danger variant", () => {
     render(<Button variant="danger">reject</Button>);
     const btn = screen.getByRole("button", { name: /reject/i });
-    expect(btn.style.color).toContain("--danger");
+    expect(btn.className).toContain("abp-btn-danger");
+  });
+
+  it("applies the small-size modifier class", () => {
+    render(<Button size="sm">x</Button>);
+    expect(screen.getByRole("button", { name: /x/i }).className).toContain("abp-btn-sm");
+  });
+
+  it("forwards aria-label", () => {
+    render(<Button aria-label="save thing">x</Button>);
+    expect(screen.getByRole("button", { name: /save thing/i })).toBeInTheDocument();
   });
 });
