@@ -6,6 +6,13 @@ export interface UsageMeterProps {
   snapshot: UsageSnapshot | null;
 }
 
+// The one sanctioned gradient (DESIGN.md §Usage meter): --running -> --warn ->
+// --danger at 0% / 60% / 90% of the 100px track. The fill reveals it left-to-
+// right by width; the gradient itself is painted across the full track so the
+// colour at any fill width is the true band colour for that position.
+const GRADIENT =
+  "linear-gradient(90deg, var(--running) 0%, var(--warn) 60%, var(--danger) 90%)";
+
 export function UsageMeter({ snapshot }: UsageMeterProps) {
   const pct = snapshot ? Math.round(snapshot.window_pct * 100) : 0;
   const band = snapshot?.band ?? "safe";
@@ -15,6 +22,9 @@ export function UsageMeter({ snapshot }: UsageMeterProps) {
   return (
     <div
       data-testid="usage-meter"
+      tabIndex={0}
+      role="group"
+      aria-label={`usage ${pct}% of window`}
       style={{
         position: "relative",
         display: "flex",
@@ -29,8 +39,18 @@ export function UsageMeter({ snapshot }: UsageMeterProps) {
       }}
       className="usage-meter-hoverable"
     >
-      <div style={{ width: 100, height: 6, background: "var(--surface-3)", borderRadius: 3, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${Math.min(pct, 100)}%`, background: color }} />
+      <div
+        data-testid="usage-bar"
+        role="progressbar"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        style={{ width: 100, height: 6, background: "var(--surface-3)", borderRadius: 3, overflow: "hidden" }}
+      >
+        {/* Clip the full-track gradient to the current fill width. */}
+        <div style={{ height: "100%", width: `${Math.min(pct, 100)}%`, overflow: "hidden" }}>
+          <div data-testid="usage-bar-fill" style={{ height: "100%", width: 100, background: GRADIENT }} />
+        </div>
       </div>
 
       <div style={{ fontSize: 11, color: "var(--text-2)", display: "flex", alignItems: "center", gap: 6, fontVariantNumeric: "tabular-nums" }}>

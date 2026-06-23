@@ -33,4 +33,20 @@ describe("UsageMeter", () => {
     render(<UsageMeter snapshot={base} />);
     expect(screen.getByText("research")).toBeInTheDocument();
   });
+
+  it("paints the spec'd gradient fill, not a solid band (Decision 6)", () => {
+    render(<UsageMeter snapshot={base} />);
+    const fill = screen.getByTestId("usage-bar-fill");
+    expect(fill.style.background).toContain("linear-gradient");
+    expect(fill.style.background).toContain("--running");
+    expect(fill.style.background).toContain("--warn");
+    expect(fill.style.background).toContain("--danger");
+  });
+
+  it("is keyboard-reachable and exposes a progressbar role (A5)", () => {
+    render(<UsageMeter snapshot={base} />);
+    expect(screen.getByTestId("usage-meter").getAttribute("tabindex")).toBe("0");
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuenow")).toBe("47");
+  });
 });
