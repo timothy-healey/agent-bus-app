@@ -6,11 +6,14 @@ interface TerminalProps {
   turns: Turn[];
   contextLine: string;
   onSend: (input: string) => void;
+  /// Display-only live assistant prose streamed from the backend before the
+  /// authoritative turn lands. Rendered as a transient bubble; empty => hidden.
+  streaming?: string;
 }
 
 /// The always-present god terminal docked at the bottom. Collapsible to a thin
 /// bar (DESIGN.md). Max height 280px. Tool calls render as inline chips.
-export function Terminal({ turns, contextLine, onSend }: TerminalProps) {
+export function Terminal({ turns, contextLine, onSend, streaming = "" }: TerminalProps) {
   const [value, setValue] = useState("");
   const [collapsed, setCollapsed] = useState(false);
 
@@ -97,6 +100,15 @@ export function Terminal({ turns, contextLine, onSend }: TerminalProps) {
                 )}
               </div>
             ))}
+            {streaming && (
+              <div data-streaming="true" style={{ marginBottom: 10 }}>
+                <div style={{ color: "var(--text-3)", marginBottom: 2 }}>claude</div>
+                <div style={{ color: "var(--text)" }}>
+                  {streaming}
+                  <span style={{ color: "var(--accent)" }}>▍</span>
+                </div>
+              </div>
+            )}
           </div>
 
           <div
