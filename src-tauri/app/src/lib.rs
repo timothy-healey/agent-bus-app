@@ -481,6 +481,7 @@ pub fn run() {
 /// Spawn a polling worker loop per team. v1 runs one loop per team (concurrent
 /// workers per team is v1.1). Each iteration runs process_one_claim; on a
 /// settle it emits a `task.changed` event the frontend listens for.
+#[allow(clippy::too_many_arguments)]
 fn spawn_worker_loops(
     handle: tauri::AppHandle,
     pipeline: Arc<Pipeline>,

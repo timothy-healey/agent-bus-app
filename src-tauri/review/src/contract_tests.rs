@@ -1,9 +1,9 @@
 //! Serde contract regression tests for the Review IPC return types `Comment`,
 //! `VerdictMarker`, and the `CommentKind` enum. Lock the serialized JSON key set
-//! + enum strings against the TS interfaces. The existing tests in
-//! `comment.rs` assert individual field values but not the *exact* key set; these
-//! add the full-set assertion that catches an added / removed / renamed field.
-//! Additive test code only.
+//! plus enum strings against the TS interfaces. The existing tests in `comment.rs`
+//! assert individual field values but not the exact key set; these add the
+//! full-set assertion that catches an added, removed, or renamed field. Additive
+//! test code only.
 
 #![cfg(test)]
 
