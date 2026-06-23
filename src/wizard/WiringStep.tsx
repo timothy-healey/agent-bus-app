@@ -2,7 +2,7 @@ import type { DraftPipeline, Pipeline } from "../ipc/pipeline";
 import { PipelineView } from "../components/PipelineView";
 
 /// Adapt a DraftPipeline to the Pipeline shape the read-only viewer expects:
-/// inline prompt bodies become placeholder paths; gates are empty (D1).
+/// inline prompt bodies become placeholder paths; gates carry through (W3).
 export function draftToPipeline(d: DraftPipeline): Pipeline {
   return {
     id: d.id || "(draft)",
@@ -10,7 +10,7 @@ export function draftToPipeline(d: DraftPipeline): Pipeline {
     description: d.description,
     schema_version: d.schema_version,
     teams: d.teams.map((t) => ({ ...t, prompt: `prompts/${t.id}.md` })),
-    gates: [],
+    gates: d.gates,
     escalations: d.escalations,
     forks: d.forks,
     joins: d.joins,
