@@ -288,6 +288,8 @@ async fn settle_and_route(
             downstream: join.downstream.clone(),
             expected_lanes: fork.lanes.clone(),
             completed: false,
+            parent_group_id: None,
+            parent_lane: None,
         };
         ctx.fanout.create(&group).await?;
         let now = now_unix();
