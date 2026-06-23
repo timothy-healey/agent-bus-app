@@ -22,6 +22,7 @@ Seven contexts. Six suppliers + one customer.
 - **Review** *(supplier)* — reading artifacts (specs, plans, critiques), commenting inline, composing revisions, approving/rejecting at gates. Anti-clockwise from Runtime — the human-action surface.
 - **Usage Telemetry** *(supplier)* — tracking token consumption from two sources (CC transcripts + our own runner output), computing the rolling 5h window, deciding when to set the brake.
 - **Runners (ACL)** *(supplier)* — anti-corruption layer to Claude. Translates *(task + scope + prompt)* into Claude's idiom (CLI flags or API params) and Claude's responses back into our idiom (verdicts, artifacts, usage events).
+- **LLM Chat (ACL)** *(supplier)* — anti-corruption layer for *multi-turn* Claude dialogue. Translates a stable `dialogue_id` + system framing + user message into Claude's chat idiom (`claude --print --output-format stream-json [--resume]`) and Claude's responses back into our idiom (assistant reply text + usage). Session continuity (`session_id`/`--resume`) is sealed inside the layer and never crosses the boundary. Consumed by Conversational Control (the god terminal) and Pipeline Authoring (the wizard's Design Session). Distinct from Runners, which stays the one-shot, verdict-shaped *worker* ACL.
 - **Workspace** *(supplier)* — project setup, filesystem layout, path-resolution kernel. Provides the `${project}`, `${target_repo}`, `${task_id}` variables that every other context consumes.
 - **Conversational Control** *(customer of all six)* — the god terminal. A persistent Claude session with tool-calls matching each supplier's published Open Host Service. Owns the Conversation aggregate (turns, tool-calls, history budget, session persistence).
 
@@ -65,6 +66,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Gate** — a node where execution pauses until the operator approves/revises/rejects
 - **Escalation** — a sink for tasks that can't proceed (≥3 revises or explicit reject)
 - **Route** — an edge: `on_approve` / `on_revise` / `on_reject` pointing at another node
+- **Design Session** — an ephemeral authoring dialogue used to design a pipeline, conducted over the LLM Chat ACL; distinct from the terminal's `Conversation` aggregate (one `dialogue_id` per wizard step). *(Full definition lands with sub-project 3 — the wizard.)*
 
 ### Runtime
 - **Task** — a unit of work moving through the pipeline; identified by `task_id`
