@@ -10,6 +10,7 @@
     "review":                  { "module": "review",               "paths": ["src-tauri/review/**"],             "publicModules": ["api"] },
     "usage-telemetry":         { "module": "usage_telemetry",      "paths": ["src-tauri/usage_telemetry/**"],    "publicModules": ["api"] },
     "runners":                 { "module": "runners",              "paths": ["src-tauri/runners/**"],            "publicModules": ["api"] },
+    "llm-chat":                { "module": "llm_chat",             "paths": ["src-tauri/llm_chat/**"],           "publicModules": ["chat"] },
     "workspace":               { "module": "workspace",            "paths": ["src-tauri/workspace/**"],          "publicModules": ["api"] },
     "conversational-control":  { "module": "conversational_control","paths": ["src-tauri/conversational_control/**"], "publicModules": ["api"] }
   }
