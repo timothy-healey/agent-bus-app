@@ -14,7 +14,7 @@ describe("pipeline ipc", () => {
   });
 
   it("kickoffGenerate passes session_id + description", async () => {
-    const draft = { id: "p", name: "P", description: "d", schema_version: 2, teams: [], forks: [], joins: [], escalations: [] };
+    const draft = { id: "p", name: "P", description: "d", schema_version: 2, teams: [], gates: [], forks: [], joins: [], escalations: [] };
     invokeMock.mockResolvedValueOnce(draft);
     const result = await kickoffGenerate("s1", "build a flow");
     expect(invokeMock).toHaveBeenCalledWith("kickoff_generate_cmd", { session_id: "s1", description: "build a flow" });

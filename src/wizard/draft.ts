@@ -14,6 +14,7 @@ export function emptyDraft(): DraftPipeline {
     teams: [],
     forks: [],
     joins: [],
+    gates: [],
     escalations: [],
   };
 }

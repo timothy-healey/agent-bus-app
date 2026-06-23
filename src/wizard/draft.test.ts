@@ -9,6 +9,10 @@ describe("wizard draft helpers", () => {
     expect(d.schema_version).toBeGreaterThanOrEqual(2);
   });
 
+  it("emptyDraft seeds an empty gates array", () => {
+    expect(emptyDraft().gates).toEqual([]);
+  });
+
   it("WIZARD_STEPS lists the five steps in order", () => {
     expect(WIZARD_STEPS).toEqual(["basics", "teams", "prompts", "wiring", "review"]);
   });
