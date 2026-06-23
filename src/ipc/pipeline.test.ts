@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { listTemplates, listPipelines, loadPipeline } from "./pipeline";
+import { listPipelines, loadPipeline, kickoffGenerate, designSessionTurn } from "./pipeline";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -13,11 +13,22 @@ describe("pipeline ipc", () => {
     invokeMock.mockReset();
   });
 
-  it("listTemplates calls pipeline_list_templates", async () => {
-    invokeMock.mockResolvedValueOnce([{ id: "ddd-spec-plan-impl", name: "DDD" }]);
-    const result = await listTemplates();
-    expect(invokeMock).toHaveBeenCalledWith("pipeline_list_templates");
-    expect(result[0].id).toBe("ddd-spec-plan-impl");
+  it("kickoffGenerate passes session_id + description", async () => {
+    const draft = { id: "p", name: "P", description: "d", schema_version: 2, teams: [], forks: [], joins: [], escalations: [] };
+    invokeMock.mockResolvedValueOnce(draft);
+    const result = await kickoffGenerate("s1", "build a flow");
+    expect(invokeMock).toHaveBeenCalledWith("kickoff_generate_cmd", { session_id: "s1", description: "build a flow" });
+    expect(result.id).toBe("p");
+  });
+
+  it("designSessionTurn passes step + draft + user_message and returns prose", async () => {
+    const draft = { id: "p", name: "P", description: "", schema_version: 2, teams: [], forks: [], joins: [], escalations: [] };
+    invokeMock.mockResolvedValueOnce({ reply_text: "ok", updated_draft: draft });
+    const out = await designSessionTurn("s1", "teams", draft, "add a team");
+    expect(invokeMock).toHaveBeenCalledWith("design_session_turn_cmd", {
+      session_id: "s1", step: "teams", draft, user_message: "add a team",
+    });
+    expect(out.reply_text).toBe("ok");
   });
 
   it("listPipelines passes project_root", async () => {

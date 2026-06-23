@@ -35,3 +35,17 @@ export async function readArtifact(
     path,
   });
 }
+
+export async function writeProjectPipeline(
+  projectId: string,
+  yamlRelPath: string,
+  pipelineYaml: string,
+  prompts: [string, string][],
+): Promise<void> {
+  await invoke<void>("write_project_pipeline", {
+    project_id: projectId,
+    yaml_rel_path: yamlRelPath,
+    pipeline_yaml: pipelineYaml,
+    prompts,
+  });
+}
