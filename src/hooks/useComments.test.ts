@@ -4,11 +4,13 @@ import { renderHook, waitFor, act } from "@testing-library/react";
 const listMock = vi.fn();
 const addMock = vi.fn();
 const delMock = vi.fn();
+const reanchorMock = vi.fn();
 
 vi.mock("../ipc/review", () => ({
   listComments: (...a: unknown[]) => listMock(...a),
   addComment: (...a: unknown[]) => addMock(...a),
   deleteComment: (...a: unknown[]) => delMock(...a),
+  reanchorComments: (...a: unknown[]) => reanchorMock(...a),
 }));
 
 import { useComments } from "./useComments";
@@ -18,6 +20,7 @@ describe("useComments", () => {
     listMock.mockReset();
     addMock.mockReset();
     delMock.mockReset();
+    reanchorMock.mockReset();
   });
 
   it("loads comments for the task on mount", async () => {
@@ -60,5 +63,30 @@ describe("useComments", () => {
     });
     expect(delMock).toHaveBeenCalledWith("c1");
     await waitFor(() => expect(result.current.comments).toHaveLength(0));
+  });
+
+  it("reanchored falls back to status open at stored offset with no version markdown", async () => {
+    listMock.mockResolvedValueOnce([
+      { id: "c1", anchor_offset: 5, note: "n", kind: "inline" },
+    ]);
+    const { result } = renderHook(() => useComments("T-1", "a.md"));
+    await waitFor(() => expect(result.current.reanchored).toHaveLength(1));
+    expect(result.current.reanchored[0].status).toBe("open");
+    expect(result.current.reanchored[0].effective_offset).toBe(5);
+    expect(reanchorMock).not.toHaveBeenCalled();
+  });
+
+  it("reanchored uses reanchorComments when version markdown is provided", async () => {
+    listMock.mockResolvedValueOnce([
+      { id: "c1", anchor_offset: 5, note: "n", kind: "inline" },
+    ]);
+    reanchorMock.mockResolvedValueOnce([
+      { id: "c1", anchor_offset: 5, note: "n", kind: "inline", status: "addressed", effective_offset: 0 },
+    ]);
+    const { result } = renderHook(() =>
+      useComments("T-1", "a.md", "<!-- addressed: c1 -->"),
+    );
+    await waitFor(() => expect(result.current.reanchored[0]?.status).toBe("addressed"));
+    expect(reanchorMock).toHaveBeenCalledWith("T-1", "<!-- addressed: c1 -->");
   });
 });
