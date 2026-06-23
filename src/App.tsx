@@ -19,6 +19,7 @@ import { useUsage } from "./hooks/useUsage";
 import { setBudget, setAutoMeter } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
 import { useConversation } from "./hooks/useConversation";
+import { useTaskLog } from "./hooks/useTaskLog";
 
 export default function App() {
   const { projects, reload } = useProjects();
@@ -29,6 +30,7 @@ export default function App() {
   const activeProject: Project | null = projects[0] ?? null;
 
   const { tasks, reload: reloadTasks } = useTasks();
+  const liveLog = useTaskLog();
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   // A lineage click overrides which artifact the pane shows (D5: single pane).
   const [lineagePath, setLineagePath] = useState<string | null>(null);
@@ -188,6 +190,7 @@ export default function App() {
           <CardDrawer
             task={openTask}
             artifactMarkdown={artifactMarkdown}
+            logText={liveLog.logFor(openTask.id)}
             reviseTarget={reviseTargetFor(openTask)}
             onOpenArtifact={setLineagePath}
             onApprove={handleApprove}
