@@ -76,6 +76,14 @@ pub struct InvocationRequest {
     pub settings_path: String,
     /// Directories the runner should grant via --add-dir.
     pub add_dirs: Vec<String>,
+    /// **EXPERIMENTAL (S3) · macOS-only · CLI-runner-only.** When `Some`, the CLI
+    /// runner wraps the `claude` subprocess in `sandbox-exec -p <profile>`.
+    /// CLI-shaped data owned by the Runners ACL — the SBPL idiom never crosses
+    /// the `Runner` trait outward: Runtime sets only the `PoolContext.sandbox`
+    /// bool and never reads this string. `None` (the default) = unchanged
+    /// behavior. The AnthropicApiRunner ignores it (no subprocess to confine).
+    /// Live confinement is structural-only (unverified) — NOT a proven boundary.
+    pub sandbox_profile: Option<String>,
 }
 
 /// A display-only log sink. The streaming worker path forwards each assistant
@@ -161,6 +169,7 @@ mod tests {
             task_id: "T".into(), team_id: "t".into(), model: "m".into(),
             thinking_budget: 0, system_prompt: String::new(), user_message: String::new(),
             settings_path: String::new(), add_dirs: vec![],
+            sandbox_profile: None,
         };
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let s = seen.clone();

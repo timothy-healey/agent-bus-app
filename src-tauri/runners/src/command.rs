@@ -34,6 +34,22 @@ pub fn build_args(req: &InvocationRequest) -> Vec<String> {
     args
 }
 
+/// The macOS sandbox launcher binary. Apple-deprecated but functional.
+pub const SANDBOX_BIN: &str = "sandbox-exec";
+
+/// **EXPERIMENTAL · macOS-only.** Wrap a full argv (program + args) in
+/// `sandbox-exec -p <profile>` so the program runs confined by the given SBPL
+/// profile. Pure argv transform — does NOT spawn anything. Live confinement is
+/// unverified; this only constructs the command line.
+pub fn sandbox_wrap(profile: &str, argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len() + 3);
+    out.push(SANDBOX_BIN.to_string());
+    out.push("-p".to_string());
+    out.push(profile.to_string());
+    out.extend(argv.iter().cloned());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,6 +64,7 @@ mod tests {
             user_message: "Investigate topic X".into(),
             settings_path: "/p/.agent-bus/runtime/T-1-research-1700.settings.json".into(),
             add_dirs: vec!["/repo".into(), "/p/artifacts/analyses".into()],
+            sandbox_profile: None,
         }
     }
 
@@ -81,6 +98,17 @@ mod tests {
         assert!(args[s_i + 1].ends_with("T-1-research-1700.settings.json"));
         let p_i = args.iter().position(|a| a == "--permission-mode").unwrap();
         assert_eq!(args[p_i + 1], "acceptEdits");
+    }
+
+    #[test]
+    fn sandbox_wrap_prefixes_sandbox_exec_and_preserves_argv() {
+        let inner = vec!["claude".to_string(), "--print".to_string(), "hi".to_string()];
+        let wrapped = sandbox_wrap("(version 1)(deny default)", &inner);
+        assert_eq!(wrapped[0], "sandbox-exec");
+        assert_eq!(wrapped[1], "-p");
+        assert_eq!(wrapped[2], "(version 1)(deny default)");
+        // the original argv follows verbatim
+        assert_eq!(&wrapped[3..], &inner[..]);
     }
 
     #[test]
