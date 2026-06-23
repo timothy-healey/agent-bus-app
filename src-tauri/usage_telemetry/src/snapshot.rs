@@ -66,6 +66,9 @@ pub struct UsageSnapshot {
     pub tokens_by_task: HashMap<String, u64>,
     /// Whether the brake is currently on (passed in from Runtime by the root).
     pub braked: bool,
+    /// Whether the reactive auto-meter brake is enabled (mirrors config; lets
+    /// the UI render the Settings toggle + meter state). R2.
+    pub auto_meter_enabled: bool,
 }
 
 /// Assemble a snapshot. `braked` is Runtime's current brake state (the root
@@ -104,6 +107,7 @@ pub async fn compute_snapshot(
         by_team,
         tokens_by_task,
         braked,
+        auto_meter_enabled: cfg.auto_meter_enabled,
     })
 }
 
@@ -151,6 +155,19 @@ mod tests {
         assert_eq!(snap.by_team, vec![TeamSlice { team_id: "research".into(), tokens: 120 }]);
         assert_eq!(snap.tokens_by_task.get("T-1"), Some(&120));
         assert!(!snap.braked);
+    }
+
+    #[tokio::test]
+    async fn snapshot_reflects_auto_meter_enabled_flag() {
+        let pool = fresh_pool().await;
+        let cc = CcUsageStore::new(pool.clone());
+        let worker = WorkerUsageStore::new(pool.clone());
+        let cfg = UsageConfig { auto_meter_enabled: true, ..UsageConfig::default() };
+        let snap = compute_snapshot(&cc, &worker, &cfg, false, 1000).await.unwrap();
+        assert!(snap.auto_meter_enabled);
+        let off = UsageConfig { auto_meter_enabled: false, ..UsageConfig::default() };
+        let snap_off = compute_snapshot(&cc, &worker, &off, false, 1000).await.unwrap();
+        assert!(!snap_off.auto_meter_enabled);
     }
 
     #[tokio::test]

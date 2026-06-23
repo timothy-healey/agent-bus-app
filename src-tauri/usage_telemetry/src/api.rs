@@ -73,6 +73,26 @@ pub async fn usage_set_budget(
     usage_snapshot(state).await
 }
 
+/// Write the auto-meter enable flag to the config row (R2). Pure DB write —
+/// the brake STATE stays Runtime's; the root's sweep reads this each tick.
+pub async fn set_auto_meter_inner(pool: &SqlitePool, enabled: bool) -> Result<(), String> {
+    sqlx::query("UPDATE usage_config SET auto_meter_enabled = ? WHERE id = 1")
+        .bind(if enabled { 1 } else { 0 })
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn usage_set_auto_meter(
+    state: tauri::State<'_, UsageState>,
+    enabled: bool,
+) -> Result<UsageSnapshot, String> {
+    set_auto_meter_inner(&state.pool, enabled).await?;
+    usage_snapshot(state).await
+}
+
 /// OHS contract — consumed by Conversational Control (Plan 6).
 pub fn tools() -> Vec<ToolSpec> {
     let ctx = "usage-telemetry";
@@ -87,6 +107,12 @@ pub fn tools() -> Vec<ToolSpec> {
             name: "usage_set_budget".into(),
             description: "Set the rolling-window token budget (the meter's denominator).".into(),
             input_schema: json!({ "type": "object", "properties": { "budget": { "type": "integer" } }, "required": ["budget"] }),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "usage_set_auto_meter".into(),
+            description: "Enable or disable the reactive auto-meter brake (trips the system brake when the usage window crosses the threshold).".into(),
+            input_schema: json!({ "type": "object", "properties": { "enabled": { "type": "boolean" } }, "required": ["enabled"] }),
             supplier_context: ctx.into(),
         },
     ]
@@ -120,6 +146,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(load_config(&pool).await.window_budget, 5_000_000);
+    }
+
+    #[tokio::test]
+    async fn set_auto_meter_persists_to_config() {
+        let pool = fresh_pool().await;
+        assert!(!load_config(&pool).await.auto_meter_enabled);
+        set_auto_meter_inner(&pool, true).await.unwrap();
+        assert!(load_config(&pool).await.auto_meter_enabled);
+        set_auto_meter_inner(&pool, false).await.unwrap();
+        assert!(!load_config(&pool).await.auto_meter_enabled);
+    }
+
+    #[test]
+    fn tools_include_set_auto_meter() {
+        let t = tools();
+        assert!(t.iter().any(|s| s.name == "usage_set_auto_meter"));
     }
 
     #[test]

@@ -33,6 +33,7 @@ fn full_snapshot() -> UsageSnapshot {
         by_team: vec![TeamSlice { team_id: "research".into(), tokens: 120 }],
         tokens_by_task,
         braked: false,
+        auto_meter_enabled: false,
     }
 }
 
@@ -56,6 +57,7 @@ fn usage_snapshot_key_set_matches_ts() {
             "by_team",
             "tokens_by_task",
             "braked",
+            "auto_meter_enabled",
         ]),
     );
     assert_eq!(v["band"], Value::String("warn".into()));
