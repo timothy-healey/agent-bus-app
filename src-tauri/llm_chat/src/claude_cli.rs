@@ -4,10 +4,10 @@
 //! whole runner is unit-tested without a live `claude`. The captured session id
 //! is recorded internally and dropped before returning (F3).
 
-use crate::chat::{ChatError, ChatReply, ChatRequest, ChatRunner};
+use crate::chat::{ChatError, ChatReply, ChatRequest, ChatRunner, DeltaSink};
 use crate::command::{build_chat_args, CLAUDE_BIN};
 use crate::session::SessionMap;
-use crate::stream_json::parse_chat_stream;
+use crate::stream_json::parse_chat_stream_streaming;
 use async_trait::async_trait;
 
 /// Produces the raw stream-json stdout for a given argv. Async-free + boxed so
@@ -41,21 +41,51 @@ impl ClaudeChatRunner {
         Self { spawn, sessions: SessionMap::new() }
     }
 
-    /// Spawn once with the given resume option, parse, and on success record the
-    /// captured session under `dialogue_id`. The session id is dropped here — it
-    /// never reaches the returned ChatReply (F3).
+    /// Spawn once with the given resume option, parse (forwarding any assistant
+    /// prose fragments to `forward`), and on success record the captured session
+    /// under `dialogue_id`. The session id is dropped here — it never reaches the
+    /// returned ChatReply (F3). A no-op `forward` means no deltas (identical
+    /// result to the old whole-buffer parse — proven by stream_json tests).
     fn run_once(
         &self,
         req: &ChatRequest,
         resume: Option<&str>,
+        forward: &mut dyn FnMut(&str),
     ) -> Result<ChatReply, ChatError> {
         let args = build_chat_args(req, resume);
         let stdout = (self.spawn)(&args)?;
-        let (reply, session_id) = parse_chat_stream(&stdout, &req.model)?;
+        let (reply, session_id) = parse_chat_stream_streaming(&stdout, &req.model, forward)?;
         if let Some(sid) = session_id {
             self.sessions.record(&req.dialogue_id, &sid);
         }
         Ok(reply)
+    }
+
+    /// The D6 lost-session fallback, defined ONCE (vet F2): a resumed turn that
+    /// yields no parseable result is treated as a dead session — clear it and
+    /// retry once fresh. RateLimited / Spawn are NOT lost-session conditions and
+    /// propagate as-is. Both `chat` (no forwarder) and `chat_stream` (sink
+    /// forwarder) route through here, so the streaming and non-streaming paths
+    /// can never drift on session handling.
+    fn chat_with_retry(
+        &self,
+        req: &ChatRequest,
+        forward: &mut dyn FnMut(&str),
+    ) -> Result<ChatReply, ChatError> {
+        let resume = self.sessions.get(&req.dialogue_id);
+        match self.run_once(req, resume.as_deref(), forward) {
+            Ok(reply) => Ok(reply),
+            Err(err) => {
+                let was_resumed = resume.is_some();
+                let recoverable = matches!(err, ChatError::NoResult | ChatError::Other(_));
+                if was_resumed && recoverable {
+                    self.sessions.clear(&req.dialogue_id);
+                    self.run_once(req, None, forward)
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 }
 
@@ -68,24 +98,13 @@ impl Default for ClaudeChatRunner {
 #[async_trait]
 impl ChatRunner for ClaudeChatRunner {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatReply, ChatError> {
-        let resume = self.sessions.get(&req.dialogue_id);
-        match self.run_once(req, resume.as_deref()) {
-            Ok(reply) => Ok(reply),
-            // Lost-session fallback (D6): a resumed turn that yields no parseable
-            // result is treated as a dead session — clear it and retry once
-            // fresh. RateLimited / Spawn are NOT lost-session conditions and
-            // propagate as-is.
-            Err(err) => {
-                let was_resumed = resume.is_some();
-                let recoverable = matches!(err, ChatError::NoResult | ChatError::Other(_));
-                if was_resumed && recoverable {
-                    self.sessions.clear(&req.dialogue_id);
-                    self.run_once(req, None)
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        // No delta forwarding for the plain path.
+        self.chat_with_retry(req, &mut |_d: &str| {})
+    }
+
+    async fn chat_stream(&self, req: &ChatRequest, sink: &DeltaSink) -> Result<ChatReply, ChatError> {
+        let mut forward = |d: &str| sink(d);
+        self.chat_with_retry(req, &mut forward)
     }
 }
 
@@ -173,6 +192,38 @@ mod tests {
         let _ = runner.chat(&req("first")).await.unwrap(); // establishes sess-first
         let reply = runner.chat(&req("second")).await.unwrap(); // resume fails, retries fresh
         assert_eq!(reply.text, "Yes — I injected the topic; it is now task T-043.");
+    }
+
+    #[tokio::test]
+    async fn chat_stream_forwards_prose_deltas_and_returns_final_reply() {
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |_args| Ok(FIRST.to_string())));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s = seen.clone();
+        let sink: crate::chat::DeltaSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let reply = runner.chat_stream(&req("how is T-042?"), &sink).await.unwrap();
+        assert_eq!(reply.text, "T-042 is in the design stage; the spec is awaiting review.");
+        assert_eq!(reply.usage.input_tokens, 900);
+        assert!(!seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_stream_records_session_like_chat() {
+        let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(vec![]));
+        let s = seen.clone();
+        let n = Arc::new(Mutex::new(0usize));
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args| {
+            s.lock().unwrap().push(args.to_vec());
+            let mut k = n.lock().unwrap();
+            let out = if *k == 0 { FIRST } else { FOLLOW };
+            *k += 1;
+            Ok(out.to_string())
+        }));
+        let noop: crate::chat::DeltaSink = Box::new(|_d: &str| {});
+        let _ = runner.chat_stream(&req("first"), &noop).await.unwrap();
+        let _ = runner.chat_stream(&req("second"), &noop).await.unwrap();
+        let calls = seen.lock().unwrap();
+        let r = calls[1].iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(calls[1][r + 1], "sess-first");
     }
 
     #[tokio::test]
