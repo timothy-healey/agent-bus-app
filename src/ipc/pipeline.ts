@@ -16,6 +16,22 @@ export interface RunnerConfig {
   api_key_env?: string | null;
 }
 
+/** A team's runner as authored (R5): every field optional so a team can override
+ *  just the model and inherit the rest from Pipeline.defaults. */
+export interface TeamRunnerConfig {
+  kind?: RunnerKind | null;
+  model?: string | null;
+  effort?: EffortMode | null;
+  api_key_env?: string | null;
+}
+
+/** Pipeline-level runner defaults teams inherit when they omit their own (R5). */
+export interface PipelineDefaults {
+  default_runner?: RunnerKind | null;
+  default_model?: string | null;
+  default_effort?: EffortMode | null;
+}
+
 export interface Scope {
   reads: string[];
   writes: string[];
@@ -37,7 +53,10 @@ export interface Team {
   id: string;
   name: string;
   prompt: string;
-  runner: RunnerConfig;
+  // Authored form is a partial override (R5); after pipeline_load (which resolves
+  // pipeline defaults backend-side) this is the full RunnerConfig. Optional on the
+  // wire because an authored team may omit it to inherit the pipeline default.
+  runner?: TeamRunnerConfig | null;
   scope: Scope;
   outputs: Routes;
   workers: Workers;
@@ -70,6 +89,7 @@ export interface Pipeline {
   name: string;
   description: string;
   schema_version: number;
+  defaults?: PipelineDefaults | null;
   teams: Team[];
   gates: Gate[];
   escalations: Escalation[];
