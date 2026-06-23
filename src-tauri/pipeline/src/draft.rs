@@ -6,7 +6,7 @@
 //! its to_pipeline()) becomes a `Pipeline`. Prompt text is held inline as
 //! `prompt_body`; to_pipeline() converts it to a `prompts/<id>.md` path.
 
-use crate::model::{Escalation, Fork, Join, Routes, RunnerConfig, Scope, Workers, SCHEMA_VERSION};
+use crate::model::{Escalation, Fork, Join, Pipeline, Routes, RunnerConfig, Scope, Team, Workers, SCHEMA_VERSION};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde::{Deserialize, Serialize};
 
@@ -243,6 +243,60 @@ pub fn best_effort_validate(draft: &DraftPipeline) -> Vec<String> {
     issues
 }
 
+/// The relative prompt path for a team (`prompts/<id>.md`). Single source of the
+/// path convention so to_pipeline() and prompt_files() agree.
+fn prompt_path(team_id: &str) -> String {
+    format!("prompts/{team_id}.md")
+}
+
+impl DraftPipeline {
+    /// Convert to a real `Pipeline` (Decision D1/D5). Each team's inline
+    /// `prompt_body` becomes a `prompts/<id>.md` path; gates are always empty for
+    /// a wizard-built pipeline. The result is NOT yet validated — the caller runs
+    /// hard validation (validate::validate) before writing anything.
+    pub fn to_pipeline(&self) -> Pipeline {
+        Pipeline {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            schema_version: self.schema_version,
+            teams: self
+                .teams
+                .iter()
+                .map(|t| Team {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                    prompt: prompt_path(&t.id),
+                    runner: t.runner.clone(),
+                    scope: t.scope.clone(),
+                    outputs: t.outputs.clone(),
+                    workers: t.workers.clone(),
+                })
+                .collect(),
+            gates: vec![],
+            escalations: self.escalations.clone(),
+            forks: self.forks.clone(),
+            joins: self.joins.clone(),
+        }
+    }
+}
+
+/// The per-team prompt files to write: `("prompts/<id>.md", body)` for every
+/// team. Workspace writes these (vet F1); Pipeline Authoring only produces them.
+pub fn prompt_files(draft: &DraftPipeline) -> Vec<(String, String)> {
+    draft
+        .teams
+        .iter()
+        .map(|t| (prompt_path(&t.id), t.prompt_body.clone()))
+        .collect()
+}
+
+/// Serialize a validated Pipeline to YAML (reuses serde_yaml, the same shape the
+/// PipelineStore writes). Pipeline Authoring serializes; Workspace writes (F1).
+pub fn to_yaml(pipeline: &Pipeline) -> Result<String, serde_yaml::Error> {
+    serde_yaml::to_string(pipeline)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +434,54 @@ mod tests {
         d.teams.push(a);
         d.teams.push(b);
         assert_eq!(best_effort_validate(&d), Vec::<String>::new());
+    }
+
+    fn complete_draft() -> DraftPipeline {
+        let mut d = DraftPipeline::empty();
+        d.id = "demo".into();
+        d.name = "Demo".into();
+        d.description = "A two-team demo".into();
+        let mut a = DraftTeam::new("research", "Research");
+        a.prompt_body = "You investigate the repo.".into();
+        a.outputs.on_approve = Some("writers".into());
+        let mut b = DraftTeam::new("writers", "Writers");
+        b.prompt_body = "You write the spec.".into();
+        d.teams.push(a);
+        d.teams.push(b);
+        d
+    }
+
+    #[test]
+    fn to_pipeline_maps_prompt_body_to_a_prompts_path() {
+        let p = complete_draft().to_pipeline();
+        assert_eq!(p.id, "demo");
+        assert_eq!(p.teams[0].prompt, "prompts/research.md");
+        assert_eq!(p.teams[1].prompt, "prompts/writers.md");
+        // gates is always empty for a draft-built pipeline (D1)
+        assert!(p.gates.is_empty());
+    }
+
+    #[test]
+    fn to_pipeline_then_hard_validate_passes_for_a_complete_draft() {
+        let p = complete_draft().to_pipeline();
+        assert_eq!(crate::validate::validate(&p), Ok(()));
+    }
+
+    #[test]
+    fn prompt_files_are_team_id_addressed_markdown() {
+        let files = prompt_files(&complete_draft());
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&("prompts/research.md".to_string(), "You investigate the repo.".to_string())));
+        assert!(files.contains(&("prompts/writers.md".to_string(), "You write the spec.".to_string())));
+    }
+
+    #[test]
+    fn to_yaml_round_trips_through_parse() {
+        let p = complete_draft().to_pipeline();
+        let yaml = to_yaml(&p).unwrap();
+        let back = crate::parse::parse_pipeline(&yaml).unwrap();
+        assert_eq!(back.id, "demo");
+        assert_eq!(back.teams.len(), 2);
+        assert_eq!(back.teams[0].prompt, "prompts/research.md");
     }
 }
