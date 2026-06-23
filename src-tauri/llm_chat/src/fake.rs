@@ -2,29 +2,66 @@
 //! order (clamping to the last when exhausted) and records every ChatRequest it
 //! received, so tests can assert what was asked without a live `claude`.
 
-use crate::chat::{ChatError, ChatReply, ChatRequest, ChatRunner};
+use crate::chat::{ChatError, ChatReply, ChatRequest, ChatRunner, DeltaSink};
 use async_trait::async_trait;
 use std::sync::Mutex;
 
 /// A ChatRunner test double. Either returns seeded replies in order (clamping to
 /// the last when exhausted) or always errors with a seeded ChatError. Records
-/// every request for assertions.
+/// every request for assertions. Optionally seeds per-call scripted prose deltas
+/// that `chat_stream` forwards before returning that call's reply.
 pub struct FakeChatRunner {
     replies: Vec<ChatReply>,
+    /// Per-call scripted prose deltas to forward via chat_stream before returning
+    /// that call's reply. A call with no entry (index >= len) forwards nothing.
+    /// Indexed by the same cursor as `replies`.
+    deltas: Vec<Vec<String>>,
     error: Option<ChatError>,
     cursor: Mutex<usize>,
     pub received: Mutex<Vec<ChatRequest>>,
 }
 
 impl FakeChatRunner {
-    /// Seed with replies returned in order.
+    /// Seed with replies returned in order (no streamed deltas).
     pub fn new(replies: Vec<ChatReply>) -> Self {
-        Self { replies, error: None, cursor: Mutex::new(0), received: Mutex::new(vec![]) }
+        Self { replies, deltas: vec![], error: None, cursor: Mutex::new(0), received: Mutex::new(vec![]) }
+    }
+
+    /// Seed with replies AND, per call, the ordered prose deltas chat_stream
+    /// forwards before returning that call's reply.
+    pub fn with_deltas(replies: Vec<ChatReply>, deltas: Vec<Vec<String>>) -> Self {
+        Self { replies, deltas, error: None, cursor: Mutex::new(0), received: Mutex::new(vec![]) }
     }
 
     /// Seed with an error that every `chat` call returns.
     pub fn failing(error: ChatError) -> Self {
-        Self { replies: vec![], error: Some(error), cursor: Mutex::new(0), received: Mutex::new(vec![]) }
+        Self { replies: vec![], deltas: vec![], error: Some(error), cursor: Mutex::new(0), received: Mutex::new(vec![]) }
+    }
+
+    /// Reply at index `idx` (clamped), or empty when unseeded.
+    fn reply_at(&self, idx: usize) -> ChatReply {
+        self.replies
+            .get(idx.min(self.replies.len().saturating_sub(1)))
+            .cloned()
+            .unwrap_or(ChatReply { text: String::new(), usage: Default::default() })
+    }
+
+    /// Re-create the seeded error class (ChatError is not Clone).
+    fn clone_error(&self) -> Option<ChatError> {
+        self.error.as_ref().map(|err| match err {
+            ChatError::RateLimited(m) => ChatError::RateLimited(m.clone()),
+            ChatError::Spawn(m) => ChatError::Spawn(m.clone()),
+            ChatError::NoResult => ChatError::NoResult,
+            ChatError::Other(m) => ChatError::Other(m.clone()),
+        })
+    }
+
+    /// Advance the cursor, returning the index this call should use.
+    fn next_idx(&self) -> usize {
+        let mut c = self.cursor.lock().unwrap();
+        let i = *c;
+        *c += 1;
+        i
     }
 }
 
@@ -32,23 +69,26 @@ impl FakeChatRunner {
 impl ChatRunner for FakeChatRunner {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatReply, ChatError> {
         self.received.lock().unwrap().push(req.clone());
-        if let Some(err) = &self.error {
-            // Re-create the same class (ChatError is not Clone).
-            return Err(match err {
-                ChatError::RateLimited(m) => ChatError::RateLimited(m.clone()),
-                ChatError::Spawn(m) => ChatError::Spawn(m.clone()),
-                ChatError::NoResult => ChatError::NoResult,
-                ChatError::Other(m) => ChatError::Other(m.clone()),
-            });
+        if let Some(err) = self.clone_error() {
+            return Err(err);
         }
-        let mut c = self.cursor.lock().unwrap();
-        let idx = (*c).min(self.replies.len().saturating_sub(1));
-        *c += 1;
-        Ok(self
-            .replies
-            .get(idx)
-            .cloned()
-            .unwrap_or(ChatReply { text: String::new(), usage: Default::default() }))
+        let idx = self.next_idx();
+        Ok(self.reply_at(idx))
+    }
+
+    async fn chat_stream(&self, req: &ChatRequest, sink: &DeltaSink) -> Result<ChatReply, ChatError> {
+        self.received.lock().unwrap().push(req.clone());
+        if let Some(err) = self.clone_error() {
+            return Err(err);
+        }
+        let idx = self.next_idx();
+        // Only forward when this call has a scripted delta entry.
+        if let Some(call_deltas) = self.deltas.get(idx) {
+            for d in call_deltas {
+                sink(d);
+            }
+        }
+        Ok(self.reply_at(idx))
     }
 }
 
@@ -89,6 +129,31 @@ mod tests {
         let _ = fake.chat(&req("a")).await.unwrap();
         let again = fake.chat(&req("b")).await.unwrap();
         assert_eq!(again.text, "only");
+    }
+
+    #[tokio::test]
+    async fn scripted_deltas_are_forwarded_then_reply_returned() {
+        let fake = FakeChatRunner::with_deltas(
+            vec![ChatReply { text: "Hello world".into(), usage: ChatUsage::default() }],
+            vec![vec!["Hello ".into(), "world".into()]],
+        );
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let s = seen.clone();
+        let sink: crate::chat::DeltaSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let reply = fake.chat_stream(&req("hi"), &sink).await.unwrap();
+        assert_eq!(reply.text, "Hello world");
+        assert_eq!(*seen.lock().unwrap(), vec!["Hello ".to_string(), "world".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn deltas_default_to_empty_for_new_constructor() {
+        let fake = FakeChatRunner::new(vec![ChatReply { text: "x".into(), usage: ChatUsage::default() }]);
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let s = seen.clone();
+        let sink: crate::chat::DeltaSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let reply = fake.chat_stream(&req("hi"), &sink).await.unwrap();
+        assert_eq!(reply.text, "x");
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
