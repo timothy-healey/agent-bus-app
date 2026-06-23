@@ -12,7 +12,7 @@ use crate::task::{Task, TaskState};
 use crate::task_store::{TaskStore, TaskStoreError};
 use agent_bus_core::{UsageEvent, UsageSink};
 use pipeline::model::{Pipeline, Team};
-use runners::output::{InvocationRequest, Runner};
+use runners::output::{InvocationRequest, LogSink, Runner};
 use runners::scope::{cleanup, prepare, ScopeError};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +48,13 @@ pub enum ClaimOutcome {
     RateLimited { task_id: String },
 }
 
+/// Builds a per-task display-only log sink. Given a task id, returns a `LogSink`
+/// the runner forwards assistant prose to as the worker streams. Display-only:
+/// the deltas never influence settle/route (R4). None = no streaming (the
+/// runner's non-streaming `invoke` is used) — the no-op case for runtime-only
+/// tests. (See DOMAIN.md → Runtime "Stream (live log)" / Runners "Log delta".)
+pub type LogSinkFactory = dyn Fn(&str) -> LogSink + Send + Sync;
+
 /// The collaborators one worker iteration needs. Cheap to clone (Arcs).
 #[derive(Clone)]
 pub struct PoolContext {
@@ -68,6 +75,9 @@ pub struct PoolContext {
     /// topic-only invocations (the no-op case / runtime-only tests). Concrete
     /// reader is wired at the composition root over the comments table.
     pub revision_reader: Option<Arc<dyn RevisionBundleReader>>,
+    /// Per-task log-sink factory (R4 live-log streaming). None = use the runner's
+    /// non-streaming `invoke`. Display-only side channel; settle/route ignore it.
+    pub log_sink: Option<Arc<LogSinkFactory>>,
 }
 
 fn now_unix() -> i64 {
@@ -113,7 +123,16 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         add_dirs: scope_settings.add_dirs.clone(),
     };
 
-    let result = ctx.runner.invoke(&req).await;
+    // Stream display-only log deltas when a sink factory is wired (R4); else use
+    // the non-streaming invoke. Both return the identical RunnerOutput — the
+    // verdict/artifact/usage parse + settle/route below are byte-for-byte the same.
+    let result = match &ctx.log_sink {
+        Some(factory) => {
+            let sink = factory(&task.id.0);
+            ctx.runner.invoke_stream(&req, &sink).await
+        }
+        None => ctx.runner.invoke(&req).await,
+    };
 
     // 5. SETTLE (cleanup scope file always)
     cleanup(&scope_settings.settings_path);
@@ -364,6 +383,7 @@ mod tests {
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
             usage_sink: None,
             revision_reader: None,
+            log_sink: None,
         }
     }
 
@@ -494,6 +514,44 @@ mod tests {
         assert_eq!(events[0].input_tokens, 100);
         assert_eq!(events[0].output_tokens, 20);
         assert_eq!(events[0].model, "claude-opus-4-7");
+    }
+
+    #[tokio::test]
+    async fn streaming_forwards_log_deltas_per_task_and_settles_unchanged() {
+        use runners::output::LogSink;
+        let pool = fresh_pool().await;
+        let p = pipeline_with(vec![team("research", Some("gate-1"), None)],
+            vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "research".into() }]);
+        // FakeRunner with scripted deltas for the single invocation.
+        let runner = Arc::new(FakeRunner::with_deltas(
+            vec![Ok(approve_output())],
+            vec![vec!["chunk-a ".into(), "chunk-b".into()]],
+        ));
+        let mut ctx = ctx_with(pool.clone(), p.clone(), runner, temp_root());
+
+        // Record (task_id, delta) pairs the factory's sinks emit.
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(vec![]));
+        let seen_c = seen.clone();
+        ctx.log_sink = Some(Arc::new(move |task_id: &str| -> LogSink {
+            let tid = task_id.to_string();
+            let seen_c = seen_c.clone();
+            Box::new(move |d: &str| seen_c.lock().unwrap().push((tid.clone(), d.to_string())))
+        }));
+
+        let t = Task::injected("proj".into(), "p".into(), "research".into(), "topic".into(), None, 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        let outcome = process_one_claim(&ctx, &p.teams[0]).await.unwrap();
+        // settle is unchanged: approve into the gate, parked gated
+        assert_eq!(outcome, ClaimOutcome::Settled {
+            task_id: t.id.0.clone(), next_stage: "gate-1".into(), next_state: TaskState::Gated,
+        });
+        // the deltas were forwarded, tagged with this task's id
+        let seen = seen.lock().unwrap();
+        assert_eq!(*seen, vec![
+            (t.id.0.clone(), "chunk-a ".to_string()),
+            (t.id.0.clone(), "chunk-b".to_string()),
+        ]);
     }
 
     #[tokio::test]
