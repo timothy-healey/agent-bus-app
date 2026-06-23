@@ -31,9 +31,12 @@ const gateCard: React.CSSProperties = {
 
 export interface PipelineViewProps {
   pipeline: Pipeline | null;
+  /// When provided, an "Edit pipeline" affordance opens the in-app editor (A1).
+  /// Omitted = pure read-only viewer (e.g. the wizard review step).
+  onEdit?: () => void;
 }
 
-export function PipelineView({ pipeline }: PipelineViewProps) {
+export function PipelineView({ pipeline, onEdit }: PipelineViewProps) {
   if (!pipeline) {
     return (
       <div style={{ padding: "var(--sp-8)", color: "var(--text-3)", textAlign: "center" }}>
@@ -44,12 +47,23 @@ export function PipelineView({ pipeline }: PipelineViewProps) {
 
   return (
     <div style={{ padding: "var(--sp-7) var(--sp-8)", maxWidth: 760 }}>
-      <h1 style={{ fontSize: 16, color: "var(--text)", margin: 0 }}>{pipeline.name}</h1>
-      {pipeline.description && (
-        <p style={{ ...meta, marginTop: "var(--sp-1)" }}>{pipeline.description}</p>
-      )}
-      <div style={meta}>
-        schema v{pipeline.schema_version} · read-only viewer (editing arrives in v1.1)
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "var(--sp-4)" }}>
+        <div>
+          <h1 style={{ fontSize: 16, color: "var(--text)", margin: 0 }}>{pipeline.name}</h1>
+          {pipeline.description && (
+            <p style={{ ...meta, marginTop: "var(--sp-1)" }}>{pipeline.description}</p>
+          )}
+          <div style={meta}>schema v{pipeline.schema_version}</div>
+        </div>
+        {onEdit && (
+          <button
+            onClick={onEdit}
+            aria-label="edit pipeline"
+            style={{ flexShrink: 0, background: "var(--surface-2)", border: "1px solid var(--border-2)", color: "var(--text)", padding: "4px 14px", borderRadius: "var(--r-sm)", fontSize: 12, cursor: "pointer" }}
+          >
+            Edit pipeline
+          </button>
+        )}
       </div>
 
       <div style={sectionTitle}>Teams ({pipeline.teams.length})</div>
