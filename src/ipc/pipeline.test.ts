@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { listPipelines, loadPipeline, kickoffGenerate, designSessionTurn, bestEffortValidate } from "./pipeline";
+import { listPipelines, loadPipeline, kickoffGenerate, designSessionTurn, bestEffortValidate, listSeedTemplates, seedTemplate } from "./pipeline";
 import type { Join } from "./pipeline";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -39,6 +39,21 @@ describe("pipeline ipc", () => {
     const issues = await bestEffortValidate(draft);
     expect(invokeMock).toHaveBeenCalledWith("best_effort_validate_cmd", { draft });
     expect(issues).toEqual(["draft has no teams yet"]);
+  });
+
+  it("listSeedTemplates invokes list_seed_templates_cmd", async () => {
+    invokeMock.mockResolvedValueOnce([{ id: "ddd-spec-plan-impl", name: "DDD", description: "d" }]);
+    const out = await listSeedTemplates();
+    expect(invokeMock).toHaveBeenCalledWith("list_seed_templates_cmd");
+    expect(out[0].id).toBe("ddd-spec-plan-impl");
+  });
+
+  it("seedTemplate invokes seed_template_cmd with the id and returns a draft", async () => {
+    const draft = { id: "ddd-spec-plan-impl", name: "DDD", description: "", schema_version: 2, teams: [], gates: [], forks: [], joins: [], escalations: [] };
+    invokeMock.mockResolvedValueOnce(draft);
+    const out = await seedTemplate("ddd-spec-plan-impl");
+    expect(invokeMock).toHaveBeenCalledWith("seed_template_cmd", { id: "ddd-spec-plan-impl" });
+    expect(out.id).toBe("ddd-spec-plan-impl");
   });
 
   it("listPipelines passes project_root", async () => {

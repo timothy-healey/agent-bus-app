@@ -1,6 +1,6 @@
 import type React from "react";
-import { useMemo, useState } from "react";
-import { kickoffGenerate, type DraftPipeline, type Step } from "../ipc/pipeline";
+import { useEffect, useMemo, useState } from "react";
+import { kickoffGenerate, listSeedTemplates, seedTemplate, type DraftPipeline, type SeedTemplateSummary, type Step } from "../ipc/pipeline";
 import type { Project } from "../ipc/workspace";
 import { emptyDraft, WIZARD_STEPS, type WizardStep } from "./draft";
 import { ChatDraftPanel } from "./ChatDraftPanel";
@@ -33,6 +33,15 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
   const [busy, setBusy] = useState(false);
   // a stable per-open dialogue session id (D8).
   const sessionId = useMemo(() => `wiz-${Math.random().toString(36).slice(2)}`, [open]);
+  const [templates, setTemplates] = useState<SeedTemplateSummary[]>([]);
+
+  // Load the bundled seed templates for the kickoff picker (A2).
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    listSeedTemplates().then((t) => { if (active) setTemplates(t); }).catch(() => {});
+    return () => { active = false; };
+  }, [open]);
 
   if (!open) return null;
 
@@ -44,6 +53,20 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
     try {
       const d = await kickoffGenerate(sessionId, description);
       setDraft({ ...d, name, description });
+      go("teams");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Start from a bundled template (A2): seed the draft, then refine it through the
+  // normal wizard steps. Both kickoff paths end in the same editable draft.
+  async function startFromTemplate(id: string) {
+    setBusy(true);
+    try {
+      const d = await seedTemplate(id);
+      // Carry the user's name (description optional when seeding from a template).
+      setDraft({ ...d, name, description: description.trim() || d.description });
       go("teams");
     } finally {
       setBusy(false);
@@ -65,6 +88,23 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
             <label style={lbl}>Root path<input aria-label="Root path" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="~/projects/example" style={inp} /></label>
             <label style={lbl}>Describe what you're building<textarea aria-label="Describe what you're building" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} style={inp} /></label>
             <button onClick={generate} disabled={busy || !name.trim() || !root.trim() || !description.trim()}>Generate</button>
+            {templates.length > 0 && (
+              <div style={{ marginTop: "var(--sp-4)" }}>
+                <div style={{ fontSize: 11, color: "var(--text-3)", marginBottom: "var(--sp-2)" }}>Or start from a template</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {templates.map((t) => (
+                    <button
+                      key={t.id}
+                      title={t.description}
+                      onClick={() => startFromTemplate(t.id)}
+                      disabled={busy || !name.trim() || !root.trim()}
+                    >
+                      {t.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
