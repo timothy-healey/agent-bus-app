@@ -19,7 +19,7 @@ use conversational_control::engine::CommandEngine;
 use conversational_control::engine::{ConversationEngine, EngineReply};
 use conversational_control::store::ConversationStore;
 use conversational_control::turn::ToolCall;
-use llm_chat::chat::{ChatRequest, ChatRunner};
+use llm_chat::chat::{ChatRequest, ChatRunner, DeltaSink};
 use conversational_control::api::TerminalState;
 use agent_bus_core::{ToolCallRequest, ToolCallResult};
 use async_trait::async_trait;
@@ -103,6 +103,53 @@ impl runtime::revision::RevisionBundleReader for SqliteRevisionReader {
 fn ok(v: serde_json::Value) -> ToolCallResult { ToolCallResult::Ok { result: v } }
 fn err(e: impl ToString) -> ToolCallResult { ToolCallResult::Err { error: e.to_string() } }
 
+/// Couples the display-only prose sink with an explicit step-boundary `reset`, so
+/// the `DeltaSink` stays prose-only (vet F1) — no control marker rides the prose
+/// channel. The engine calls `reset()` at the top of each model step and passes
+/// `&sink` (prose fragments only) to `chat_stream`.
+pub struct ConversationDeltaEmitter {
+    pub sink: DeltaSink,
+    pub reset: Box<dyn Fn() + Send + Sync>,
+}
+
+/// Build a display-only ConversationDeltaEmitter that emits throttled
+/// `conversation.delta` Tauri events. The prose `sink` coalesces fragments and
+/// flushes every ~50ms or when the buffer reaches ~80 chars. The separate `reset`
+/// flushes any buffered prose then emits a `{reset:true}` boundary (a new model
+/// step started) — vet F1: the prose channel stays prose-only. Display-only:
+/// payload is prose + a reset flag; no stream-json idiom crosses here.
+fn make_conversation_delta_sink(handle: tauri::AppHandle) -> ConversationDeltaEmitter {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    struct Buf { text: String, last: Instant }
+    let state = Arc::new(Mutex::new(Buf { text: String::new(), last: Instant::now() }));
+
+    let sink_state = state.clone();
+    let sink_handle = handle.clone();
+    let sink: DeltaSink = Box::new(move |frag: &str| {
+        let mut b = sink_state.lock().unwrap();
+        b.text.push_str(frag);
+        let due = b.last.elapsed() >= Duration::from_millis(50) || b.text.len() >= 80;
+        if due {
+            let _ = sink_handle.emit("conversation.delta", serde_json::json!({ "text": b.text, "reset": false }));
+            b.text.clear();
+            b.last = Instant::now();
+        }
+    });
+
+    let reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let mut b = state.lock().unwrap();
+        if !b.text.is_empty() {
+            let _ = handle.emit("conversation.delta", serde_json::json!({ "text": b.text, "reset": false }));
+            b.text.clear();
+        }
+        let _ = handle.emit("conversation.delta", serde_json::json!({ "text": "", "reset": true }));
+        b.last = Instant::now();
+    });
+
+    ConversationDeltaEmitter { sink, reset }
+}
+
 /// The free-form chat engine for the god terminal (spec Consumer 1). A
 /// ConversationEngine that delegates each user turn to the llm_chat ACL. Lives
 /// at the composition root because it is the one place allowed to import both
@@ -116,6 +163,7 @@ pub struct LlmEngine {
     system_prompt: String,
     model: String,
     thinking_budget: u32,
+    delta: Option<ConversationDeltaEmitter>,
 }
 
 impl LlmEngine {
@@ -126,7 +174,13 @@ impl LlmEngine {
         model: String,
         thinking_budget: u32,
     ) -> Self {
-        Self { runner, dialogue_id, system_prompt, model, thinking_budget }
+        Self { runner, dialogue_id, system_prompt, model, thinking_budget, delta: None }
+    }
+
+    /// Attach a display-only delta emitter (root emits throttled conversation.delta).
+    pub fn with_delta_sink(mut self, delta: Option<ConversationDeltaEmitter>) -> Self {
+        self.delta = delta;
+        self
     }
 }
 
@@ -140,7 +194,16 @@ impl ConversationEngine for LlmEngine {
             model: self.model.clone(),
             thinking_budget: self.thinking_budget,
         };
-        match self.runner.chat(&req).await {
+        // Display-only streaming when a delta emitter is attached; reset clears
+        // the live bubble first (prose sink stays prose-only — vet F1).
+        let result = match &self.delta {
+            Some(emitter) => {
+                (emitter.reset)();
+                self.runner.chat_stream(&req, &emitter.sink).await
+            }
+            None => self.runner.chat(&req).await,
+        };
+        match result {
             Ok(reply) => EngineReply { text: reply.text, tool_calls: vec![] },
             // A chat failure becomes a clear, non-panicking error turn (spec
             // §Error handling). The root's existing rate-limit handling can read
@@ -220,6 +283,7 @@ pub struct AgenticChatEngine {
     model: String,
     thinking_budget: u32,
     max_steps: usize,
+    delta: Option<ConversationDeltaEmitter>,
 }
 
 impl AgenticChatEngine {
@@ -242,7 +306,14 @@ impl AgenticChatEngine {
             model,
             thinking_budget,
             max_steps: MAX_STEPS,
+            delta: None,
         }
+    }
+
+    /// Attach a display-only delta emitter (root emits throttled conversation.delta).
+    pub fn with_delta_sink(mut self, delta: Option<ConversationDeltaEmitter>) -> Self {
+        self.delta = delta;
+        self
     }
 }
 
@@ -268,7 +339,18 @@ impl ConversationEngine for AgenticChatEngine {
                 model: self.model.clone(),
                 thinking_budget: self.thinking_budget,
             };
-            let reply = match self.runner.chat(&req).await {
+            // Display-only streaming: each step resets the live bubble via the
+            // explicit reset signal (prose sink stays prose-only — vet F1), then
+            // forwards prose fragments. Tool-call extraction below still runs on
+            // the COMPLETE reply.text (never partial JSON).
+            let reply = match &self.delta {
+                Some(emitter) => {
+                    (emitter.reset)();
+                    self.runner.chat_stream(&req, &emitter.sink).await
+                }
+                None => self.runner.chat(&req).await,
+            };
+            let reply = match reply {
                 Ok(r) => r,
                 // DD4: rate-limit (and any other chat error) stops the loop and surfaces.
                 Err(e) => return EngineReply { text: format!("[terminal error] {e}"), tool_calls },
@@ -725,7 +807,7 @@ pub fn run() {
                             .into(),
                         "claude-opus-4-8".into(),
                         8192,
-                    ));
+                    ).with_delta_sink(Some(make_conversation_delta_sink(handle.clone()))));
                 let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
                     Arc::new(CompositeEngine::new(command_engine, agentic_engine));
 
@@ -1237,6 +1319,31 @@ mod composite_engine_tests {
             "m".into(),
             8192,
         )
+    }
+
+    // C2: display-only streaming forwards prose deltas while behaviour is unchanged.
+    #[tokio::test]
+    async fn agentic_engine_streams_deltas_for_a_plain_answer() {
+        use super::ConversationDeltaEmitter;
+        use llm_chat::chat::DeltaSink;
+        let runner = Arc::new(FakeChatRunner::with_deltas(
+            vec![reply("All clear, nothing to do.")],
+            vec![vec!["All clear, ".into(), "nothing to do.".into()]],
+        ));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s = seen.clone();
+        let sink: DeltaSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let resets = Arc::new(std::sync::Mutex::new(0usize));
+        let r2 = resets.clone();
+        let reset: Box<dyn Fn() + Send + Sync> = Box::new(move || { *r2.lock().unwrap() += 1; });
+        let eng = agentic(runner.clone(), Arc::new(FakeDispatcher::new()), Arc::new(Brake::new()))
+            .with_delta_sink(Some(ConversationDeltaEmitter { sink, reset }));
+        let out = eng.respond("status?", &catalog()).await;
+        assert_eq!(out.text, "All clear, nothing to do.");
+        assert!(out.tool_calls.is_empty());
+        assert_eq!(*seen.lock().unwrap(), vec!["All clear, ".to_string(), "nothing to do.".to_string()]);
+        // reset fired once at the start of the single model step.
+        assert_eq!(*resets.lock().unwrap(), 1);
     }
 
     // Task 2: one tool-call then a final answer => one composite turn.
