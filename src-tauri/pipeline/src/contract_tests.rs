@@ -65,7 +65,7 @@ fn pipeline_key_set_matches_ts() {
     let v = serde_json::to_value(&p).unwrap();
     assert_eq!(
         keys(&v),
-        set(&["id", "name", "description", "schema_version", "teams", "gates", "escalations"]),
+        set(&["id", "name", "description", "schema_version", "teams", "gates", "escalations", "forks", "joins"]),
     );
     assert!(v["teams"].is_array());
     assert!(v["schema_version"].is_number());

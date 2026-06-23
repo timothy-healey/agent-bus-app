@@ -27,9 +27,9 @@ pub struct Pipeline {
     pub gates: Vec<Gate>,
     #[serde(default)]
     pub escalations: Vec<Escalation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub forks: Vec<Fork>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub joins: Vec<Join>,
 }
 
