@@ -3,9 +3,11 @@ import { renderHook, act, waitFor } from "@testing-library/react";
 
 const getConversationMock = vi.fn();
 const sendMessageMock = vi.fn();
+const onConversationDeltaMock = vi.fn();
 vi.mock("../ipc/terminal", () => ({
   getConversation: () => getConversationMock(),
   sendMessage: (input: string) => sendMessageMock(input),
+  onConversationDelta: (cb: (d: { text: string; reset: boolean }) => void) => onConversationDeltaMock(cb),
 }));
 
 import { useConversation } from "./useConversation";
@@ -17,6 +19,8 @@ function convo(turns: unknown[]) {
 beforeEach(() => {
   getConversationMock.mockReset();
   sendMessageMock.mockReset();
+  onConversationDeltaMock.mockReset();
+  onConversationDeltaMock.mockResolvedValue(() => {});
 });
 
 describe("useConversation", () => {
@@ -36,5 +40,21 @@ describe("useConversation", () => {
     await act(async () => { await result.current.send("/inject x"); });
     expect(sendMessageMock).toHaveBeenCalledWith("/inject x");
     await waitFor(() => expect(result.current.turns).toHaveLength(2));
+  });
+
+  it("accumulates conversation.delta into streaming text and resets on boundary", async () => {
+    getConversationMock.mockResolvedValue(null);
+    let deltaCb: ((d: { text: string; reset: boolean }) => void) | undefined;
+    onConversationDeltaMock.mockImplementation(async (cb: (d: { text: string; reset: boolean }) => void) => {
+      deltaCb = cb;
+      return () => {};
+    });
+    const { result } = renderHook(() => useConversation());
+    await waitFor(() => expect(deltaCb).toBeDefined());
+    await act(async () => { deltaCb?.({ text: "Hel", reset: false }); });
+    await act(async () => { deltaCb?.({ text: "lo", reset: false }); });
+    expect(result.current.streaming).toBe("Hello");
+    await act(async () => { deltaCb?.({ text: "", reset: true }); });
+    expect(result.current.streaming).toBe("");
   });
 });
