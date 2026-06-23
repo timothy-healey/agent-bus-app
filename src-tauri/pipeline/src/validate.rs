@@ -37,6 +37,32 @@ pub enum PipelineValidationError {
     NoTeams,
 }
 
+/// Walk a fork lane from its entry team forward via on_approve edges until the
+/// join is reached. Every hop must be a team (lanes are linear team chains — no
+/// gate, escalation, or nested fork may appear inside a lane).
+fn check_lane_linear(
+    p: &Pipeline,
+    kinds: &HashMap<&str, NodeKind>,
+    entry: &str,
+    join_id: &str,
+) -> Result<(), PipelineValidationError> {
+    let mut current = entry.to_string();
+    for _ in 0..=p.teams.len() {
+        if current == join_id {
+            return Ok(());
+        }
+        if kinds.get(current.as_str()) != Some(&NodeKind::Team) {
+            return Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current.clone(), join: join_id.to_string() });
+        }
+        let team = p.teams.iter().find(|t| t.id == current).unwrap();
+        match team.outputs.on_approve.as_deref() {
+            Some(next) => current = next.to_string(),
+            None => return Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current.clone(), join: join_id.to_string() }),
+        }
+    }
+    Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current, join: join_id.to_string() })
+}
+
 /// Validate a Pipeline against the aggregate invariants. Returns Ok(()) when
 /// the graph is well-formed.
 pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
@@ -134,6 +160,23 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
         }
         inbound.insert(join.downstream.as_str());
         inbound.insert(join.id.as_str());
+    }
+
+    for fork in &p.forks {
+        let paired = p.joins.iter().find(|j| {
+            fork.lanes.iter().all(|lane| check_lane_linear(p, &kinds, lane, &j.id).is_ok())
+        });
+        match paired {
+            Some(_join) => {}
+            None => {
+                if let Some(j) = p.joins.first() {
+                    for lane in &fork.lanes {
+                        check_lane_linear(p, &kinds, lane, &j.id)?;
+                    }
+                }
+                return Err(PipelineValidationError::ForkJoinMismatch { fork: fork.id.clone() });
+            }
+        }
     }
 
     // reachability: every team except the first declared (the entry team) must
@@ -326,6 +369,33 @@ mod tests {
     #[test]
     fn fork_target_team_is_reachable_via_fork_lane() {
         let p = valid_v2_pipeline();
+        assert_eq!(validate(&p), Ok(()));
+    }
+
+    use crate::model::Gate as GateNode;
+
+    #[test]
+    fn a_gate_inside_a_lane_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.teams[1].outputs.on_approve = Some("gate-x".into());
+        p.gates.push(GateNode { id: "gate-x".into(), label: "X".into(), downstream: "join-1".into() });
+        assert_eq!(validate(&p), Err(PipelineValidationError::LaneNotLinear { entry: "lane-a".into(), node: "gate-x".into(), join: "join-1".into() }));
+    }
+
+    #[test]
+    fn a_nested_fork_inside_a_lane_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.teams[1].outputs.on_approve = Some("fork-2".into());
+        p.forks.push(Fork { id: "fork-2".into(), lanes: vec!["lane-b".into(), "after".into()] });
+        assert_eq!(validate(&p), Err(PipelineValidationError::LaneNotLinear { entry: "lane-a".into(), node: "fork-2".into(), join: "join-1".into() }));
+    }
+
+    #[test]
+    fn a_multi_team_linear_lane_is_accepted() {
+        let mut p = valid_v2_pipeline();
+        p.teams[1].outputs.on_approve = Some("lane-a2".into());
+        p.teams.push(lane_team("lane-a2", "join-1"));
+        p.joins[0].waits_for = vec!["lane-a2".into(), "lane-b".into()];
         assert_eq!(validate(&p), Ok(()));
     }
 }
