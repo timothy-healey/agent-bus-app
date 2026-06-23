@@ -96,6 +96,20 @@ impl ProjectStore {
         }
         Ok(())
     }
+
+    /// Remove a project row. Returns NotFound when the id does not exist.
+    /// Deletes only the row — on-disk artifacts under the project root are NOT
+    /// touched (Workspace owns the registry, not a destructive filesystem wipe).
+    pub async fn remove(&self, id: &ProjectId) -> Result<(), ProjectStoreError> {
+        let result = sqlx::query("DELETE FROM projects WHERE id = ?")
+            .bind(&id.0)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(ProjectStoreError::NotFound(id.clone()));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +186,26 @@ mod tests {
             Some(PipelineId("ddd-spec-plan-impl".into()))
         );
         assert_eq!(reloaded.updated_at, 200);
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_the_project() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
+        store.insert(&p).await.unwrap();
+        store.remove(&p.id).await.unwrap();
+        assert!(matches!(store.get(&p.id).await, Err(ProjectStoreError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn remove_missing_is_not_found() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        assert!(matches!(
+            store.remove(&ProjectId("nope".into())).await,
+            Err(ProjectStoreError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

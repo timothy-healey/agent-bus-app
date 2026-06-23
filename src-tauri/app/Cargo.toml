@@ -31,6 +31,7 @@ review = { path = "../review" }
 usage_telemetry = { path = "../usage_telemetry" }
 conversational_control = { path = "../conversational_control" }
 llm_chat = { path = "../llm_chat" }
+secrets = { path = "../secrets" }
 sqlx = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
