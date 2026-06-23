@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { PipelineView } from "./PipelineView";
 import type { Pipeline } from "../ipc/pipeline";
 
@@ -77,5 +77,17 @@ describe("PipelineView", () => {
     expect(screen.getByText(/lanes: lane-a, lane-b/)).toBeInTheDocument();
     expect(screen.getByText(/join-1/)).toBeInTheDocument();
     expect(screen.getByText(/→ after/)).toBeInTheDocument();
+  });
+
+  it("renders an Edit pipeline button when onEdit is provided and calls it", () => {
+    const onEdit = vi.fn();
+    render(<PipelineView pipeline={pipeline} onEdit={onEdit} />);
+    fireEvent.click(screen.getByRole("button", { name: /edit pipeline/i }));
+    expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no edit button without onEdit (pure viewer)", () => {
+    render(<PipelineView pipeline={pipeline} />);
+    expect(screen.queryByRole("button", { name: /edit pipeline/i })).toBeNull();
   });
 });
