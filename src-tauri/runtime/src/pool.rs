@@ -446,24 +446,107 @@ async fn resolve_barrier(
         if (early_cancel && is_failure) || quorum.is_some() {
             ctx.tasks.cancel_outstanding_lanes(&group_id, now_unix()).await?;
         }
-        let (stage, state) = match cont {
-            Continuation::Downstream(ds) => (ds, TaskState::Queued),
-            Continuation::NeedsHuman => ("needs-human".to_string(), TaskState::NeedsHuman),
-        };
-        let mut next = Task::injected(
-            task.project_id.clone(),
-            task.pipeline.clone(),
-            stage.clone(),
-            task.topic.clone(),
-            task.target_repo.clone(),
-            now,
-        );
-        next.state = state;
-        next.parent_artifact = task.parent_artifact.clone();
-        ctx.tasks.insert(&next).await?;
-        return Ok(Some((stage, state)));
+        return finish_group(ctx, &group_id, task, cont).await;
     }
     Ok(Some((task.current_stage.clone(), TaskState::Done)))
+}
+
+/// A group has completed. If it is a ROOT group, spawn the single continuation
+/// task (downstream on all-approve, needs-human otherwise) — the original flat
+/// behavior. If it is a CHILD group (a nested fork inside a parent lane), settle
+/// the PARENT lane's verdict at the parent group's barrier instead — the same
+/// completes-once guard one level up (DD-P1-2). This may complete the parent,
+/// which recurses again — exactly-once holds independently at every level.
+async fn finish_group(
+    ctx: &PoolContext,
+    group_id: &str,
+    task: &mut Task,
+    cont: Continuation,
+) -> Result<Option<(String, TaskState)>, PoolError> {
+    let group = ctx.fanout.load(group_id).await?;
+    if let (Some(parent_group), Some(parent_lane)) = (group.parent_group_id.clone(), group.parent_lane.clone()) {
+        // Child group: feed the parent lane the derived verdict through the
+        // parent's barrier (respecting the parent join's policy).
+        let parent_verdict = FanOutGroup::parent_lane_verdict(&cont);
+        return settle_parent_lane(ctx, task, &parent_group, &parent_lane, parent_verdict).await;
+    }
+    // Root group: create the single continuation task.
+    spawn_continuation(ctx, task, cont).await
+}
+
+/// Create the single continuation task past a ROOT join (downstream queued, or
+/// needs-human escalation). Carries the parent's lineage; clears lane fields so
+/// the continuation is back in ordinary linear flow.
+async fn spawn_continuation(
+    ctx: &PoolContext,
+    task: &Task,
+    cont: Continuation,
+) -> Result<Option<(String, TaskState)>, PoolError> {
+    let now = now_unix();
+    let (stage, state) = match cont {
+        Continuation::Downstream(ds) => (ds, TaskState::Queued),
+        Continuation::NeedsHuman => ("needs-human".to_string(), TaskState::NeedsHuman),
+    };
+    let mut next = Task::injected(
+        task.project_id.clone(),
+        task.pipeline.clone(),
+        stage.clone(),
+        task.topic.clone(),
+        task.target_repo.clone(),
+        now,
+    );
+    next.state = state;
+    next.parent_artifact = task.parent_artifact.clone();
+    ctx.tasks.insert(&next).await?;
+    Ok(Some((stage, state)))
+}
+
+/// Settle a parent lane's verdict at the parent group's barrier when a nested
+/// CHILD group resolves (DD-P1-2). Reuses the same barrier methods the lane
+/// settlement path uses — the parent join's policy (full / quorum / early-cancel)
+/// governs, and the parent's `completed` guard arbitrates exactly-once. If the
+/// parent itself completes, recurse via `finish_group` (which handles a
+/// grandparent, etc.).
+///
+/// VET F1 — INVARIANT: each call here is its OWN single-row guard
+/// (`UPDATE fanout_groups SET completed=1 WHERE id=? AND completed=0`). The
+/// child-complete write (in the caller) and this parent-settle write are
+/// DELIBERATELY two separate writes — exactly-once holds per group row,
+/// independently at each level. Do NOT merge them into one transaction spanning
+/// two `fanout_groups` rows: that re-introduces the cross-root coupling the
+/// two-aggregate model forbids (and risks a two-row deadlock). Reference by id,
+/// settle eventually — the correct cross-aggregate shape.
+async fn settle_parent_lane(
+    ctx: &PoolContext,
+    task: &mut Task,
+    parent_group: &str,
+    parent_lane: &str,
+    verdict: agent_bus_core::Verdict,
+) -> Result<Option<(String, TaskState)>, PoolError> {
+    let parent = ctx.fanout.load(parent_group).await?;
+    let join = ctx.pipeline.joins.iter().find(|j| j.id == parent.join_target);
+    let quorum = join.and_then(|j| j.quorum);
+    let early_cancel = quorum.is_none() && join.map(|j| j.cancel_on_reject).unwrap_or(false);
+    let is_failure = verdict == agent_bus_core::Verdict::Reject;
+
+    let outcome = if let Some(q) = quorum {
+        ctx.fanout.record_and_try_quorum(parent_group, parent_lane, verdict, q).await?
+    } else if early_cancel && is_failure {
+        ctx.fanout.record_failure_and_early_cancel(parent_group, parent_lane, verdict).await?
+    } else {
+        ctx.fanout.record_and_try_complete(parent_group, parent_lane, verdict).await?
+    };
+
+    if let BarrierOutcome::Completed(cont) = outcome {
+        if (early_cancel && is_failure) || quorum.is_some() {
+            ctx.tasks.cancel_outstanding_lanes(parent_group, now_unix()).await?;
+        }
+        // Box::pin breaks the mutual-recursion cycle (finish_group ->
+        // settle_parent_lane -> finish_group) so the async future has a finite
+        // size; the climb is bounded by the validated nesting depth (VET F2).
+        return Box::pin(finish_group(ctx, parent_group, task, cont)).await;
+    }
+    Ok(Some((parent_lane.to_string(), TaskState::Done)))
 }
 
 #[cfg(test)]
@@ -871,6 +954,86 @@ mod tests {
         assert!(cg.is_child());
         assert_eq!(cg.parent_lane.as_deref(), Some("lane-a"));
         assert!(cg.parent_group_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn nested_child_all_approve_settles_parent_lane_and_parent_completes() {
+        // Full nested run: entry -> fork-1 -> (lane-a -> fork-2 -> a1,a2 -> join-2 -> mid-a -> join-1), lane-b -> join-1.
+        // Everything approves; exactly one continuation at `after`.
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_nested();
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(FakeRunner::always(approve_output())), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // entry -> fork-1
+        process_one_claim(&ctx, &p.teams[5]).await.unwrap(); // lane-b approve -> join-1 (parks; parent group not complete)
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a approve -> fork-2 (child group)
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // a1 approve -> join-2 (child parks)
+        process_one_claim(&ctx, &p.teams[3]).await.unwrap(); // a2 approve -> join-2 (child COMPLETES -> settles parent lane-a)
+        // child completing settled parent lane-a=approve; parent had lane-b=approve -> parent completes -> mid-a? No:
+        // parent join-1 downstream is `after`. The child's join-2 downstream (mid-a) is a lane-internal continuation that
+        // is consumed as the parent-lane verdict (DD-P1-8). So after the child completes, the parent lane-a is settled
+        // and the PARENT barrier fires -> one continuation at `after`.
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        let at_after: Vec<_> = queued.iter().filter(|q| q.current_stage == "after").collect();
+        assert_eq!(at_after.len(), 1, "exactly one continuation past the outer join");
+        assert_eq!(at_after[0].group_id, None, "continuation is back in linear flow");
+    }
+
+    #[tokio::test]
+    async fn nested_child_reject_settles_parent_lane_reject_and_parent_needs_human() {
+        // a1 rejects inside the nested fork -> child group resolves needs-human ->
+        // parent lane-a settles as Reject -> parent (with lane-b approve) -> needs-human.
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_nested();
+        let reject = RunnerOutput { verdict: Verdict::Reject, artifact_path: None, final_text: "VERDICT: reject".into(), usage: RunnerUsage::default() };
+        // reject only the `a1` nested lane
+        struct A1Reject { reject: RunnerOutput }
+        #[async_trait::async_trait]
+        impl Runner for A1Reject {
+            async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError> {
+                if req.team_id == "a1" { Ok(self.reject.clone()) }
+                else { Ok(RunnerOutput { verdict: Verdict::Approve, artifact_path: Some("a.md".into()), final_text: "VERDICT: approve".into(), usage: RunnerUsage::default() }) }
+            }
+        }
+        let ctx = ctx_with(pool.clone(), p.clone(), Arc::new(A1Reject { reject }), temp_root());
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork-1
+        process_one_claim(&ctx, &p.teams[5]).await.unwrap(); // lane-b approve (parks)
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a -> fork-2
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // a1 reject -> child barrier reject
+        process_one_claim(&ctx, &p.teams[3]).await.unwrap(); // a2 approve -> child completes needs-human -> parent lane-a reject -> parent needs-human
+
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 1, "the nested reject escalates the outer join exactly once");
+        assert_eq!(nh[0].current_stage, "needs-human");
+    }
+
+    #[tokio::test]
+    async fn nested_completion_is_exactly_once_against_a_concurrent_parent_straggler() {
+        // lane-b and the nested child both try to complete the PARENT barrier concurrently.
+        // Exactly one parent continuation results.
+        use std::sync::Arc as StdArc;
+        let pool = fresh_pool().await;
+        let p = pipeline_v2_nested();
+        let ctx = StdArc::new(ctx_with(pool.clone(), p.clone(), StdArc::new(FakeRunner::always(approve_output())), temp_root()));
+        let t = Task::injected("proj".into(), "p".into(), "entry".into(), "topic".into(), Some("/repo".into()), 100);
+        ctx.tasks.insert(&t).await.unwrap();
+        process_one_claim(&ctx, &p.teams[0]).await.unwrap(); // fork-1
+        process_one_claim(&ctx, &p.teams[1]).await.unwrap(); // lane-a -> fork-2
+        process_one_claim(&ctx, &p.teams[2]).await.unwrap(); // a1 parks
+        // Now run lane-b (settles parent lane-b) and a2 (completes child -> settles parent lane-a) concurrently.
+        let c1 = ctx.clone(); let p1 = p.clone();
+        let c2 = ctx.clone(); let p2 = p.clone();
+        let h1 = tokio::spawn(async move { process_one_claim(&c1, &p1.teams[5]).await.unwrap() });
+        let h2 = tokio::spawn(async move { process_one_claim(&c2, &p2.teams[3]).await.unwrap() });
+        let _ = (h1.await.unwrap(), h2.await.unwrap());
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        let at_after = queued.iter().filter(|q| q.current_stage == "after").count();
+        assert_eq!(at_after, 1, "exactly one parent continuation despite concurrent settles");
     }
 
     #[test]
