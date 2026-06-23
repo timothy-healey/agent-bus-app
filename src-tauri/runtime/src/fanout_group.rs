@@ -56,6 +56,16 @@ impl FanOutGroup {
             Continuation::NeedsHuman
         }
     }
+
+    /// The continuation when the early-cancel policy (P2) fires: a lane has
+    /// failed, so the group resolves to needs-human WITHOUT waiting for the other
+    /// lanes. This is the aggregate root's early-cancel rule — the store asks for
+    /// it after winning the completes-once guard, mirroring how the full barrier
+    /// asks `continuation()`. Keeping it here (not hardcoded in the store) means a
+    /// future divergent join policy has one home (vet F1).
+    pub fn early_cancel_continuation(&self) -> Continuation {
+        Continuation::NeedsHuman
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +103,14 @@ mod tests {
             LaneVerdict { lane: "lane-b".into(), verdict: Verdict::Approve },
         ];
         assert_eq!(g.continuation(&settled), Continuation::Downstream("after".into()));
+    }
+
+    #[test]
+    fn early_cancel_continuation_is_needs_human() {
+        // The FanOutGroup owns the early-cancel aggregation rule: a failed lane
+        // forces needs-human, regardless of the other (unsettled) lanes.
+        let g = group();
+        assert_eq!(g.early_cancel_continuation(), Continuation::NeedsHuman);
     }
 
     #[test]
