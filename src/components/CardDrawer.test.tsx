@@ -4,10 +4,12 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 const listMock = vi.fn();
 const addMock = vi.fn();
 const delMock = vi.fn();
+const reanchorMock = vi.fn();
 vi.mock("../ipc/review", () => ({
   listComments: (...a: unknown[]) => listMock(...a),
   addComment: (...a: unknown[]) => addMock(...a),
   deleteComment: (...a: unknown[]) => delMock(...a),
+  reanchorComments: (...a: unknown[]) => reanchorMock(...a),
 }));
 
 import { CardDrawer } from "./CardDrawer";
@@ -27,6 +29,7 @@ describe("CardDrawer", () => {
     listMock.mockReset().mockResolvedValue([]);
     addMock.mockReset();
     delMock.mockReset();
+    reanchorMock.mockReset().mockResolvedValue([]);
   });
 
   it("renders the task head + the three tabs", async () => {
