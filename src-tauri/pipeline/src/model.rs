@@ -185,6 +185,13 @@ pub struct Join {
     pub id: String,
     pub waits_for: Vec<String>,
     pub downstream: String,
+    /// Early-cancel policy (P2). When true, the join resolves to needs-human the
+    /// moment ONE lane fails (reject / revise-cap), cancelling the outstanding
+    /// lanes instead of waiting for the full barrier. `#[serde(default)]` false
+    /// keeps existing pipelines on the full-barrier behavior; additive-optional,
+    /// no SCHEMA_VERSION bump. The policy is enforced by the FanOutGroup barrier.
+    #[serde(default)]
+    pub cancel_on_reject: bool,
 }
 
 /// A node kind discriminator used by validation and the frontend viewer.
@@ -311,7 +318,7 @@ mod tests {
             gates: vec![],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
             forks: vec![Fork { id: "fork-1".into(), lanes: vec!["a".into(), "b".into()] }],
-            joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "research".into() }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "research".into(), cancel_on_reject: false }],
         };
         let ids = p.node_ids();
         assert!(ids.contains(&("fork-1".into(), NodeKind::Fork)));
@@ -366,6 +373,28 @@ mod tests {
         // None => effective_runner panics (unresolved pipeline = programmer error)
         t.runner = None;
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.effective_runner())).is_err());
+    }
+
+    #[test]
+    fn join_cancel_on_reject_defaults_to_false_when_absent() {
+        // a join authored without the field loads with the full-barrier default
+        let json = r#"{"id":"join-1","waits_for":["a","b"],"downstream":"after"}"#;
+        let j: Join = serde_json::from_str(json).unwrap();
+        assert!(!j.cancel_on_reject);
+    }
+
+    #[test]
+    fn join_round_trips_cancel_on_reject_true() {
+        let j = Join {
+            id: "join-1".into(),
+            waits_for: vec!["a".into(), "b".into()],
+            downstream: "after".into(),
+            cancel_on_reject: true,
+        };
+        let s = serde_json::to_string(&j).unwrap();
+        let back: Join = serde_json::from_str(&s).unwrap();
+        assert_eq!(j, back);
+        assert!(back.cancel_on_reject);
     }
 
     #[test]

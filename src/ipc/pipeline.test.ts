@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { listPipelines, loadPipeline, kickoffGenerate, designSessionTurn, bestEffortValidate } from "./pipeline";
+import type { Join } from "./pipeline";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -57,7 +58,7 @@ describe("pipeline ipc", () => {
       gates: [],
       escalations: [],
       forks: [{ id: "fork-1", lanes: ["a", "b"] }],
-      joins: [{ id: "join-1", waits_for: ["a", "b"], downstream: "after" }],
+      joins: [{ id: "join-1", waits_for: ["a", "b"], downstream: "after", cancel_on_reject: true }],
     };
     invokeMock.mockResolvedValueOnce(graph);
     const result = await loadPipeline("/p", "ddd-spec-plan-impl");
@@ -67,5 +68,14 @@ describe("pipeline ipc", () => {
     });
     expect(result.forks[0].lanes).toEqual(["a", "b"]);
     expect(result.joins[0].downstream).toBe("after");
+    expect(result.joins[0].cancel_on_reject).toBe(true);
+  });
+
+  it("Join carries the optional cancel_on_reject early-cancel flag", () => {
+    const j: Join = { id: "join-1", waits_for: ["a", "b"], downstream: "after", cancel_on_reject: true };
+    expect(j.cancel_on_reject).toBe(true);
+    // omitting it is valid (optional, defaults to full-barrier on the backend)
+    const j2: Join = { id: "join-2", waits_for: ["a", "b"], downstream: "after" };
+    expect(j2.cancel_on_reject).toBeUndefined();
   });
 });
