@@ -115,7 +115,11 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 
 ### Workspace
 - **Project root** — the directory the user picked; contains `pipelines/`, `prompts/`, `artifacts/`, `worktrees/`, `.agent-bus/`
+- **Git author identity** — the `git_config` single-row store (`author_name` / `author_email`, migration 009; S1) holding the name/email for commits workers make in worktrees. Read/written via `git_config_get` / `git_config_set`. Persisted in v1.1; the worktree-commit path that consumes it lands in a later item.
 - **Project write surface** — `write_project_pipeline` writes a project's pipeline YAML + per-team prompt files (`prompts/<team>.md`) under the (already `~`-expanded) project root, path-scoped with the `resolve_under_root` escape guard — the counterpart to `read_artifact`. (The bundled-**Template** instantiation path was dropped in sub-project 3; the wizard writes YAML directly. Templates returned in v1.1 as **wizard seeds** — bundled `DraftPipeline` seeds for the Design Session, NOT the dropped instantiate-on-create path; see Pipeline Authoring → "Template (seed)" (A2). Workspace is uninvolved in seeding — it still writes only at create via `write_project_pipeline`.)
+
+### Generic subdomains (infrastructure)
+- **Keychain / Secret store** — the `secrets` crate: a `KeychainStore` trait (real macOS `SecurityFrameworkKeychain` + in-memory `FakeKeychain`) storing a secret by `(service, account)` (S1). A **generic-subdomain infrastructure crate** (peer tier to `agent_bus_core`, NOT an eighth bounded context); no domain context depends on the OS Security API. Holds the **runner API key** (key-id `"anthropic-api"`); the secret is **never persisted to SQLite/disk** and **never returned across the OHS** (the no-secret-egress invariant — `runner_get_api_key_status` returns presence only; `set`/`clear` are write-only). The composition root resolves the anthropic-api runner key **keychain-first, then `api_key_env`**, passing a plain `String` into `AnthropicApiRunner::new` so no keychain/OS type crosses the Runner trait (the ACL seal). v1.1 scope: API-key storage only.
 
 ### Conversational Control
 - **Conversation** — the persistent dialogue with the terminal's Claude session

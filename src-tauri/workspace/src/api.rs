@@ -90,6 +90,17 @@ pub async fn workspace_set_active_pipeline(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub async fn workspace_remove_project(
+    state: tauri::State<'_, WorkspaceState>,
+    id: String,
+) -> Result<(), String> {
+    state.store.remove(&ProjectId(id)).await.map_err(|e| match e {
+        ProjectStoreError::NotFound(_) => "not_found".to_string(),
+        other => other.to_string(),
+    })
+}
+
 /// Resolve `rel_path` against `root`, guaranteeing the result stays inside
 /// `root`. Rejects absolute paths and any `..` that would escape the root.
 /// Pure (no IO) so it is unit-testable; the command does the read.
@@ -217,6 +228,16 @@ pub fn tools() -> Vec<ToolSpec> {
                     "id": { "type": "string" },
                     "pipeline_id": { "type": ["string", "null"] }
                 },
+                "required": ["id"]
+            }),
+            supplier_context: "workspace".into(),
+        },
+        ToolSpec {
+            name: "workspace_remove_project".into(),
+            description: "Remove a project from the workspace registry (does not delete files).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
                 "required": ["id"]
             }),
             supplier_context: "workspace".into(),
