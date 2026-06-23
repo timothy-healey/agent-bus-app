@@ -3,7 +3,7 @@
 **Date:** 2026-06-24
 **Lens:** `impeccable` (product register), measured against `DESIGN.md` + `src/styles/tokens.css`.
 **Scope:** Full React frontend — wizard, board/drawer/comments, chrome (topbar/usage/settings/terminal), pipeline view+editor, `ui/*` primitives, design-system tokens.
-**Mode:** STATIC, review-only. **Applied: none.** Every finding below is a recommendation for the operator to action or decline.
+**Mode:** STATIC, review-only at audit time. **Applied 2026-06-24** — see the "Applied 2026-06-24" section at the foot of this doc for what landed vs what was deferred (tag `impeccable-frontend-pass`).
 
 ---
 
@@ -172,3 +172,37 @@ Non-team lanes get `color:--accent` + `background:--accent-2` fill on the **enti
 ## Applied: none (review-only)
 
 No code, tokens, copy, or `DESIGN.md` text was modified during this audit. Every item above is a recommendation pending operator decision.
+
+---
+
+## Applied 2026-06-24
+
+The operator accepted the **safe/high-confidence batch** AND the **recommended option for all 7 decisions**. Implemented on branch `impeccable-frontend-pass` (merged `--no-ff` into `main`, tag `impeccable-frontend-pass`). Tests: **264 vitest green** (was 248); `bun run build` green; **backend untouched** (no `src-tauri` diff). Commits are grouped (tokens · focus/a11y · ui-primitives-to-css · board/meter · pipeline-graph · validation-warn · copy/cleanup).
+
+### Cross-cutting (1A) — done
+- **C1** global `:focus-visible` accent ring in `global.css`; `Terminal` `outline:none` removed.
+- **C2 / Decision 1 (option B)** `ui/Button` converted from inline `style` to CSS classes (`.abp-btn`, `.abp-btn-{default,primary,ghost,danger}`, `.abp-btn-sm`) with real `:hover`/`:focus`/`:active`. `.abp-tab` for drawer/editor tabs; `.abp-icon-delete` for inline delete glyphs.
+- **C3** all missing tokens shipped to `tokens.css`: `--ts-xs…--ts-xl`, `--font-mono`, `--font-reading`, `--shadow-popover`, `--shadow-needs-you` (both themes), `--bg-3`, `--scrim`.
+- **C4** dead `App.css` deleted.
+
+### Tokens / a11y / states / copy / primitive-drift — done
+- **T1–T8** `--bg-3` real (addressed-row tint), `#d66` fallback dropped, scrim literals → `--scrim`, needs-you/popover shadows pointed at their tokens, px font sizes → `--ts-*`, reading stacks → `--font-reading`. 6px gaps snapped to 8px (`--sp-2`) where flagged (Decision 7).
+- **A1/A2/A3** shared `useModalA11y` hook gives `Drawer`, `PipelineEditor`, and the wizard focus-trap + Escape + restore-focus + dialog roles; wizard overlay-click/Escape now **dirty-confirms** before discarding.
+- **A4/A5/A7/A8** textarea/input `aria-label`s; `UsageMeter` keyboard-reachable (`tabIndex`, `role=progressbar`, tooltip on `:focus-within`); `ListView` state = dot **+ label**; `TeamsStep` ⚙ `aria-expanded`.
+- **S1/S2/S3/S5/S6** live-log `loading/streaming/settled/error/empty` (skeleton lines + streaming caret); chat-stream pending row + error `role=alert`; wizard create/save/generate busy labels; error containers with `role=alert`; review tab renders `ArtifactView` not a raw path.
+- **Q1/Q2/Q3/Q4** em-dashes removed (`SettingsView` ×2, `CommentRail` ×1); duplicate brake reason dropped; validation issues are now a semantic `<ul>`.
+- **D-1…D-10** bare buttons routed through `ui/Button` (PipelineEditor footer, all wizard steps, Topbar); Settings theme via `useTheme`; worktree remove→`danger`/cancel→`ghost`; reading body capped at **75ch**; section headers unified to lowercase; addressed chip → `--r-xs`; shared `--font-mono`/`--font-reading`.
+
+### The 7 decisions — done (recommended option each)
+1. **ui primitives → CSS classes + global focus rule** (option B). Primitives + highest-traffic controls only; broad inline-style migration **deferred** (see below).
+2. **Read-only static pipeline graph** (option C). New `lib/pipelineGraph` (pure layout, unit-tested) + `components/PipelineGraph` (SVG, dot-grid, role-colored borders, solid forward / dashed revise + escalate Bezier edges). Added above the form in `PipelineView`; static, no drag.
+3. **Validation banner → `--warn`** (option A) in `ChatDraftPanel` + `PipelineEditor`.
+4. **Needs-you side-stripe dropped** (option A) in `ListView`; `SelectionPopover` quote → 1px `--border`; `DESIGN.md` §Table reconciled with §Anti-patterns.
+5. **BoardView** accent-fills only the **gate** lane header (option A); other non-team lanes use `--text-2` weight.
+6. **UsageMeter** gradient bar fill `--running→--warn→--danger` at 0/60/90% (option B). Tooltip kept minimal; keyboard-reachable.
+7. **Type scale** `--ts-*` + `--font-mono` shipped; stray 6px → 8px.
+
+### Deferred / flagged
+- **Broad inline-style → CSS-class migration (Decision 1 option C).** Intentionally not done — only `ui/*` primitives + highest-traffic controls were converted. The ~26 inline-styled one-off chrome components remain inline (they now inherit the global focus ring but still can't express per-element hover/active). This is the single largest follow-up; it is bounded and mechanical but high-churn.
+- **A6 full tablist semantics** (roving tabindex / arrow-key nav / `aria-controls` / `role=tabpanel`): `role=tab`/`aria-selected` present; arrow-key navigation not added.
+- **Decision 6 option A (full tooltip data):** gradient shipped; the extra spec'd rows (brake-at, window start/elapsed, 10-min avg, cost, per-team model/effort/%) need data plumbed and are left for a data pass.
