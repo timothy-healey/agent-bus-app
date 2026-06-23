@@ -548,6 +548,21 @@ async fn kickoff_generate_cmd(
     Ok(kickoff_generate(state.runner.as_ref(), &session_id, &description).await)
 }
 
+/// OHS: list the bundled seed templates (id/name/description) for the kickoff
+/// picker. Pure pass-through to Pipeline Authoring's registry — no state, no chat.
+#[tauri::command(rename_all = "snake_case")]
+fn list_seed_templates_cmd() -> Vec<pipeline::seed_template::SeedTemplate> {
+    pipeline::seed_template::seed_templates()
+}
+
+/// OHS: return a populated `DraftPipeline` seed for a template id. Unknown id is
+/// an error. Mirrors `kickoff_generate_cmd`'s shape (→ DraftPipeline); the wizard
+/// refines it and creates through the normal hard-validate path.
+#[tauri::command(rename_all = "snake_case")]
+fn seed_template_cmd(id: String) -> Result<DraftPipeline, String> {
+    pipeline::seed_template::seed_template(&id).ok_or_else(|| format!("unknown seed template: {id}"))
+}
+
 /// OHS: one Design Session turn — apply a slice + return prose + updated draft.
 #[tauri::command(rename_all = "snake_case")]
 async fn design_session_turn_cmd(
@@ -958,6 +973,8 @@ pub fn run() {
             pipeline::api::pipeline_list,
             pipeline::api::pipeline_load,
             kickoff_generate_cmd,
+            list_seed_templates_cmd,
+            seed_template_cmd,
             design_session_turn_cmd,
             best_effort_validate_cmd,
             create_project_from_draft,
@@ -1369,6 +1386,14 @@ mod design_session_tests {
     use llm_chat::chat::{ChatReply, ChatUsage};
     use llm_chat::fake::FakeChatRunner;
     use pipeline::design_session::{design_session_turn, kickoff_generate, Step};
+
+    #[test]
+    fn seed_template_cmd_returns_a_draft_for_a_known_id() {
+        let d = pipeline::seed_template::seed_template("ddd-spec-plan-impl").unwrap();
+        assert_eq!(d.teams.len(), 7);
+        assert!(pipeline::seed_template::seed_template("nope").is_none());
+        assert!(!pipeline::seed_template::seed_templates().is_empty());
+    }
 
     #[tokio::test]
     async fn root_kickoff_produces_a_draft_from_a_canned_reply() {
