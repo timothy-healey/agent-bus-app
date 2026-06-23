@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// The current pipeline schema version. Pipeline Authoring ↔ Runtime is a
 /// Shared Kernel keyed on this number (context-map.md). Bumping it is a
 /// breaking change reviewed by both contexts.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pipeline {
@@ -27,6 +27,10 @@ pub struct Pipeline {
     pub gates: Vec<Gate>,
     #[serde(default)]
     pub escalations: Vec<Escalation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forks: Vec<Fork>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<Join>,
 }
 
 fn default_schema_version() -> u32 {
@@ -117,6 +121,19 @@ pub struct Escalation {
     pub triggers: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fork {
+    pub id: String,
+    pub lanes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Join {
+    pub id: String,
+    pub waits_for: Vec<String>,
+    pub downstream: String,
+}
+
 /// A node kind discriminator used by validation and the frontend viewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -124,6 +141,8 @@ pub enum NodeKind {
     Team,
     Gate,
     Escalation,
+    Fork,
+    Join,
 }
 
 impl Pipeline {
@@ -134,6 +153,8 @@ impl Pipeline {
         ids.extend(self.teams.iter().map(|t| (t.id.clone(), NodeKind::Team)));
         ids.extend(self.gates.iter().map(|g| (g.id.clone(), NodeKind::Gate)));
         ids.extend(self.escalations.iter().map(|e| (e.id.clone(), NodeKind::Escalation)));
+        ids.extend(self.forks.iter().map(|f| (f.id.clone(), NodeKind::Fork)));
+        ids.extend(self.joins.iter().map(|j| (j.id.clone(), NodeKind::Join)));
         ids
     }
 }
@@ -160,8 +181,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_constant_is_one() {
-        assert_eq!(SCHEMA_VERSION, 1);
+    fn schema_version_constant_is_two() {
+        assert_eq!(SCHEMA_VERSION, 2);
     }
 
     #[test]
@@ -179,6 +200,8 @@ mod tests {
             teams: vec![sample_team("research")],
             gates: vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "research".into() }],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![],
+            joins: vec![],
         };
         let ids = p.node_ids();
         assert_eq!(ids.len(), 3);
@@ -197,9 +220,34 @@ mod tests {
             teams: vec![sample_team("research")],
             gates: vec![],
             escalations: vec![],
+            forks: vec![],
+            joins: vec![],
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Pipeline = serde_json::from_str(&s).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn node_ids_includes_forks_and_joins() {
+        let p = Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            teams: vec![sample_team("research")],
+            gates: vec![],
+            escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![Fork { id: "fork-1".into(), lanes: vec!["a".into(), "b".into()] }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "research".into() }],
+        };
+        let ids = p.node_ids();
+        assert!(ids.contains(&("fork-1".into(), NodeKind::Fork)));
+        assert!(ids.contains(&("join-1".into(), NodeKind::Join)));
+    }
+
+    #[test]
+    fn forks_and_joins_default_to_empty_when_absent() {
+        let json = r#"{"id":"p","name":"P","schema_version":1,"teams":[],"gates":[],"escalations":[]}"#;
+        let p: Pipeline = serde_json::from_str(json).unwrap();
+        assert!(p.forks.is_empty());
+        assert!(p.joins.is_empty());
     }
 }
