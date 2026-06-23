@@ -108,6 +108,7 @@ mod tests {
             user_message: String::new(),
             settings_path: String::new(),
             add_dirs: vec![],
+            sandbox_profile: None,
         }
     }
 
