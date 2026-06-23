@@ -9,6 +9,7 @@
 use crate::model::{Escalation, Fork, Gate, Join, Pipeline, Routes, RunnerConfig, Scope, Team, Workers, SCHEMA_VERSION};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A team as the wizard edits it. Same fields as `model::Team` except the prompt
 /// is held inline as text (`prompt_body`), not a file path — the wizard edits
@@ -262,6 +263,39 @@ fn prompt_path(team_id: &str) -> String {
 }
 
 impl DraftPipeline {
+    /// Reconstruct a draft from a validated, already-resolved `Pipeline` (A1).
+    /// The faithful inverse of `to_pipeline`: each team's `prompt_body` comes from
+    /// `prompt_bodies` (team-id → file content the caller read via Workspace's
+    /// read_artifact; missing => empty, tolerant), the runner from the resolved
+    /// `effective_runner()`, and forks/joins/gates/escalations/scope/outputs carry
+    /// straight through. Pipeline Authoring never reads files itself (Workspace owns
+    /// IO) — the bodies are injected. `DraftPipeline` stays distinct from `Pipeline`.
+    pub fn from_pipeline(pipeline: &Pipeline, prompt_bodies: &HashMap<String, String>) -> Self {
+        Self {
+            id: pipeline.id.clone(),
+            name: pipeline.name.clone(),
+            description: pipeline.description.clone(),
+            schema_version: pipeline.schema_version,
+            teams: pipeline
+                .teams
+                .iter()
+                .map(|t| DraftTeam {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                    prompt_body: prompt_bodies.get(&t.id).cloned().unwrap_or_default(),
+                    runner: t.effective_runner(),
+                    scope: t.scope.clone(),
+                    outputs: t.outputs.clone(),
+                    workers: t.workers.clone(),
+                })
+                .collect(),
+            forks: pipeline.forks.clone(),
+            joins: pipeline.joins.clone(),
+            gates: pipeline.gates.clone(),
+            escalations: pipeline.escalations.clone(),
+        }
+    }
+
     /// Convert to a real `Pipeline` (Decision D1/D5). Each team's inline
     /// prompt_body becomes a prompts/<id>.md path; gates carry through (W3).
     /// The result is NOT yet validated — the caller runs
@@ -310,6 +344,24 @@ pub fn prompt_files(draft: &DraftPipeline) -> Vec<(String, String)> {
 /// PipelineStore writes). Pipeline Authoring serializes; Workspace writes (F1).
 pub fn to_yaml(pipeline: &Pipeline) -> Result<String, serde_yaml::Error> {
     serde_yaml::to_string(pipeline)
+}
+
+/// The shared validate-then-serialize core for both the create-from-draft and the
+/// edit-mode save flows (A1; vet F2). HARD-validates the draft's Pipeline, then
+/// returns the bytes to write: the project-root-relative YAML path
+/// (`pipelines/<id>.yaml`), the serialized YAML, and the per-team prompt files.
+/// An invalid draft is an `Err` and nothing is returned — the single home of the
+/// "nothing is written when invalid" gate. Pipeline Authoring serializes;
+/// Workspace writes (the caller passes these to `write_project_pipeline`).
+pub fn prepare_pipeline_write(
+    draft: &DraftPipeline,
+) -> Result<(String, String, Vec<(String, String)>), String> {
+    let pipeline = draft.to_pipeline();
+    crate::validate::validate(&pipeline).map_err(|e| e.to_string())?;
+    let yaml = to_yaml(&pipeline).map_err(|e| e.to_string())?;
+    let prompts = prompt_files(draft);
+    let yaml_rel = format!("pipelines/{}.yaml", pipeline.id);
+    Ok((yaml_rel, yaml, prompts))
 }
 
 #[cfg(test)]
@@ -612,6 +664,80 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files.contains(&("prompts/research.md".to_string(), "You investigate the repo.".to_string())));
         assert!(files.contains(&("prompts/writers.md".to_string(), "You write the spec.".to_string())));
+    }
+
+    #[test]
+    fn from_pipeline_is_the_inverse_of_to_pipeline() {
+        let draft = complete_draft();
+        let pipeline = draft.to_pipeline();
+        let bodies: HashMap<String, String> = prompt_files(&draft)
+            .into_iter()
+            .map(|(path, body)| {
+                let id = path.trim_start_matches("prompts/").trim_end_matches(".md").to_string();
+                (id, body)
+            })
+            .collect();
+
+        let back_draft = DraftPipeline::from_pipeline(&pipeline, &bodies);
+        assert_eq!(back_draft.to_pipeline(), pipeline);
+        let research = back_draft.teams.iter().find(|t| t.id == "research").unwrap();
+        assert_eq!(research.prompt_body, "You investigate the repo.");
+    }
+
+    #[test]
+    fn from_pipeline_carries_forks_joins_gates_and_runner() {
+        use crate::model::{Fork, Gate, Join};
+        let mut d = DraftPipeline::empty();
+        d.id = "demo".into();
+        d.name = "Demo".into();
+        let mut a = DraftTeam::new("entry", "Entry");
+        a.prompt_body = "x".into();
+        a.outputs.on_approve = Some("fork-1".into());
+        let mut la = DraftTeam::new("lane-a", "Lane A");
+        la.prompt_body = "x".into();
+        la.outputs.on_approve = Some("join-1".into());
+        let mut lb = DraftTeam::new("lane-b", "Lane B");
+        lb.prompt_body = "x".into();
+        lb.outputs.on_approve = Some("join-1".into());
+        let mut after = DraftTeam::new("after", "After");
+        after.prompt_body = "x".into();
+        d.teams.push(a); d.teams.push(la); d.teams.push(lb); d.teams.push(after);
+        d.forks.push(Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] });
+        d.joins.push(Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: Some(2) });
+        d.gates.push(Gate { id: "g".into(), label: "G".into(), downstream: "after".into() });
+
+        let pipeline = d.to_pipeline();
+        let bodies: HashMap<String, String> = prompt_files(&d).into_iter()
+            .map(|(p, b)| (p.trim_start_matches("prompts/").trim_end_matches(".md").to_string(), b))
+            .collect();
+        let back = DraftPipeline::from_pipeline(&pipeline, &bodies);
+        assert_eq!(back.forks, d.forks);
+        assert_eq!(back.joins, d.joins);
+        assert_eq!(back.joins[0].quorum, Some(2));
+        assert_eq!(back.gates, d.gates);
+        assert_eq!(back.teams[0].runner.kind, agent_bus_core::RunnerKind::ClaudeCli);
+    }
+
+    #[test]
+    fn from_pipeline_tolerates_a_missing_prompt_body() {
+        let pipeline = complete_draft().to_pipeline();
+        let back = DraftPipeline::from_pipeline(&pipeline, &HashMap::new());
+        assert!(back.teams.iter().all(|t| t.prompt_body.is_empty()));
+    }
+
+    #[test]
+    fn prepare_pipeline_write_returns_yaml_path_yaml_and_prompts() {
+        let (yaml_rel, yaml, prompts) = prepare_pipeline_write(&complete_draft()).unwrap();
+        assert_eq!(yaml_rel, "pipelines/demo.yaml");
+        assert!(yaml.contains("id: demo"));
+        assert!(prompts.iter().any(|(p, _)| p == "prompts/research.md"));
+    }
+
+    #[test]
+    fn prepare_pipeline_write_errors_on_an_invalid_draft_and_writes_nothing() {
+        let mut d = complete_draft();
+        d.teams[0].outputs.on_approve = Some("ghost".into());
+        assert!(prepare_pipeline_write(&d).is_err());
     }
 
     #[test]
