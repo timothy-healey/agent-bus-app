@@ -83,6 +83,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Attempts** — counter incremented on revise; capped at 3
 - **Brake** — system-wide flag halting new claims (in-flight workers complete)
 - **Fan-out group** — the `FanOutGroup` aggregate (root `group_id`) owning the *completes-exactly-once* barrier invariant; the lane sibling Tasks reference it
+- **Early-cancel** — an opt-in per-join policy (`Join.cancel_on_reject`, P2): when one lane fails (reject / revise-cap), the fan-out group resolves to needs-human IMMEDIATELY and its outstanding lane tasks are cancelled, instead of waiting for the full barrier. Owned by the `FanOutGroup` aggregate; default off (full-barrier).
 
 ### Review
 - **Artifact** — a markdown document produced by a team (spec, plan, critique, review report). Versioned (`v1`, `v2`, …); immutable per version
