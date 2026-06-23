@@ -270,6 +270,29 @@ pub fn tools() -> Vec<ToolSpec> {
             }),
             supplier_context: "workspace".into(),
         },
+        ToolSpec {
+            name: "list_worktrees".into(),
+            description: "List a project's cleanup-candidate git worktrees (under worktrees/).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "project_id": { "type": "string" } },
+                "required": ["project_id"]
+            }),
+            supplier_context: "workspace".into(),
+        },
+        ToolSpec {
+            name: "remove_worktree".into(),
+            description: "Remove a git worktree (path must live under the project's worktrees/).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "string" },
+                    "path": { "type": "string" }
+                },
+                "required": ["project_id", "path"]
+            }),
+            supplier_context: "workspace".into(),
+        },
     ]
 }
 
@@ -358,6 +381,13 @@ mod tests {
     fn tools_publishes_read_artifact_under_workspace() {
         let t = tools();
         assert!(t.iter().any(|s| s.name == "read_artifact" && s.supplier_context == "workspace"));
+    }
+
+    #[test]
+    fn tools_publishes_worktree_commands_under_workspace() {
+        let t = tools();
+        assert!(t.iter().any(|s| s.name == "list_worktrees" && s.supplier_context == "workspace"));
+        assert!(t.iter().any(|s| s.name == "remove_worktree" && s.supplier_context == "workspace"));
     }
 
     #[test]
