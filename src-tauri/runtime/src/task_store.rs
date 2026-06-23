@@ -20,6 +20,7 @@ pub enum TaskStoreError {
 type Row = (
     String, String, String, String, Option<String>, Option<String>,
     String, String, i64, Option<String>, Option<String>, i64, i64,
+    Option<String>, Option<String>, Option<String>,
 );
 
 pub struct TaskStore {
@@ -34,8 +35,9 @@ impl TaskStore {
     pub async fn insert(&self, task: &Task) -> Result<(), TaskStoreError> {
         sqlx::query(
             "INSERT INTO tasks (id, project_id, pipeline, topic, target_repo, target_scope,
-             current_stage, state, attempts, parent_artifact, review_artifact, created_at, updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             current_stage, state, attempts, parent_artifact, review_artifact, created_at, updated_at,
+             group_id, lane, join_target)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&task.id.0)
         .bind(&task.project_id)
@@ -50,6 +52,9 @@ impl TaskStore {
         .bind(&task.review_artifact)
         .bind(task.created_at)
         .bind(task.updated_at)
+        .bind(&task.group_id)
+        .bind(&task.lane)
+        .bind(&task.join_target)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -71,12 +76,16 @@ impl TaskStore {
             review_artifact: r.10,
             created_at: r.11,
             updated_at: r.12,
+            group_id: r.13,
+            lane: r.14,
+            join_target: r.15,
         })
     }
 
     const SELECT: &'static str =
         "SELECT id, project_id, pipeline, topic, target_repo, target_scope, current_stage,
-         state, attempts, parent_artifact, review_artifact, created_at, updated_at FROM tasks";
+         state, attempts, parent_artifact, review_artifact, created_at, updated_at,
+         group_id, lane, join_target FROM tasks";
 
     pub async fn get(&self, id: &TaskId) -> Result<Task, TaskStoreError> {
         let row = sqlx::query_as::<_, Row>(&format!("{} WHERE id = ?", Self::SELECT))
@@ -104,7 +113,7 @@ impl TaskStore {
     pub async fn update(&self, task: &Task) -> Result<(), TaskStoreError> {
         let res = sqlx::query(
             "UPDATE tasks SET current_stage=?, state=?, attempts=?, parent_artifact=?,
-             review_artifact=?, updated_at=? WHERE id=?",
+             review_artifact=?, updated_at=?, group_id=?, lane=?, join_target=? WHERE id=?",
         )
         .bind(&task.current_stage)
         .bind(task.state.as_str())
@@ -112,6 +121,9 @@ impl TaskStore {
         .bind(&task.parent_artifact)
         .bind(&task.review_artifact)
         .bind(task.updated_at)
+        .bind(&task.group_id)
+        .bind(&task.lane)
+        .bind(&task.join_target)
         .bind(&task.id.0)
         .execute(&self.pool)
         .await?;
@@ -186,6 +198,7 @@ mod tests {
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         pool
     }
 
@@ -247,6 +260,29 @@ mod tests {
         let reloaded = store.get(&t.id).await.unwrap();
         assert_eq!(reloaded.state, TaskState::Running);
         assert_eq!(reloaded.current_stage, "spec-writers");
+    }
+
+    #[tokio::test]
+    async fn insert_get_round_trips_lane_fields() {
+        let store = TaskStore::new(fresh_pool().await);
+        let parent = task("research");
+        let sib = Task::forked(&parent, "lane-a", "G-1", "join-1", 500);
+        store.insert(&sib).await.unwrap();
+        let back = store.get(&sib.id).await.unwrap();
+        assert_eq!(back.group_id.as_deref(), Some("G-1"));
+        assert_eq!(back.lane.as_deref(), Some("lane-a"));
+        assert_eq!(back.join_target.as_deref(), Some("join-1"));
+    }
+
+    #[tokio::test]
+    async fn linear_task_has_null_lane_fields() {
+        let store = TaskStore::new(fresh_pool().await);
+        let t = task("research");
+        store.insert(&t).await.unwrap();
+        let back = store.get(&t.id).await.unwrap();
+        assert_eq!(back.group_id, None);
+        assert_eq!(back.lane, None);
+        assert_eq!(back.join_target, None);
     }
 
     #[tokio::test]

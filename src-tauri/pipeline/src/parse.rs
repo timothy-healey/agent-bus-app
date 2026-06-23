@@ -73,10 +73,55 @@ escalations:
     }
 
     #[test]
-    fn schema_version_defaults_to_one_when_absent() {
+    fn schema_version_defaults_to_current_when_absent() {
         let yaml = "id: x\nname: X\nteams: []\n";
         let p = parse_pipeline(yaml).unwrap();
-        assert_eq!(p.schema_version, 1);
+        assert_eq!(p.schema_version, crate::model::SCHEMA_VERSION);
+    }
+
+    const V2_FORKJOIN: &str = r#"
+id: parallel-demo
+name: Parallel Demo
+schema_version: 2
+teams:
+  - id: entry
+    name: Entry
+    prompt: prompts/entry.md
+    runner: { kind: claude-cli, model: m, effort: { mode: standard } }
+    scope: {}
+    outputs: { on_approve: fork-1 }
+  - id: reviewer-a
+    name: Reviewer A
+    prompt: prompts/a.md
+    runner: { kind: claude-cli, model: m, effort: { mode: standard } }
+    scope: {}
+    outputs: { on_approve: join-1 }
+  - id: reviewer-b
+    name: Reviewer B
+    prompt: prompts/b.md
+    runner: { kind: claude-cli, model: m, effort: { mode: standard } }
+    scope: {}
+    outputs: { on_approve: join-1 }
+forks:
+  - id: fork-1
+    lanes: [reviewer-a, reviewer-b]
+joins:
+  - id: join-1
+    waits_for: [reviewer-a, reviewer-b]
+    downstream: needs-human
+escalations:
+  - id: needs-human
+"#;
+
+    #[test]
+    fn parses_a_v2_fork_join_pipeline() {
+        let p = parse_pipeline(V2_FORKJOIN).unwrap();
+        assert_eq!(p.schema_version, 2);
+        assert_eq!(p.forks.len(), 1);
+        assert_eq!(p.forks[0].lanes, vec!["reviewer-a", "reviewer-b"]);
+        assert_eq!(p.joins.len(), 1);
+        assert_eq!(p.joins[0].waits_for, vec!["reviewer-a", "reviewer-b"]);
+        assert_eq!(p.joins[0].downstream, "needs-human");
     }
 
     #[test]

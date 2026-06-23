@@ -7,8 +7,22 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PipelineValidationError {
-    #[error("unsupported schema_version {found} (this build supports {supported})")]
-    UnsupportedSchemaVersion { found: u32, supported: u32 },
+    #[error("unsupported schema_version {found} (this build supports 1 and {max})")]
+    UnsupportedSchemaVersion { found: u32, max: u32 },
+    #[error("fork/join nodes require schema_version: 2")]
+    ForkRequiresV2,
+    #[error("fork '{fork}' lane '{lane}' does not resolve to a team")]
+    ForkLaneNotTeam { fork: String, lane: String },
+    #[error("join '{join}' waits_for '{team}' does not resolve to a team")]
+    JoinWaitsForNotTeam { join: String, team: String },
+    #[error("fork '{0}' must have at least 2 lanes")]
+    ForkTooFewLanes(String),
+    #[error("join '{join}' downstream points at unknown node '{target}'")]
+    UnresolvedJoinDownstream { join: String, target: String },
+    #[error("lane entered at '{entry}' is not linear (encountered non-team '{node}' before join '{join}')")]
+    LaneNotLinear { entry: String, node: String, join: String },
+    #[error("fork '{fork}' lanes do not match a join's waits_for")]
+    ForkJoinMismatch { fork: String },
     #[error("duplicate node id: {0}")]
     DuplicateNodeId(String),
     #[error("route on node '{node}' ({route}) points at unknown node '{target}'")]
@@ -23,15 +37,44 @@ pub enum PipelineValidationError {
     NoTeams,
 }
 
+/// Walk a fork lane from its entry team forward via on_approve edges until the
+/// join is reached. Every hop must be a team (lanes are linear team chains — no
+/// gate, escalation, or nested fork may appear inside a lane).
+fn check_lane_linear(
+    p: &Pipeline,
+    kinds: &HashMap<&str, NodeKind>,
+    entry: &str,
+    join_id: &str,
+) -> Result<(), PipelineValidationError> {
+    let mut current = entry.to_string();
+    for _ in 0..=p.teams.len() {
+        if current == join_id {
+            return Ok(());
+        }
+        if kinds.get(current.as_str()) != Some(&NodeKind::Team) {
+            return Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current.clone(), join: join_id.to_string() });
+        }
+        let team = p.teams.iter().find(|t| t.id == current).unwrap();
+        match team.outputs.on_approve.as_deref() {
+            Some(next) => current = next.to_string(),
+            None => return Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current.clone(), join: join_id.to_string() }),
+        }
+    }
+    Err(PipelineValidationError::LaneNotLinear { entry: entry.to_string(), node: current, join: join_id.to_string() })
+}
+
 /// Validate a Pipeline against the aggregate invariants. Returns Ok(()) when
 /// the graph is well-formed.
 pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
     // schema_version supported
-    if p.schema_version != SCHEMA_VERSION {
+    if p.schema_version != 1 && p.schema_version != SCHEMA_VERSION {
         return Err(PipelineValidationError::UnsupportedSchemaVersion {
             found: p.schema_version,
-            supported: SCHEMA_VERSION,
+            max: SCHEMA_VERSION,
         });
+    }
+    if p.schema_version < 2 && (!p.forks.is_empty() || !p.joins.is_empty()) {
+        return Err(PipelineValidationError::ForkRequiresV2);
     }
 
     if p.teams.is_empty() {
@@ -45,6 +88,8 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
         p.teams.iter().map(|t| (t.id.as_str(), NodeKind::Team)).collect::<Vec<_>>(),
         p.gates.iter().map(|g| (g.id.as_str(), NodeKind::Gate)).collect::<Vec<_>>(),
         p.escalations.iter().map(|e| (e.id.as_str(), NodeKind::Escalation)).collect::<Vec<_>>(),
+        p.forks.iter().map(|f| (f.id.as_str(), NodeKind::Fork)).collect::<Vec<_>>(),
+        p.joins.iter().map(|j| (j.id.as_str(), NodeKind::Join)).collect::<Vec<_>>(),
     ]
     .concat()
     {
@@ -92,6 +137,48 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
         inbound.insert(gate.downstream.as_str());
     }
 
+    let is_team = |id: &str| kinds.get(id) == Some(&NodeKind::Team);
+    for fork in &p.forks {
+        if fork.lanes.len() < 2 {
+            return Err(PipelineValidationError::ForkTooFewLanes(fork.id.clone()));
+        }
+        for lane in &fork.lanes {
+            if !is_team(lane) {
+                return Err(PipelineValidationError::ForkLaneNotTeam { fork: fork.id.clone(), lane: lane.clone() });
+            }
+            inbound.insert(lane.as_str());
+        }
+    }
+    for join in &p.joins {
+        for team in &join.waits_for {
+            if !is_team(team) {
+                return Err(PipelineValidationError::JoinWaitsForNotTeam { join: join.id.clone(), team: team.clone() });
+            }
+        }
+        if !kinds.contains_key(join.downstream.as_str()) {
+            return Err(PipelineValidationError::UnresolvedJoinDownstream { join: join.id.clone(), target: join.downstream.clone() });
+        }
+        inbound.insert(join.downstream.as_str());
+        inbound.insert(join.id.as_str());
+    }
+
+    for fork in &p.forks {
+        let paired = p.joins.iter().find(|j| {
+            fork.lanes.iter().all(|lane| check_lane_linear(p, &kinds, lane, &j.id).is_ok())
+        });
+        match paired {
+            Some(_join) => {}
+            None => {
+                if let Some(j) = p.joins.first() {
+                    for lane in &fork.lanes {
+                        check_lane_linear(p, &kinds, lane, &j.id)?;
+                    }
+                }
+                return Err(PipelineValidationError::ForkJoinMismatch { fork: fork.id.clone() });
+            }
+        }
+    }
+
     // reachability: every team except the first declared (the entry team) must
     // receive at least one inbound edge. The first team is the entry point and
     // is reachable by definition (inject drops topics into it).
@@ -136,6 +223,8 @@ mod tests {
             teams: vec![team("research", Some("gate-1")), team("writers", Some("needs-human"))],
             gates: vec![Gate { id: "gate-1".into(), label: "G".into(), downstream: "writers".into() }],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![],
+            joins: vec![],
         }
     }
 
@@ -148,10 +237,10 @@ mod tests {
     fn unsupported_schema_version_is_rejected() {
         let mut p = valid_pipeline();
         p.schema_version = 99;
-        assert_eq!(
+        assert!(matches!(
             validate(&p),
-            Err(PipelineValidationError::UnsupportedSchemaVersion { found: 99, supported: 1 })
-        );
+            Err(PipelineValidationError::UnsupportedSchemaVersion { found: 99, .. })
+        ));
     }
 
     #[test]
@@ -197,5 +286,116 @@ mod tests {
         let mut p = valid_pipeline();
         p.teams.clear();
         assert_eq!(validate(&p), Err(PipelineValidationError::NoTeams));
+    }
+
+    use crate::model::{Fork, Join};
+
+    fn lane_team(id: &str, approve: &str) -> Team {
+        let mut t = team(id, Some(approve));
+        t.outputs.on_revise = None;
+        t.outputs.on_reject = Some("needs-human".into());
+        t
+    }
+
+    fn valid_v2_pipeline() -> Pipeline {
+        Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 2,
+            teams: vec![
+                team("entry", Some("fork-1")),
+                lane_team("lane-a", "join-1"),
+                lane_team("lane-b", "join-1"),
+                team("after", Some("needs-human")),
+            ],
+            gates: vec![],
+            escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into() }],
+        }
+    }
+
+    #[test]
+    fn schema_version_one_is_still_accepted() {
+        assert_eq!(validate(&valid_pipeline()), Ok(()));
+    }
+
+    #[test]
+    fn schema_version_two_is_accepted() {
+        assert_eq!(validate(&valid_v2_pipeline()), Ok(()));
+    }
+
+    #[test]
+    fn an_unsupported_version_is_still_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.schema_version = 99;
+        assert!(matches!(validate(&p), Err(PipelineValidationError::UnsupportedSchemaVersion { found: 99, .. })));
+    }
+
+    #[test]
+    fn v1_with_a_fork_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.schema_version = 1;
+        assert_eq!(validate(&p), Err(PipelineValidationError::ForkRequiresV2));
+    }
+
+    #[test]
+    fn fork_lane_must_resolve_to_a_team() {
+        let mut p = valid_v2_pipeline();
+        p.forks[0].lanes[0] = "ghost".into();
+        assert_eq!(validate(&p), Err(PipelineValidationError::ForkLaneNotTeam { fork: "fork-1".into(), lane: "ghost".into() }));
+    }
+
+    #[test]
+    fn join_waits_for_must_resolve_to_a_team() {
+        let mut p = valid_v2_pipeline();
+        p.joins[0].waits_for[1] = "ghost".into();
+        assert_eq!(validate(&p), Err(PipelineValidationError::JoinWaitsForNotTeam { join: "join-1".into(), team: "ghost".into() }));
+    }
+
+    #[test]
+    fn fork_with_one_lane_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.forks[0].lanes = vec!["lane-a".into()];
+        p.joins[0].waits_for = vec!["lane-a".into()];
+        assert_eq!(validate(&p), Err(PipelineValidationError::ForkTooFewLanes("fork-1".into())));
+    }
+
+    #[test]
+    fn join_downstream_must_resolve() {
+        let mut p = valid_v2_pipeline();
+        p.joins[0].downstream = "ghost".into();
+        assert_eq!(validate(&p), Err(PipelineValidationError::UnresolvedJoinDownstream { join: "join-1".into(), target: "ghost".into() }));
+    }
+
+    #[test]
+    fn fork_target_team_is_reachable_via_fork_lane() {
+        let p = valid_v2_pipeline();
+        assert_eq!(validate(&p), Ok(()));
+    }
+
+    use crate::model::Gate as GateNode;
+
+    #[test]
+    fn a_gate_inside_a_lane_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.teams[1].outputs.on_approve = Some("gate-x".into());
+        p.gates.push(GateNode { id: "gate-x".into(), label: "X".into(), downstream: "join-1".into() });
+        assert_eq!(validate(&p), Err(PipelineValidationError::LaneNotLinear { entry: "lane-a".into(), node: "gate-x".into(), join: "join-1".into() }));
+    }
+
+    #[test]
+    fn a_nested_fork_inside_a_lane_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.teams[1].outputs.on_approve = Some("fork-2".into());
+        p.forks.push(Fork { id: "fork-2".into(), lanes: vec!["lane-b".into(), "after".into()] });
+        assert_eq!(validate(&p), Err(PipelineValidationError::LaneNotLinear { entry: "lane-a".into(), node: "fork-2".into(), join: "join-1".into() }));
+    }
+
+    #[test]
+    fn a_multi_team_linear_lane_is_accepted() {
+        let mut p = valid_v2_pipeline();
+        p.teams[1].outputs.on_approve = Some("lane-a2".into());
+        p.teams.push(lane_team("lane-a2", "join-1"));
+        p.joins[0].waits_for = vec!["lane-a2".into(), "lane-b".into()];
+        assert_eq!(validate(&p), Ok(()));
     }
 }
