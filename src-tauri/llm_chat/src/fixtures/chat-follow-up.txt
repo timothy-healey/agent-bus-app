@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"sess-first","model":"claude-opus-4-8"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Yes — "}],"usage":{"input_tokens":1500,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":900}}}
+{"type":"result","subtype":"success","is_error":false,"result":"Yes — I injected the topic; it is now task T-043.","usage":{"input_tokens":1500,"output_tokens":12,"cache_creation_input_tokens":0,"cache_read_input_tokens":900},"session_id":"sess-first"}

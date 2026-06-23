@@ -12,8 +12,11 @@ use pipeline::model::{Pipeline, Team};
 
 use conversational_control::catalog::ToolCatalog;
 use conversational_control::dispatch::ToolDispatcher;
+#[allow(unused_imports)]
 use conversational_control::engine::CommandEngine;
+use conversational_control::engine::{ConversationEngine, EngineReply};
 use conversational_control::store::ConversationStore;
+use llm_chat::chat::{ChatRequest, ChatRunner};
 use conversational_control::api::TerminalState;
 use agent_bus_core::{ToolCallRequest, ToolCallResult};
 use async_trait::async_trait;
@@ -95,6 +98,53 @@ impl runtime::revision::RevisionBundleReader for SqliteRevisionReader {
 
 fn ok(v: serde_json::Value) -> ToolCallResult { ToolCallResult::Ok { result: v } }
 fn err(e: impl ToString) -> ToolCallResult { ToolCallResult::Err { error: e.to_string() } }
+
+/// The free-form chat engine for the god terminal (spec Consumer 1). A
+/// ConversationEngine that delegates each user turn to the llm_chat ACL. Lives
+/// at the composition root because it is the one place allowed to import both
+/// `conversational_control` (the trait) and `llm_chat` (the runner) without
+/// creating a cross-context cycle (F2/D3). Uses `project_id` as the stable
+/// `dialogue_id` (one terminal conversation per project — D4). Produces prose
+/// only; tool dispatch via the catalog is a v1.1 merge with CommandEngine (D8).
+pub struct LlmEngine {
+    runner: Arc<dyn ChatRunner>,
+    dialogue_id: String,
+    system_prompt: String,
+    model: String,
+    thinking_budget: u32,
+}
+
+impl LlmEngine {
+    pub fn new(
+        runner: Arc<dyn ChatRunner>,
+        dialogue_id: String,
+        system_prompt: String,
+        model: String,
+        thinking_budget: u32,
+    ) -> Self {
+        Self { runner, dialogue_id, system_prompt, model, thinking_budget }
+    }
+}
+
+#[async_trait]
+impl ConversationEngine for LlmEngine {
+    async fn respond(&self, input: &str, _catalog: &ToolCatalog) -> EngineReply {
+        let req = ChatRequest {
+            dialogue_id: self.dialogue_id.clone(),
+            system_prompt: self.system_prompt.clone(),
+            user_message: input.to_string(),
+            model: self.model.clone(),
+            thinking_budget: self.thinking_budget,
+        };
+        match self.runner.chat(&req).await {
+            Ok(reply) => EngineReply { text: reply.text, tool_calls: vec![] },
+            // A chat failure becomes a clear, non-panicking error turn (spec
+            // §Error handling). The root's existing rate-limit handling can read
+            // the text; the terminal never crashes on a missing `claude`.
+            Err(e) => EngineReply { text: format!("[terminal error] {e}"), tool_calls: vec![] },
+        }
+    }
+}
 
 #[async_trait]
 impl ToolDispatcher for RootDispatcher {
@@ -302,14 +352,31 @@ pub fn run() {
                 let catalog = Arc::new(ToolCatalog::new(specs));
                 debug_assert!(catalog.duplicate_names().is_empty(), "tool name collision in catalog");
 
-                let dispatcher: Arc<dyn ToolDispatcher> = Arc::new(RootDispatcher {
+                // Constructed for the v1.1 slash-command merge (CommandEngine
+                // over RootDispatcher). v1 free-form chat dispatches no tools, so
+                // it is intentionally unused for now (one rename away from live).
+                let _dispatcher: Arc<dyn ToolDispatcher> = Arc::new(RootDispatcher {
                     runtime: runtime_state_arc.clone(),
                     usage: usage_state_arc.clone(),
                     app: handle.clone(),
                 });
 
+                // The terminal's free-form chat engine (Plan llm_chat). One
+                // chat runner; the conversation's project_id is the stable
+                // dialogue_id (D4). The system framing is the terminal's
+                // operating prompt; model + budget are v1 defaults.
+                let chat_runner: Arc<dyn llm_chat::chat::ChatRunner> =
+                    Arc::new(llm_chat::claude_cli::ClaudeChatRunner::new());
                 let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
-                    Arc::new(CommandEngine::new(dispatcher.clone()));
+                    Arc::new(LlmEngine::new(
+                        chat_runner.clone(),
+                        project_id.clone(),
+                        "You are the god terminal for the Agent Bus app. Answer the operator's \
+                         questions about the pipeline, tasks, and usage concisely."
+                            .into(),
+                        "claude-opus-4-8".into(),
+                        8192,
+                    ));
 
                 let convo_store = Arc::new(ConversationStore::new(pool.clone()));
 
@@ -560,5 +627,79 @@ mod migration_tests {
         assert_eq!(version, 5, "all five migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+}
+
+#[cfg(test)]
+mod llm_engine_tests {
+    use super::LlmEngine;
+    use conversational_control::api::send_message_inner;
+    use conversational_control::catalog::ToolCatalog;
+    use conversational_control::engine::ConversationEngine;
+    use conversational_control::store::ConversationStore;
+    use llm_chat::chat::{ChatReply, ChatRunner, ChatUsage};
+    use llm_chat::fake::FakeChatRunner;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::Arc;
+
+    async fn store_with_project() -> ConversationStore {
+        let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        sqlx::query(include_str!("../migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,name,root_path,created_at,updated_at) VALUES ('p','n','/p',0,0)")
+            .execute(&pool).await.unwrap();
+        ConversationStore::new(pool)
+    }
+
+    #[tokio::test]
+    async fn llm_engine_respond_returns_the_runner_reply_text() {
+        let fake = Arc::new(FakeChatRunner::new(vec![ChatReply {
+            text: "T-042 is in design.".into(),
+            usage: ChatUsage::default(),
+        }]));
+        let engine = LlmEngine::new(fake.clone() as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192);
+        let catalog = ToolCatalog::new(vec![]);
+        let reply = engine.respond("how is T-042 going?", &catalog).await;
+        assert_eq!(reply.text, "T-042 is in design.");
+        assert!(reply.tool_calls.is_empty()); // free-form chat dispatches nothing in v1 (D8)
+        // the dialogue_id handed to the runner is the project_id (D4)
+        let received = fake.received.lock().unwrap();
+        assert_eq!(received[0].dialogue_id, "p");
+        assert_eq!(received[0].user_message, "how is T-042 going?");
+        assert_eq!(received[0].system_prompt, "framing");
+    }
+
+    #[tokio::test]
+    async fn llm_engine_drives_send_message_inner_end_to_end() {
+        let store = store_with_project().await;
+        let fake = Arc::new(FakeChatRunner::new(vec![ChatReply {
+            text: "Hello from the model.".into(),
+            usage: ChatUsage::default(),
+        }]));
+        let engine: Arc<dyn ConversationEngine> =
+            Arc::new(LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192));
+        let catalog = ToolCatalog::new(vec![]);
+
+        let convo = send_message_inner("p", &catalog, engine.as_ref(), &store, "hi there", 500)
+            .await
+            .unwrap();
+        // user turn + assistant turn appended, alternation held
+        assert_eq!(convo.turns.len(), 2);
+        assert_eq!(convo.turns[0].text, "hi there");
+        assert_eq!(convo.turns[1].text, "Hello from the model.");
+        // persisted
+        let reloaded = store.load("p").await.unwrap().unwrap();
+        assert_eq!(reloaded.turns.len(), 2);
+        assert_eq!(reloaded.turns[1].text, "Hello from the model.");
+    }
+
+    #[tokio::test]
+    async fn llm_engine_surfaces_a_chat_error_as_an_error_turn() {
+        let fake = Arc::new(FakeChatRunner::failing(llm_chat::chat::ChatError::Spawn("no claude on PATH".into())));
+        let engine = LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192);
+        let catalog = ToolCatalog::new(vec![]);
+        let reply = engine.respond("hi", &catalog).await;
+        // a clear error turn, no panic, no tool calls
+        assert!(reply.text.contains("spawn failed") || reply.text.contains("error"));
+        assert!(reply.tool_calls.is_empty());
     }
 }
