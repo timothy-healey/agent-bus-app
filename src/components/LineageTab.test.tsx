@@ -31,4 +31,32 @@ describe("LineageTab", () => {
     expect(screen.getByText("topic")).toBeInTheDocument();
     expect(screen.getByText(/no upstream artifacts/i)).toBeInTheDocument();
   });
+
+  it("enters compare mode and calls onCompare once two entries are selected", () => {
+    const onCompare = vi.fn();
+    render(
+      <LineageTab
+        task={t({ parent_artifact: "artifacts/specs/T-1-v1.md", review_artifact: "artifacts/reviews/T-1-rev.md" })}
+        onOpenArtifact={() => {}}
+        onCompare={onCompare}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^compare/i }));
+    // In compare mode each artifact entry is a selectable checkbox.
+    fireEvent.click(screen.getByRole("checkbox", { name: /T-1-v1\.md/ }));
+    expect(onCompare).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /T-1-rev\.md/ }));
+    expect(onCompare).toHaveBeenCalledWith("artifacts/specs/T-1-v1.md", "artifacts/reviews/T-1-rev.md");
+  });
+
+  it("does not offer compare when fewer than two artifacts exist", () => {
+    render(
+      <LineageTab
+        task={t({ parent_artifact: "artifacts/specs/T-1-v1.md" })}
+        onOpenArtifact={() => {}}
+        onCompare={() => {}}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /^compare/i })).not.toBeInTheDocument();
+  });
 });
