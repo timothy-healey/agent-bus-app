@@ -211,6 +211,7 @@ async fn load_active(
         id: String::new(), name: String::new(), description: String::new(),
         schema_version: pipeline::model::SCHEMA_VERSION,
         teams: vec![], gates: vec![], escalations: vec![],
+        forks: vec![], joins: vec![],
     };
     let Ok(projects) = project_store.list().await else { return (String::new(), String::new(), empty); };
     let Some(project) = projects.into_iter().next() else { return (String::new(), String::new(), empty); };

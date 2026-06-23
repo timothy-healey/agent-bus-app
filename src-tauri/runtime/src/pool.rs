@@ -233,7 +233,8 @@ mod tests {
 
     fn pipeline_with(teams: Vec<Team>, gates: Vec<Gate>) -> Pipeline {
         Pipeline { id: "p".into(), name: "P".into(), description: String::new(), schema_version: 1,
-            teams, gates, escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }] }
+            teams, gates, escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks: vec![], joins: vec![] }
     }
 
     fn ctx_with(pool: SqlitePool, pipeline: Pipeline, runner: Arc<dyn Runner>, root: PathBuf) -> PoolContext {
