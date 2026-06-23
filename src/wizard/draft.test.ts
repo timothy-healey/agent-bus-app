@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emptyDraft, WIZARD_STEPS, renameTeam, setPromptBody, setTeamModel, addTeam, removeTeam } from "./draft";
 import { setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
+import { addGate, removeGate, setTeamApprove } from "./draft";
 
 describe("wizard draft helpers", () => {
   it("emptyDraft has no teams + current schema version", () => {
@@ -74,5 +75,29 @@ describe("advanced team config helpers (W2)", () => {
     expect(d1.teams[0].scope.reads).toEqual(["src/**", "docs/**"]);
     const d2 = setTeamWrites(base, "research", "artifacts/**");
     expect(d2.teams[0].scope.writes).toEqual(["artifacts/**"]);
+  });
+});
+
+describe("gate helpers (W3)", () => {
+  const base = addTeam(addTeam(emptyDraft(), "plan-writers", "Plan Writers"), "implementers", "Implementers");
+
+  it("addGate appends a gate node", () => {
+    const d = addGate(base, "gate-2", "Plan review", "implementers");
+    expect(d.gates).toEqual([{ id: "gate-2", label: "Plan review", downstream: "implementers" }]);
+  });
+
+  it("addGate is a no-op on a duplicate id", () => {
+    const d = addGate(addGate(base, "gate-2", "Plan review", "implementers"), "gate-2", "again", "implementers");
+    expect(d.gates).toHaveLength(1);
+  });
+
+  it("setTeamApprove repoints a team's on_approve", () => {
+    const d = setTeamApprove(base, "plan-writers", "gate-2");
+    expect(d.teams.find((t) => t.id === "plan-writers")?.outputs.on_approve).toBe("gate-2");
+  });
+
+  it("removeGate drops the gate node", () => {
+    const d = removeGate(addGate(base, "gate-2", "Plan review", "implementers"), "gate-2");
+    expect(d.gates).toHaveLength(0);
   });
 });
