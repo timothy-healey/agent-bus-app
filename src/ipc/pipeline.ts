@@ -194,3 +194,23 @@ export async function createProjectFromDraft(
 ): Promise<{ id: string; name: string; root_path: string; active_pipeline_id: string | null; created_at: number; updated_at: number }> {
   return await invoke("create_project_from_draft", { name, root, draft });
 }
+
+/** Load a project's pipeline (resolved) into an editable DraftPipeline, reading
+ *  each team's prompt body back from disk (A1 editor seed). */
+export async function pipelineToDraft(
+  projectId: string,
+  projectRoot: string,
+  id: string,
+): Promise<DraftPipeline> {
+  return await invoke<DraftPipeline>("pipeline_to_draft_cmd", {
+    project_id: projectId,
+    project_root: projectRoot,
+    id,
+  });
+}
+
+/** Hard-validate then overwrite the project's active pipeline YAML + prompt files
+ *  (A1). Throws (no write) on a hard-validation failure. */
+export async function savePipelineEdits(projectId: string, draft: DraftPipeline): Promise<void> {
+  await invoke<void>("save_pipeline_edits", { project_id: projectId, draft });
+}
