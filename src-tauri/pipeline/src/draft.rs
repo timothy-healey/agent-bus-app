@@ -212,6 +212,7 @@ pub fn best_effort_validate(draft: &DraftPipeline) -> Vec<String> {
     for f in &draft.forks { known.insert(f.id.as_str()); }
     for j in &draft.joins { known.insert(j.id.as_str()); }
     for e in &draft.escalations { known.insert(e.id.as_str()); }
+    for g in &draft.gates { known.insert(g.id.as_str()); }
 
     for t in &draft.teams {
         if t.prompt_body.trim().is_empty() {
@@ -244,6 +245,30 @@ pub fn best_effort_validate(draft: &DraftPipeline) -> Vec<String> {
         }
         if !known.contains(j.downstream.as_str()) {
             issues.push(format!("join '{}' downstream '{}' is unknown", j.id, j.downstream));
+        }
+    }
+    for g in &draft.gates {
+        if !known.contains(g.downstream.as_str()) {
+            issues.push(format!("gate '{}' downstream '{}' is unknown", g.id, g.downstream));
+        }
+    }
+    // Parallel-flow v1 rule: no gate may sit inside a fork lane. A lane team whose
+    // on_approve points at a gate violates it (hard validate rejects this via
+    // LaneNotLinear; surface it live too).
+    let mut lane_teams: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for f in &draft.forks {
+        for lane in &f.lanes {
+            lane_teams.insert(lane.as_str());
+        }
+    }
+    let gate_ids: std::collections::HashSet<&str> = draft.gates.iter().map(|g| g.id.as_str()).collect();
+    for t in &draft.teams {
+        if lane_teams.contains(t.id.as_str()) {
+            if let Some(target) = t.outputs.on_approve.as_deref() {
+                if gate_ids.contains(target) {
+                    issues.push(format!("team '{}' in a fork lane routes to gate '{}' (no gates inside a lane)", t.id, target));
+                }
+            }
         }
     }
     issues
@@ -436,6 +461,62 @@ mod tests {
         assert_eq!(d.gates.len(), 1);
         assert_eq!(d.gates[0].downstream, "implementers");
         assert_eq!(d.teams.iter().find(|t| t.id == "plan-writers").unwrap().outputs.on_approve.as_deref(), Some("gate-2"));
+    }
+
+    #[test]
+    fn best_effort_includes_gates_in_known_nodes() {
+        use crate::model::Gate;
+        // a team routing to a gate must NOT be flagged as unknown (gates are known nodes)
+        let mut d = DraftPipeline::empty();
+        let mut a = DraftTeam::new("plan-writers", "Plan Writers");
+        a.prompt_body = "x".into();
+        a.outputs.on_approve = Some("gate-2".into());
+        let mut b = DraftTeam::new("implementers", "Implementers");
+        b.prompt_body = "y".into();
+        d.teams.push(a);
+        d.teams.push(b);
+        d.gates.push(Gate { id: "gate-2".into(), label: "G".into(), downstream: "implementers".into() });
+        assert_eq!(best_effort_validate(&d), Vec::<String>::new());
+    }
+
+    #[test]
+    fn best_effort_flags_a_gate_downstream_to_an_unknown_node() {
+        use crate::model::Gate;
+        let mut d = DraftPipeline::empty();
+        let mut a = DraftTeam::new("plan-writers", "Plan Writers");
+        a.prompt_body = "x".into();
+        d.teams.push(a);
+        d.gates.push(Gate { id: "gate-2".into(), label: "G".into(), downstream: "ghost".into() });
+        let issues = best_effort_validate(&d);
+        assert!(issues.iter().any(|i| i.contains("gate-2") && i.contains("ghost")));
+    }
+
+    #[test]
+    fn best_effort_flags_a_gate_inside_a_fork_lane() {
+        use crate::model::{Fork, Gate, Join};
+        // a fork lane team whose on_approve points at a gate (not the join) violates
+        // the parallel-flow v1 rule "no gates inside a lane" — surface it live.
+        let mut d = DraftPipeline::empty();
+        let mut entry = DraftTeam::new("entry", "Entry");
+        entry.prompt_body = "x".into();
+        entry.outputs.on_approve = Some("fork-1".into());
+        let mut la = DraftTeam::new("lane-a", "Lane A");
+        la.prompt_body = "x".into();
+        la.outputs.on_approve = Some("gate-x".into()); // gate inside the lane
+        let mut lb = DraftTeam::new("lane-b", "Lane B");
+        lb.prompt_body = "x".into();
+        lb.outputs.on_approve = Some("join-1".into());
+        let mut after = DraftTeam::new("after", "After");
+        after.prompt_body = "x".into();
+        d.teams.push(entry);
+        d.teams.push(la);
+        d.teams.push(lb);
+        d.teams.push(after);
+        d.forks.push(Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] });
+        d.joins.push(Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into() });
+        d.gates.push(Gate { id: "gate-x".into(), label: "X".into(), downstream: "join-1".into() });
+        let issues = best_effort_validate(&d);
+        assert!(issues.iter().any(|i| i.to_lowercase().contains("lane") && i.contains("gate-x")));
     }
 
     #[test]
