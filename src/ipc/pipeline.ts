@@ -103,6 +103,7 @@ export interface DraftPipeline {
   teams: DraftTeam[];
   forks: Fork[];
   joins: Join[];
+  gates: Gate[];
   escalations: Escalation[];
 }
 
