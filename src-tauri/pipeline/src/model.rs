@@ -192,6 +192,16 @@ pub struct Join {
     /// no SCHEMA_VERSION bump. The policy is enforced by the FanOutGroup barrier.
     #[serde(default)]
     pub cancel_on_reject: bool,
+    /// Quorum policy (P3). When `Some(n)`, the join proceeds to `downstream` as
+    /// soon as `n` of its lanes approve (early-resolve on success); if reaching
+    /// `n` becomes impossible (unsettled lanes + approvals-so-far < n) it resolves
+    /// to needs-human. `None` (default) = all-must-approve (the original barrier).
+    /// Additive-optional, no SCHEMA_VERSION bump. The rule lives on the
+    /// `FanOutGroup` aggregate. PRECEDENCE: when `quorum` is set it governs
+    /// success and `cancel_on_reject` is ignored — a reject only matters insofar
+    /// as it can make quorum impossible (see DOMAIN.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quorum: Option<u32>,
 }
 
 /// A node kind discriminator used by validation and the frontend viewer.
@@ -318,7 +328,7 @@ mod tests {
             gates: vec![],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
             forks: vec![Fork { id: "fork-1".into(), lanes: vec!["a".into(), "b".into()] }],
-            joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "research".into(), cancel_on_reject: false }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["a".into(), "b".into()], downstream: "research".into(), cancel_on_reject: false, quorum: None }],
         };
         let ids = p.node_ids();
         assert!(ids.contains(&("fork-1".into(), NodeKind::Fork)));
@@ -390,11 +400,42 @@ mod tests {
             waits_for: vec!["a".into(), "b".into()],
             downstream: "after".into(),
             cancel_on_reject: true,
+            quorum: None,
         };
         let s = serde_json::to_string(&j).unwrap();
         let back: Join = serde_json::from_str(&s).unwrap();
         assert_eq!(j, back);
         assert!(back.cancel_on_reject);
+    }
+
+    #[test]
+    fn join_quorum_defaults_to_none_when_absent() {
+        let json = r#"{"id":"join-1","waits_for":["a","b"],"downstream":"after"}"#;
+        let j: Join = serde_json::from_str(json).unwrap();
+        assert!(j.quorum.is_none());
+        assert!(!j.cancel_on_reject);
+    }
+
+    #[test]
+    fn join_round_trips_quorum_some() {
+        let j = Join {
+            id: "join-1".into(),
+            waits_for: vec!["a".into(), "b".into(), "c".into()],
+            downstream: "after".into(),
+            cancel_on_reject: false,
+            quorum: Some(2),
+        };
+        let s = serde_json::to_string(&j).unwrap();
+        let back: Join = serde_json::from_str(&s).unwrap();
+        assert_eq!(j, back);
+        assert_eq!(back.quorum, Some(2));
+    }
+
+    #[test]
+    fn join_omits_quorum_from_json_when_none() {
+        let j = Join { id: "j".into(), waits_for: vec!["a".into(), "b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: None };
+        let s = serde_json::to_string(&j).unwrap();
+        assert!(!s.contains("quorum"), "None quorum must not be serialized: {s}");
     }
 
     #[test]

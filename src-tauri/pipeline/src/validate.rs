@@ -37,6 +37,8 @@ pub enum PipelineValidationError {
     NoTeams,
     #[error("team '{0}' has no resolvable runner (no model from the team or pipeline defaults)")]
     TeamHasNoRunner(String),
+    #[error("join '{join}' quorum {quorum} out of range (must be 1..={lanes})")]
+    QuorumOutOfRange { join: String, quorum: u32, lanes: u32 },
 }
 
 /// Walk a fork lane from its entry team forward via on_approve edges until the
@@ -174,6 +176,12 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
         }
         if !kinds.contains_key(join.downstream.as_str()) {
             return Err(PipelineValidationError::UnresolvedJoinDownstream { join: join.id.clone(), target: join.downstream.clone() });
+        }
+        if let Some(q) = join.quorum {
+            let lanes = join.waits_for.len() as u32;
+            if q < 1 || q > lanes {
+                return Err(PipelineValidationError::QuorumOutOfRange { join: join.id.clone(), quorum: q, lanes });
+            }
         }
         inbound.insert(join.downstream.as_str());
         inbound.insert(join.id.as_str());
@@ -339,7 +347,7 @@ mod tests {
             gates: vec![],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
             forks: vec![Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] }],
-            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false }],
+            joins: vec![Join { id: "join-1".into(), waits_for: vec!["lane-a".into(), "lane-b".into()], downstream: "after".into(), cancel_on_reject: false, quorum: None }],
         }
     }
 
@@ -418,6 +426,29 @@ mod tests {
         p.teams[1].outputs.on_approve = Some("fork-2".into());
         p.forks.push(Fork { id: "fork-2".into(), lanes: vec!["lane-b".into(), "after".into()] });
         assert_eq!(validate(&p), Err(PipelineValidationError::LaneNotLinear { entry: "lane-a".into(), node: "fork-2".into(), join: "join-1".into() }));
+    }
+
+    #[test]
+    fn quorum_within_bounds_is_accepted() {
+        let mut p = valid_v2_pipeline();
+        p.joins[0].quorum = Some(1);
+        assert_eq!(validate(&p), Ok(()));
+        p.joins[0].quorum = Some(2); // == number of lanes (all-must-approve equiv)
+        assert_eq!(validate(&p), Ok(()));
+    }
+
+    #[test]
+    fn quorum_zero_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.joins[0].quorum = Some(0);
+        assert_eq!(validate(&p), Err(PipelineValidationError::QuorumOutOfRange { join: "join-1".into(), quorum: 0, lanes: 2 }));
+    }
+
+    #[test]
+    fn quorum_above_lane_count_is_rejected() {
+        let mut p = valid_v2_pipeline();
+        p.joins[0].quorum = Some(3); // only 2 lanes
+        assert_eq!(validate(&p), Err(PipelineValidationError::QuorumOutOfRange { join: "join-1".into(), quorum: 3, lanes: 2 }));
     }
 
     #[test]
