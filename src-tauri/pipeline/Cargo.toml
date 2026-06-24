@@ -14,6 +14,7 @@ thiserror.workspace = true
 tauri = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
