@@ -40,7 +40,7 @@ export default function App() {
   // ④e: the board is run-scoped. useRuns tracks the project's runs + the selected
   // run (defaults to the active/newest run, follows fresh runs when unpinned);
   // useStoreOccupancy feeds the lane "n/cap" indicators for that run.
-  const { runs, selectedRun, activeRun, select: selectRun } = useRuns(activeProject?.id ?? null);
+  const { runs, selectedRun, activeRun, select: selectRun, loading: runsLoading } = useRuns(activeProject?.id ?? null);
   const { occupancy } = useStoreOccupancy(selectedRun?.id ?? null);
   const [starting, setStarting] = useState(false);
   // Cards shown on the board/list are scoped to the selected run. Before any run
@@ -255,6 +255,7 @@ export default function App() {
           onSelect={selectRun}
           onStartRun={handleStartRun}
           starting={starting}
+          loading={runsLoading}
         />
       )}
       <main style={{ flex: 1, overflow: "auto" }}>

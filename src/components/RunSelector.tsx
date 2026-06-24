@@ -11,6 +11,9 @@ export interface RunSelectorProps {
   onStartRun: () => void;
   /// True while a Start is in flight — disables the button + shows progress.
   starting?: boolean;
+  /// True during the initial runs fetch — shows a quiet "loading runs…" instead
+  /// of flashing the "no runs yet" empty state before the first result lands.
+  loading?: boolean;
 }
 
 /// A short, stable label for a run option: the tail of its id + its status. The
@@ -26,7 +29,7 @@ export function runOptionLabel(run: Run, isActive: boolean): string {
 /// the work (the A6 insight). The topbar brake toggle is Stop. When there are no
 /// runs yet, the selector is replaced by an inline "no runs yet" hint so Start is
 /// the obvious next action.
-export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun, starting = false }: RunSelectorProps) {
+export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun, starting = false, loading = false }: RunSelectorProps) {
   const bar: CSSProperties = {
     display: "flex",
     alignItems: "center",
@@ -58,7 +61,9 @@ export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun
       <span id="run-selector-label" style={label}>
         run
       </span>
-      {runs.length === 0 ? (
+      {loading && runs.length === 0 ? (
+        <span style={empty} aria-live="polite">loading runs…</span>
+      ) : runs.length === 0 ? (
         <span style={empty}>no runs yet — start a run</span>
       ) : (
         <select

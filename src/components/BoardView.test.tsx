@@ -32,7 +32,7 @@ function task(id: string, stage: string, state: Task["state"], extra: Partial<Ta
 
 describe("BoardView", () => {
   it("renders a lane per node with its label", () => {
-    render(<BoardView pipeline={pipeline()} tasks={[]} onOpenCard={() => {}} />);
+    render(<BoardView pipeline={pipeline()} tasks={[]} hasRun onOpenCard={() => {}} />);
     expect(screen.getByText("Research")).toBeInTheDocument();
     expect(screen.getByText("Spec Writers")).toBeInTheDocument();
     expect(screen.getByText("Gate 1")).toBeInTheDocument();
@@ -43,6 +43,7 @@ describe("BoardView", () => {
       <BoardView
         pipeline={pipeline()}
         tasks={[task("T-1", "research", "running")]}
+        hasRun
         onOpenCard={() => {}}
       />,
     );
@@ -55,6 +56,7 @@ describe("BoardView", () => {
       <BoardView
         pipeline={pipeline()}
         tasks={[task("T-1", "research", "running")]}
+        hasRun
         onOpenCard={onOpen}
       />,
     );
@@ -68,7 +70,7 @@ describe("BoardView", () => {
   });
 
   it("shows the lane header when the pipeline has lanes but no tasks", () => {
-    render(<BoardView pipeline={pipeline()} tasks={[]} tokensByTask={{}} onOpenCard={() => {}} />);
+    render(<BoardView pipeline={pipeline()} tasks={[]} tokensByTask={{}} hasRun onOpenCard={() => {}} />);
     // the board is not blank-blank — at minimum the lane label shows.
     expect(screen.getByText("Research")).toBeInTheDocument();
   });
