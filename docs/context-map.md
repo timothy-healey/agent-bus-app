@@ -73,7 +73,7 @@ flowchart TB
 | From → To | Pattern | Surface / contract |
 |---|---|---|
 | Workspace → all six others | **Shared Kernel** | Path-resolution variables: `${project}`, `${target_repo}`, `${task_id}`, `${agent_bus}` |
-| Pipeline Authoring ↔ Runtime | **Shared Kernel** (`schema_version: 2`) | The live pipeline graph (now incl. fork/join parallel lanes); hot-reload supported with save-validation preventing orphan in-flight tasks |
+| Pipeline Authoring ↔ Runtime | **Shared Kernel** (`schema_version: 3`) | The live pipeline graph (now incl. fork/join parallel lanes, per-team `role` + bounded input `store`); hot-reload supported with save-validation preventing orphan in-flight tasks |
 | Runtime → Review | **Customer-Supplier** | Runtime publishes "task reached a gate" events; Review consumes |
 | Review → Runtime | **Conformist** | Review emits verdicts in Runtime's vocabulary (`approve` / `revise` / `reject`); Runtime owns the state machine |
 | Runtime → Runners | **Anti-Corruption Layer** | Runners insulates Runtime from Claude's idiom (CLI flags, API params, stream-json shape) |
