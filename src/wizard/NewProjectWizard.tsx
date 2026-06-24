@@ -1,12 +1,9 @@
 import type React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createProjectFromDraft, kickoffGenerate, listSeedTemplates, seedTemplate, type DraftPipeline, type SeedTemplateSummary, type Step } from "../ipc/pipeline";
+import { createProjectFromDraft, kickoffGenerate, listSeedTemplates, seedTemplate, type DraftPipeline, type SeedTemplateSummary } from "../ipc/pipeline";
 import type { Project } from "../ipc/workspace";
 import { emptyDraft, WIZARD_STEPS, type WizardStep } from "./draft";
-import { ChatDraftPanel } from "./ChatDraftPanel";
-import { TeamsStep } from "./TeamsStep";
-import { PromptsStep } from "./PromptsStep";
-import { WiringStep } from "./WiringStep";
+import { PipelineCanvas } from "./PipelineCanvas";
 import { ReviewStep } from "./ReviewStep";
 import { Button } from "../components/ui/Button";
 import { FolderPickerField } from "../components/FolderPickerField";
@@ -18,13 +15,10 @@ interface NewProjectWizardProps {
   onCreated: (p: Project) => void;
 }
 
-const STEP_TO_API: Record<"teams" | "prompts" | "wiring", Step> = {
-  teams: "teams",
-  prompts: "prompts",
-  wiring: "wiring",
-};
-
-/// The 5-step new-project wizard (the only new-project path). Ephemeral
+/// The new-project wizard (the only new-project path): Basics → Canvas → Review.
+/// The Teams/Prompts/Wiring form trio + per-step Design Session chat are replaced
+/// by the interactive PipelineCanvas (graph-builder); Basics "Generate" / templates
+/// pre-fill the draft, which simply renders as an editable graph. Ephemeral
 /// DesignSession state (D8): step, basics, draft, a per-open sessionId. Closing
 /// discards everything.
 export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardProps) {
@@ -72,7 +66,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
     try {
       const d = await kickoffGenerate(sessionId, description);
       setDraft({ ...d, name, description });
-      go("teams");
+      go("canvas");
     } finally {
       setBusy(false);
     }
@@ -86,7 +80,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
       const d = await seedTemplate(id);
       // Carry the user's name (description optional when seeding from a template).
       setDraft({ ...d, name, description: description.trim() || d.description });
-      go("teams");
+      go("canvas");
     } finally {
       setBusy(false);
     }
@@ -153,27 +147,9 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
           </div>
         )}
 
-        {(step === "teams" || step === "prompts" || step === "wiring") && (
-          <div style={{ height: 520 }}>
-            <h3 style={{ fontSize: "var(--ts-md)", textTransform: "capitalize" }}>{step}</h3>
-            {step === "wiring" ? (
-              // Wiring's draft view is the read-only viewer; chat still drives edits.
-              <ChatDraftPanel
-                sessionId={sessionId}
-                step={STEP_TO_API[step]}
-                draft={draft}
-                onDraftChange={setDraft}
-                renderDraft={(d, onChange) => <WiringStep draft={d} onChange={onChange} />}
-              />
-            ) : (
-              <ChatDraftPanel
-                sessionId={sessionId}
-                step={STEP_TO_API[step]}
-                draft={draft}
-                onDraftChange={setDraft}
-                renderDraft={(d, onChange) => (step === "teams" ? <TeamsStep draft={d} onChange={onChange} /> : <PromptsStep draft={d} onChange={onChange} />)}
-              />
-            )}
+        {step === "canvas" && (
+          <div style={{ height: 560, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <PipelineCanvas draft={draft} onChange={setDraft} />
           </div>
         )}
 
@@ -186,10 +162,10 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
           <Button variant="ghost" onClick={requestClose}>Cancel</Button>
           <div style={{ display: "flex", gap: 8 }}>
             {step !== "basics" && (
-              <Button onClick={() => go(step === "review" ? "wiring" : WIZARD_STEPS[idx - 1])}>Back</Button>
+              <Button onClick={() => go(WIZARD_STEPS[idx - 1])}>Back</Button>
             )}
-            {(step === "teams" || step === "prompts" || step === "wiring") && (
-              <Button onClick={() => go(WIZARD_STEPS[idx + 1])}>Next</Button>
+            {step === "canvas" && (
+              <Button onClick={() => go("review")}>Next</Button>
             )}
             {step === "review" && (
               <Button variant="primary" onClick={create} disabled={busy}>
