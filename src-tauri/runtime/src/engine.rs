@@ -249,16 +249,25 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     // A gate or a fork target is a non-team node store; ensure it before reserving.
     let downstream_is_gate = matches!(downstream_kind, Some(RouteTarget::Gate(_)));
     let downstream_is_fork = matches!(downstream_kind, Some(RouteTarget::Fork(_)));
+    // A JOIN target means this team is a fork LANE: its produced item does not go
+    // into a store but settles the lane's barrier (`resolve_join_barrier`). No
+    // downstream slot is reserved here — the barrier's continuation reserves its
+    // own slot when the group completes.
+    let downstream_is_join = matches!(downstream_kind, Some(RouteTarget::Join(_)));
     if let Some(ds) = &downstream {
-        if downstream_is_gate || downstream_is_fork {
-            ctx.stores
-                .ensure(&ctx.run_id, ds, pipeline::model::DEFAULT_STORE_CAPACITY)
-                .await?;
-        }
-        let reserved = ctx.stores.reserve(&ctx.run_id, ds).await?;
-        if !reserved {
-            // Full → backpressure. No claim, no run.
-            return Ok(StepOutcome::Backpressure);
+        if downstream_is_join {
+            // No reservation — the barrier owns the continuation placement.
+        } else {
+            if downstream_is_gate || downstream_is_fork {
+                ctx.stores
+                    .ensure(&ctx.run_id, ds, pipeline::model::DEFAULT_STORE_CAPACITY)
+                    .await?;
+            }
+            let reserved = ctx.stores.reserve(&ctx.run_id, ds).await?;
+            if !reserved {
+                // Full → backpressure. No claim, no run.
+                return Ok(StepOutcome::Backpressure);
+            }
         }
     }
 
@@ -284,17 +293,33 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     let result = invoke(ctx, team, &task, system_prompt).await;
 
     // 5a. FAILURE (invoke error OR no parseable items): release the downstream
-    //     reservation, route onto the operational-failure path.
+    //     reservation (none was taken for a join target), route onto the
+    //     operational-failure path.
     let items: Vec<OutputItem> = match result {
         Ok(items) if !items.is_empty() => items,
         _ => {
             if let Some(ds) = &downstream {
-                ctx.stores.release(&ctx.run_id, ds).await?;
+                if !downstream_is_join {
+                    ctx.stores.release(&ctx.run_id, ds).await?;
+                }
             }
             operational_failure(ctx, &mut task).await?;
             return Ok(StepOutcome::Failed { task_id: task.id.0 });
         }
     };
+
+    // 5a-bis. JOIN target: this team is a fork lane. Settle the lane's barrier
+    //     with the item's reviewer verdict (default Approve when the agent emits
+    //     none), free this team's input slot, and return the barrier outcome.
+    //     The lane task carries group_id / lane / join_target (set at fork
+    //     expansion); the barrier owns the single continuation.
+    if downstream_is_join {
+        let verdict = items[0].verdict.unwrap_or(agent_bus_core::Verdict::Approve);
+        let outcome = resolve_join_barrier(ctx, &mut task, verdict).await?;
+        // The lane item left this team's input store (the barrier parked it Done).
+        ctx.stores.release(&ctx.run_id, &team.id).await?;
+        return Ok(outcome);
+    }
 
     // 5b. SUCCESS. A transformer is 1→1: take the first produced item. Commit it
     //     into the reserved downstream slot as a child work-item (carrying the
@@ -392,9 +417,11 @@ pub async fn apply_gate_verdict(
                 // Full → leave the item gated; the gate slot is NOT freed.
                 return Ok(StepOutcome::GateBackpressure { task_id: task.id.0 });
             }
-            // Commit the approved item downstream as a queued child work-item.
+            // Commit the approved item downstream. A chained gate downstream is
+            // parked `gated`; any other store target is queued for a worker.
             let key = task.item_key.clone().unwrap_or_default();
-            let child = Task::work_item(
+            let ds_is_gate = matches!(resolve_target(&ctx.pipeline, downstream), RouteTarget::Gate(_));
+            let mut child = Task::work_item(
                 task.project_id.clone(),
                 task.pipeline.clone(),
                 ctx.run_id.clone(),
@@ -404,6 +431,9 @@ pub async fn apply_gate_verdict(
                 task.target_repo.clone(),
                 now_unix(),
             );
+            if ds_is_gate {
+                child.state = TaskState::Gated;
+            }
             ctx.tasks.insert(&child).await?;
             // The gated item leaves the gate store: mark done + free the gate slot.
             task.state = TaskState::Done;
@@ -679,13 +709,16 @@ pub async fn resolve_join_barrier(
     match cont {
         crate::fanout_group::Continuation::Downstream(ds) => {
             // All-approve / quorum-met: reserve+commit the continuation downstream.
+            // The downstream may itself be a GATE (a join feeding human review) —
+            // then the continuation is parked `gated`, not queued.
+            let ds_is_gate = matches!(resolve_target(&ctx.pipeline, &ds), RouteTarget::Gate(_));
             ctx.stores
                 .ensure(&ctx.run_id, &ds, stage_store_capacity(ctx, &ds))
                 .await?;
             if !ctx.stores.reserve(&ctx.run_id, &ds).await? {
                 return Ok(StepOutcome::JoinBackpressure { group_id });
             }
-            let child = Task::work_item(
+            let mut child = Task::work_item(
                 lane_task.project_id.clone(),
                 lane_task.pipeline.clone(),
                 ctx.run_id.clone(),
@@ -695,6 +728,9 @@ pub async fn resolve_join_barrier(
                 lane_task.target_repo.clone(),
                 now_unix(),
             );
+            if ds_is_gate {
+                child.state = TaskState::Gated;
+            }
             ctx.tasks.insert(&child).await?;
             Ok(StepOutcome::Advanced {
                 task_id: lane_task.id.0.clone(),
@@ -944,6 +980,92 @@ pub async fn run_pool_until_quiescent(
             match transform_once(ctx, team).await? {
                 StepOutcome::Advanced { .. } | StepOutcome::Failed { .. } => progressed = true,
                 StepOutcome::Backpressure => backpressure_seen = true,
+                _ => {}
+            }
+        }
+
+        if !progressed {
+            let completed = try_finish_run(ctx, &ctx.run_id).await?;
+            return Ok(QuiescenceReport { completed, backpressure_seen, rounds });
+        }
+    }
+    let completed = try_finish_run(ctx, &ctx.run_id).await?;
+    Ok(QuiescenceReport { completed, backpressure_seen, rounds })
+}
+
+/// A decision the driver makes for an item parked at a human gate. `gate_id` is
+/// the gate the item is parked at; the implementor returns the operator verdict.
+/// Injected so tests drive gates without a human (the live verdicts come from the
+/// OHS commands at ④d). Default impl approves everything.
+pub trait GateDecider: Send + Sync {
+    fn decide(&self, gate_id: &str, item_key: &str) -> agent_bus_core::Verdict;
+}
+
+/// Drive the whole pipeline to quiescence INCLUDING forks, joins, and gates
+/// (④c). Extends `run_pool_until_quiescent`: in addition to the generator pass +
+/// transformer steps, each round also (a) expands every fork (`fork_once` — lane
+/// barriers settle inside `transform_once` for the lane teams), and (b) resolves
+/// every gated item via the injected `gate_decider`. The loop ends on a no-progress
+/// round, then finishes the run (which now also requires no open FanOutGroups, no
+/// gated items, and empty gate stores).
+///
+/// `transformers` must include the fork LANE teams (their `transform_once`
+/// settles the join barrier) AND the post-gate / post-join continuation teams.
+/// Single-threaded + deterministic — a test/driver harness, not the live scheduler.
+pub async fn run_pool_until_quiescent_with(
+    ctx: &EngineContext,
+    source: &Team,
+    transformers: &[Team],
+    gate_decider: &dyn GateDecider,
+    max_rounds: usize,
+) -> Result<QuiescenceReport, EngineError> {
+    let mut backpressure_seen = false;
+    let mut rounds = 0;
+    for _ in 0..max_rounds {
+        rounds += 1;
+        let mut progressed = false;
+
+        // Generator: place items until backpressure / dry.
+        loop {
+            match generate_once(ctx, source).await? {
+                StepOutcome::Generated { keys } if !keys.is_empty() => {
+                    progressed = true;
+                    continue;
+                }
+                StepOutcome::Backpressure => {
+                    backpressure_seen = true;
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        // One transformer step per non-source team (lane teams settle the join
+        // barrier inside transform_once).
+        for team in transformers {
+            match transform_once(ctx, team).await? {
+                StepOutcome::Advanced { .. } | StepOutcome::Failed { .. } | StepOutcome::Revised { .. } | StepOutcome::Escalated { .. } => progressed = true,
+                StepOutcome::Backpressure | StepOutcome::JoinBackpressure { .. } => backpressure_seen = true,
+                _ => {}
+            }
+        }
+
+        // Expand every fork (one item each), reserve-all-or-none.
+        for fork in &ctx.pipeline.forks {
+            match fork_once(ctx, fork).await? {
+                StepOutcome::Advanced { .. } => progressed = true,
+                StepOutcome::Backpressure => backpressure_seen = true,
+                _ => {}
+            }
+        }
+
+        // Resolve every gated item via the injected decider.
+        let gated = ctx.tasks.list_by_state(TaskState::Gated).await?;
+        for t in gated.iter().filter(|t| t.run_id.as_deref() == Some(ctx.run_id.as_str())) {
+            let verdict = gate_decider.decide(&t.current_stage, t.item_key.as_deref().unwrap_or(""));
+            match apply_gate_verdict(ctx, &t.id.0, verdict).await? {
+                StepOutcome::Advanced { .. } | StepOutcome::Revised { .. } | StepOutcome::Escalated { .. } => progressed = true,
+                StepOutcome::GateBackpressure { .. } => backpressure_seen = true,
                 _ => {}
             }
         }
@@ -1986,6 +2108,68 @@ mod tests {
         // 5 spec children + 5 done children all settled Done = 10 done tasks
         let done = ctx.tasks.list_by_state(TaskState::Done).await.unwrap();
         assert_eq!(done.len(), 10, "5 spec + 5 done work-items all settled");
+        assert!(ctx.runs.get(&ctx.run_id).await.unwrap().generator_dry);
+    }
+
+    // ---- Task 6: end-to-end fork + gate crux ----
+
+    struct AlwaysApprove;
+    impl GateDecider for AlwaysApprove {
+        fn decide(&self, _gate: &str, _key: &str) -> agent_bus_core::Verdict {
+            agent_bus_core::Verdict::Approve
+        }
+    }
+
+    #[tokio::test]
+    async fn crux_fork_two_lanes_then_gate_end_to_end_completes() {
+        use pipeline::model::{Fork, Join};
+        // source -(gen)-> research -(producer)-> fan(fork) -> {ddd, sec}(reviewers)
+        //   -> rejoin(join, downstream human-gate) -> human-gate(gate, downstream
+        //   done) -> done(terminal). Two candidates fan out, rejoin (collect-all,
+        //   all-approve), pass the gate (approve), and the run completes.
+        let p = pipeline_full(
+            vec![
+                team("source", Some("research"), Role::Producer, 8),
+                team("research", Some("fan"), Role::Producer, 8),
+                team("ddd", Some("rejoin"), Role::Reviewer, 8),
+                team("sec", Some("rejoin"), Role::Reviewer, 8),
+                team("done", None, Role::Producer, 16),
+            ],
+            vec![gate("human-gate", "done")],
+            vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
+            vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "human-gate".into(), cancel_on_reject: false, quorum: None }],
+        );
+        // Every invoke returns two approving candidates. Generator emits c1,c2
+        // (then deduped -> dry); producers/reviewers read items[0] (verdict
+        // approve) — an all-approve fan.
+        let out = "KEY: c1\nVERDICT: approve\nKEY: c2\nVERDICT: approve";
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out(out)))).await;
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+
+        let source = ctx.pipeline.teams[0].clone();
+        let transformers = vec![
+            ctx.pipeline.teams[1].clone(), // research
+            ctx.pipeline.teams[2].clone(), // ddd
+            ctx.pipeline.teams[3].clone(), // sec
+            ctx.pipeline.teams[4].clone(), // done
+        ];
+
+        let report = run_pool_until_quiescent_with(&ctx, &source, &transformers, &AlwaysApprove, 500).await.unwrap();
+
+        assert!(report.completed, "fork + gate pipeline completes end-to-end");
+        // both candidates were generated exactly once
+        assert_eq!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().len(), 2);
+        // every store drained to empty (incl. the gate store + lane stores)
+        for stage in ["research", "ddd", "sec", "done", "human-gate"] {
+            let occ = ctx.stores.occupancy(&ctx.run_id, stage).await.unwrap().unwrap_or(0);
+            assert_eq!(occ, 0, "{stage} store drained");
+        }
+        // no open groups, no queued/running/gated items left
+        assert!(!ctx.fanout.has_open_group(&ctx.run_id).await.unwrap());
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Queued).await.unwrap().len(), 0);
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Running).await.unwrap().len(), 0);
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Gated).await.unwrap().len(), 0);
+        assert!(ctx.runs.get(&ctx.run_id).await.unwrap().completed);
         assert!(ctx.runs.get(&ctx.run_id).await.unwrap().generator_dry);
     }
 
