@@ -104,6 +104,16 @@ pub fn parse_slice(block: &str) -> Result<Slice, serde_json::Error> {
     serde_json::from_str::<Slice>(block)
 }
 
+/// Extract the fenced json block and parse it into a typed `Slice`, returning a
+/// SPECIFIC human-readable error on failure: a distinct message for "no fenced
+/// block" vs a serde structure/parse error. This is the single failure classifier
+/// the bounded repair turn re-prompts on (so the model is told exactly what to fix).
+fn extract_and_parse(prose: &str) -> Result<Slice, String> {
+    let block = extract_json_block(prose)
+        .ok_or_else(|| "no fenced ```json block was found in the reply".to_string())?;
+    parse_slice(&block).map_err(|e| format!("the fenced json did not match the slice schema: {e}"))
+}
+
 /// The wizard steps that carry a chat (2–4). Step 1 is basics (no chat) and
 /// step 5 is review (no chat); the kickoff one-shot is its own call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +274,24 @@ mod tests {
     #[test]
     fn parse_slice_errors_on_garbage() {
         assert!(parse_slice("{not json").is_err());
+    }
+
+    #[test]
+    fn extract_and_parse_reports_a_specific_error_for_no_fence() {
+        let err = extract_and_parse("just prose, no fenced block").unwrap_err();
+        assert!(err.to_lowercase().contains("no fenced") || err.to_lowercase().contains("json block"));
+    }
+
+    #[test]
+    fn extract_and_parse_reports_a_specific_error_for_malformed_json() {
+        let err = extract_and_parse("ok\n```json\n{not valid\n```").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn extract_and_parse_returns_the_slice_on_success() {
+        let slice = extract_and_parse("ok\n```json\n{\"kind\":\"teams\",\"teams\":[]}\n```").unwrap();
+        assert!(matches!(slice, crate::draft::Slice::Teams(_)));
     }
 
     use crate::draft::{DraftPipeline, DraftTeam};
