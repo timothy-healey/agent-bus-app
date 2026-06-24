@@ -2,16 +2,18 @@ import type { CSSProperties } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
 import type { FlowNodeData } from "../draftFlow";
 import type { NodeKind } from "../mutations";
+import { nodeBorderColor } from "../../../lib/pipelineGraph";
 
 /// Custom React-Flow node renderers, one per NodeKind (vet F9 — a new kind slots
 /// in as one more entry in `nodeTypes` + the `KIND_CHROME` table, no restructure).
 /// Each shows: kind glyph, label, a connectable source/target handle, and a
-/// validation-badge slot fed by `data.warnings`.
+/// validation-badge slot fed by `data.warnings`. Border colours reuse the
+/// DESIGN.md §Pipeline-editor role palette via `nodeBorderColor`.
 
 interface KindChrome {
   glyph: string;
-  /// border accent token for this kind.
-  accent: string;
+  /// border accent token/colour for this kind (DESIGN.md role palette).
+  accent: (data: FlowNodeData) => string;
   /// sub-label under the name.
   sublabel: (data: FlowNodeData) => string;
 }
@@ -19,30 +21,31 @@ interface KindChrome {
 const KIND_CHROME: Record<NodeKind, KindChrome> = {
   team: {
     glyph: "◆",
-    accent: "var(--accent-bd)",
+    accent: (d) => nodeBorderColor(d.role === "reviewer" ? "reviewer" : "writer"),
     sublabel: (d) => (d.role === "reviewer" ? "reviewer" : "producer"),
   },
-  gate: { glyph: "⏸", accent: "var(--accent-bd)", sublabel: () => "human gate" },
-  fork: { glyph: "⋔", accent: "var(--border-2)", sublabel: () => "fork" },
-  join: { glyph: "⋈", accent: "var(--border-2)", sublabel: () => "join" },
-  escalation: { glyph: "!", accent: "var(--danger)", sublabel: () => "escalation" },
+  gate: { glyph: "⏸", accent: () => nodeBorderColor("gate"), sublabel: () => "human gate" },
+  fork: { glyph: "⋔", accent: () => nodeBorderColor("fork"), sublabel: () => "fork" },
+  join: { glyph: "⋈", accent: () => nodeBorderColor("join"), sublabel: () => "join" },
+  escalation: { glyph: "!", accent: () => nodeBorderColor("escalation"), sublabel: () => "escalation" },
 };
 
 const baseStyle = (accent: string, selected: boolean, warn: boolean): CSSProperties => ({
   minWidth: 160,
   maxWidth: 220,
-  background: "var(--surface)",
-  border: `1px solid ${warn ? "var(--warn)" : accent}`,
+  background: selected ? "var(--accent-2)" : "var(--surface)",
+  // selected = the design-system selected treatment (accent border + tint);
+  // warn falls back to the warn border only when not selected.
+  border: `1px solid ${selected ? "var(--accent-bd)" : warn ? "var(--warn)" : accent}`,
   borderRadius: "var(--r-md)",
   padding: "var(--sp-3) var(--sp-4)",
   fontFamily: "var(--font-mono)",
-  boxShadow: selected ? "0 0 0 2px var(--accent)" : "var(--shadow-card)",
-  outline: "none",
+  boxShadow: selected ? "var(--shadow-needs-you)" : "var(--shadow-card)",
 });
 
 const handleStyle: CSSProperties = {
-  width: 9,
-  height: 9,
+  width: 8,
+  height: 8,
   background: "var(--surface-3)",
   border: "1px solid var(--border-2)",
 };
@@ -50,15 +53,16 @@ const handleStyle: CSSProperties = {
 function NodeShell({ data, selected, kind }: { data: FlowNodeData; selected: boolean; kind: NodeKind }) {
   const chrome = KIND_CHROME[kind];
   const warn = data.warnings.length > 0;
+  const accent = chrome.accent(data);
   return (
     <div
-      style={baseStyle(chrome.accent, !!selected, warn)}
+      style={baseStyle(accent, !!selected, warn)}
       data-node-kind={kind}
       aria-label={`${kind} ${data.label}`}
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
-        <span aria-hidden style={{ color: chrome.accent, fontSize: "var(--ts-md)" }}>{chrome.glyph}</span>
+        <span aria-hidden style={{ color: accent, fontSize: "var(--ts-md)" }}>{chrome.glyph}</span>
         <span style={{ color: "var(--text)", fontSize: "var(--ts-base)", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {data.label}
         </span>
