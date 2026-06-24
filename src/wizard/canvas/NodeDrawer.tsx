@@ -23,6 +23,10 @@ import {
 
 const EFFORT_PRESETS: EffortMode["mode"][] = ["off", "standard", "extended-low", "extended-high", "custom"];
 
+function effortFromSelect(mode: EffortMode["mode"], currentBudget: number): EffortMode {
+  return mode === "custom" ? { mode: "custom", budget_tokens: currentBudget } : { mode };
+}
+
 interface NodeDrawerProps {
   draft: DraftPipeline;
   /// id of the selected node, or null when nothing is selected (drawer closed).
@@ -118,9 +122,7 @@ function TeamEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string;
                   setTeamEffort(
                     draft,
                     id,
-                    e.target.value === "custom"
-                      ? { mode: "custom", budget_tokens: effort.mode === "custom" ? effort.budget_tokens : 16000 }
-                      : { mode: e.target.value as EffortMode["mode"] },
+                    effortFromSelect(e.target.value as EffortMode["mode"], effort.mode === "custom" ? effort.budget_tokens : 16000),
                   ),
                 )
               }
