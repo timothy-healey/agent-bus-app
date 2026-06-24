@@ -1,7 +1,7 @@
 import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join, Workers } from "../ipc/pipeline";
 
 /** Default WIP capacity for a new team's input store (mirrors the backend
- *  default authored in WiringStep.draftToPipeline before this chunk). */
+ *  default). */
 const DEFAULT_STORE_CAPACITY = 8;
 
 /// The new-project wizard steps. The Teams/Prompts/Wiring form trio collapsed
