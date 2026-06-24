@@ -54,6 +54,13 @@ export async function removeProject(id: string): Promise<void> {
   await invoke<void>("workspace_remove_project", { id });
 }
 
+/** Activate a project's runtime: swap the active pipeline + (re)spawn its worker
+ *  loops at a fresh generation. Call after creating or selecting a project so
+ *  `/inject` targets it (runtime activation is no longer boot-only). */
+export async function activateProject(projectId: string): Promise<void> {
+  await invoke<void>("activate_project", { project_id: projectId });
+}
+
 /** Open the native folder picker; returns the chosen absolute path, or null if
  *  cancelled. Single directory selection. Sole crossing point for the
  *  `@tauri-apps/plugin-dialog` idiom (A3) — components depend on this wrapper, not

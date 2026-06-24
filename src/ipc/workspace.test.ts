@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { createProject, listProjects, readArtifact } from "./workspace";
+import { activateProject, createProject, listProjects, readArtifact } from "./workspace";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -48,5 +48,13 @@ describe("workspace ipc", () => {
       path: "artifacts/specs/T-1-v1.md",
     });
     expect(md).toContain("# Plan");
+  });
+
+  it("activateProject calls activate_project with the project id (snake_case)", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await activateProject("proj-1");
+    expect(invokeMock).toHaveBeenCalledWith("activate_project", {
+      project_id: "proj-1",
+    });
   });
 });
