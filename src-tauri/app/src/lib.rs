@@ -1,16 +1,14 @@
+mod pipeline_activator;
+
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tauri_plugin_sql::{Migration, MigrationKind};
 use workspace::{api::WorkspaceState, store::ProjectStore};
 
-use runners::anthropic_api::AnthropicApiRunner;
-use runners::claude_cli::ClaudeCliRunner;
-use runners::output::{Runner, RunnerError};
 use runtime::api::RuntimeState;
 use runtime::brake::Brake;
-use runtime::pool::{process_one_claim, PoolContext};
 use runtime::task_store::TaskStore;
-use pipeline::model::{Pipeline, Team};
+use pipeline::model::Pipeline;
 use pipeline::draft::DraftPipeline;
 use pipeline::design_session::{design_session_turn, kickoff_generate, Step, TurnResult};
 use workspace::project::Project;
@@ -627,15 +625,34 @@ pub async fn create_project_from_draft_inner(
 }
 
 /// OHS command: validate → create + write → activate. The only new-project path.
+/// After the project is created + its pipeline set active, trigger RUNTIME
+/// activation (swap RuntimeState's active pipeline + spawn the new pipeline's
+/// worker loops) so `/inject` targets the just-created project — the bug this fix
+/// addresses (runtime activation was previously boot-only).
 #[tauri::command(rename_all = "snake_case")]
 async fn create_project_from_draft(
     state: tauri::State<'_, WorkspaceState>,
+    activator: tauri::State<'_, Arc<pipeline_activator::PipelineActivator>>,
     name: String,
     root: String,
     draft: DraftPipeline,
     target_repo: Option<String>,
 ) -> Result<Project, String> {
-    create_project_from_draft_inner(&state, name, root, draft, target_repo).await
+    let project = create_project_from_draft_inner(&state, name, root, draft, target_repo).await?;
+    activator.activate(&project.id.0).await?;
+    Ok(project)
+}
+
+/// OHS command: activate a project's runtime (swap the active pipeline + respawn
+/// worker loops at a fresh generation). Called by the frontend when a project is
+/// created or selected. Idempotent: re-activating the same project just bumps the
+/// generation (old loops retire, new ones take over).
+#[tauri::command(rename_all = "snake_case")]
+async fn activate_project(
+    activator: tauri::State<'_, Arc<pipeline_activator::PipelineActivator>>,
+    project_id: String,
+) -> Result<(), String> {
+    activator.activate(&project_id).await
 }
 
 /// Read every team's prompt file body via Workspace's escape-guarded path
@@ -931,9 +948,12 @@ pub fn run() {
                 // Git author config (S1).
                 handle.manage(workspace::git_config::GitConfigState { pool: pool.clone() });
 
-                // Runtime state (Plan 3).
+                // Runtime state (Plan 3). ONE instance, shared by the Tauri
+                // commands, the terminal dispatcher, and the PipelineActivator
+                // (no divergent copies — the active pipeline is now interior-
+                // mutable and swapped on activation, so a single source of truth
+                // is essential to the re-activation fix).
                 let (project_id, project_root, project_target_repo, pipe) = load_active(&project_store).await;
-                let pipe = Arc::new(pipe);
                 let tasks = Arc::new(TaskStore::new(pool.clone()));
                 let invocation_audit = Arc::new(runtime::invocation_audit::InvocationAuditStore::new(pool.clone()));
                 let brake = Arc::new(Brake::new());
@@ -941,20 +961,17 @@ pub fn run() {
                 // F4 crash recovery: release any tasks stuck in `running`.
                 let _ = tasks.release_orphaned_running(now_unix()).await;
 
-                // Runtime state — keep an Arc so the terminal dispatcher can reuse the same logic.
-                let runtime_state_arc = Arc::new(RuntimeState {
-                    tasks: tasks.clone(), brake: brake.clone(), pipeline: pipe.clone(),
-                    project_id: project_id.clone(), project_root: project_root.clone(),
-                    project_target_repo: project_target_repo.clone(),
-                });
-                handle.manage(RuntimeState {
-                    tasks: tasks.clone(),
-                    brake: brake.clone(),
-                    pipeline: pipe.clone(),
-                    project_id: project_id.clone(),
-                    project_root: project_root.clone(),
-                    project_target_repo: project_target_repo.clone(),
-                });
+                let runtime_state_arc = Arc::new(RuntimeState::new(
+                    tasks.clone(),
+                    brake.clone(),
+                    runtime::api::ActivePipeline {
+                        pipeline: Arc::new(pipe),
+                        project_id: project_id.clone(),
+                        project_root: project_root.clone(),
+                        project_target_repo: project_target_repo.clone(),
+                    },
+                ));
+                handle.manage(runtime_state_arc.clone());
 
                 // Review state (Plan 4).
                 let review_state = review::api::ReviewState {
@@ -1052,12 +1069,32 @@ pub fn run() {
                     project_id: project_id.clone(),
                 });
 
-                // Spawn one continuous worker loop per team. Each loop calls
-                // process_one_claim and emits task.changed on a settle.
-                if !pipe.teams.is_empty() {
-                    let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
-                        Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, project_target_repo.clone(), Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())), Some(invocation_audit.clone()), Some(keychain.clone()));
+                // PipelineActivator — owns the activation lifecycle (swap the
+                // active pipeline + (re)spawn the per-team worker loops at a fresh
+                // generation). Built ONCE here at boot with all the loop
+                // collaborators; held in Tauri state so the create/select paths
+                // can re-activate. Boot activation goes through the SAME path.
+                let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
+                    Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
+                let activator = Arc::new(pipeline_activator::PipelineActivator::new(
+                    handle.clone(),
+                    runtime_state_arc.clone(),
+                    project_store.clone(),
+                    tasks.clone(),
+                    brake.clone(),
+                    pipeline_activator::WorkerDeps {
+                        usage_sink: Some(usage_sink.clone()),
+                        revision_reader,
+                        pool: pool.clone(),
+                        log_sink: Some(make_task_log_sink(handle.clone())),
+                        audit: Some(invocation_audit.clone()),
+                        keychain: Some(keychain.clone()),
+                    },
+                ));
+                handle.manage(activator.clone());
+                // Boot activation goes through the SAME path as runtime activation.
+                if let Err(e) = activator.activate(&project_id).await {
+                    eprintln!("app: boot activation failed: {e}");
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -1115,6 +1152,7 @@ pub fn run() {
             design_session_turn_cmd,
             best_effort_validate_cmd,
             create_project_from_draft,
+            activate_project,
             pipeline_to_draft_cmd,
             save_pipeline_edits,
             runtime::api::inject_topic,
@@ -1139,199 +1177,6 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Spawn a polling worker loop per team. v1 runs one loop per team (concurrent
-/// workers per team is v1.1). Each iteration runs process_one_claim; on a
-/// Composition-root factory: map a team's resolved RunnerConfig to a concrete
-/// Runner. claude-cli is the default and always available. anthropic-api
-/// resolves its per-team API key from `api_key_env` via the process
-/// environment; a team requesting anthropic-api with no resolvable key yields a
-/// clear RunnerError (NOT a panic) so the worker loop can surface it rather than
-/// crash. The runner kind is chosen per team — Runtime depends only on
-/// `Arc<dyn Runner>` and never learns which kind it got (the ACL seal).
-fn runner_for(
-    config: &pipeline::model::RunnerConfig,
-    resolve_key: &dyn Fn(&pipeline::model::RunnerConfig) -> Option<String>,
-) -> Result<Arc<dyn Runner>, RunnerError> {
-    use agent_bus_core::RunnerKind;
-    match config.kind {
-        RunnerKind::ClaudeCli => Ok(Arc::new(ClaudeCliRunner::new())),
-        RunnerKind::AnthropicApi => {
-            // Keychain-first, then api_key_env — both live in the injected
-            // resolver (built at the root). The resolved key is a plain String
-            // passed into AnthropicApiRunner::new: NO keychain/OS type crosses
-            // the Runner trait (the ACL seal). An unresolvable key is a clear
-            // error, NOT a panic.
-            let key = resolve_key(config).ok_or_else(|| {
-                RunnerError::Other(
-                    "anthropic-api runner: no API key found in the keychain or `api_key_env`".into(),
-                )
-            })?;
-            Ok(Arc::new(AnthropicApiRunner::new(key)))
-        }
-    }
-}
-
-/// settle it emits a `task.changed` event the frontend listens for.
-#[allow(clippy::too_many_arguments)]
-fn spawn_worker_loops(
-    handle: tauri::AppHandle,
-    pipeline: Arc<Pipeline>,
-    tasks: Arc<TaskStore>,
-    brake: Arc<Brake>,
-    project_root: String,
-    project_target_repo: Option<String>,
-    usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
-    revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
-    pool: sqlx::SqlitePool,
-    log_sink: Option<Arc<runtime::pool::LogSinkFactory>>,
-    audit: Option<Arc<runtime::invocation_audit::InvocationAuditStore>>,
-    keychain: Option<Arc<dyn secrets::KeychainStore>>,
-) {
-    let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
-    // A5: convert the project target_repo to a PathBuf once (already tilde-
-    // expanded at create); the pool binds it as the ${target_repo} default.
-    let project_target_repo: Option<std::path::PathBuf> =
-        project_target_repo.map(std::path::PathBuf::from);
-    for team in pipeline.teams.clone() {
-        // Select the runner kind per team at the composition root. If a team
-        // requests anthropic-api but its key can't be resolved, keep the worker
-        // loop alive on the default claude-cli runner rather than panicking —
-        // we never crash the whole pool over one team's runner config.
-        let effective = team.effective_runner();
-        let resolve_key = |c: &pipeline::model::RunnerConfig| -> Option<String> {
-            // Keychain-first: account = api_key_env name if present, else the
-            // default "anthropic-api" account. Then fall back to the env var.
-            let account = c.api_key_env.as_deref().unwrap_or("anthropic-api");
-            if let Some(kc) = keychain.as_ref() {
-                if let Ok(k) = kc.get(secrets::api::SERVICE, account) {
-                    if !k.is_empty() {
-                        return Some(k);
-                    }
-                }
-            }
-            c.api_key_env.as_ref().and_then(|n| std::env::var(n).ok())
-        };
-        let runner: Arc<dyn Runner> = match runner_for(&effective, &resolve_key) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "app: team `{}` runner selection failed ({e}); falling back to claude-cli",
-                    team.id
-                );
-                Arc::new(ClaudeCliRunner::new())
-            }
-        };
-        let ctx = PoolContext {
-            pipeline: pipeline.clone(),
-            runner,
-            tasks: tasks.clone(),
-            fanout: fanout.clone(),
-            brake: brake.clone(),
-            project_root: std::path::PathBuf::from(&project_root),
-            project_target_repo: project_target_repo.clone(),
-            read_prompt: Arc::new({
-                let root = project_root.clone();
-                move |t: &Team| {
-                    std::fs::read_to_string(std::path::Path::new(&root).join(&t.prompt))
-                        .unwrap_or_default()
-                }
-            }),
-            usage_sink: usage_sink.clone(),
-            revision_reader: revision_reader.clone(),
-            log_sink: log_sink.clone(),
-            audit: audit.clone(),
-            // S3: OS sandbox confinement is EXPERIMENTAL, macOS-only, Apple-
-            // deprecated, and OFF by default. Only the SBPL profile generation +
-            // argv-wrapping are verified; the live boundary is unproven here.
-            // TODO(s3): surface a config/Settings toggle once the live
-            // sandbox-exec boundary has been validated on macOS.
-            sandbox: false,
-        };
-        let handle = handle.clone();
-        let team = team.clone();
-        tauri::async_runtime::spawn(async move {
-            loop {
-                match process_one_claim(&ctx, &team).await {
-                    Ok(runtime::pool::ClaimOutcome::Settled { task_id, .. }) => {
-                        let _ = handle.emit("task.changed", task_id);
-                        // A settle recorded worker usage; tell the meter to refresh.
-                        let _ = handle.emit("usage.changed", ());
-                    }
-                    Ok(runtime::pool::ClaimOutcome::RateLimited { .. }) => {
-                        // Reactive brake (spec) — already the behaviour; reason
-                        // surfaces on the meter via brake_state.
-                        ctx.brake.set_on("rate-limit");
-                        let _ = handle.emit("task.changed", "rate-limited");
-                        let _ = handle.emit("usage.changed", ());
-                    }
-                    _ => {}
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        });
-    }
-}
-
-#[cfg(test)]
-mod runner_factory_tests {
-    use super::runner_for;
-    use agent_bus_core::{EffortMode, RunnerKind};
-    use pipeline::model::RunnerConfig;
-
-    fn cfg(kind: RunnerKind, api_key_env: Option<&str>) -> RunnerConfig {
-        RunnerConfig {
-            kind,
-            model: "claude-opus-4-7".into(),
-            effort: EffortMode::Standard,
-            api_key_env: api_key_env.map(|s| s.to_string()),
-        }
-    }
-
-    // A resolver that mimics the root's env fallback (no keychain in unit tests).
-    fn env_resolver(c: &RunnerConfig) -> Option<String> {
-        c.api_key_env.as_ref().and_then(|n| std::env::var(n).ok())
-    }
-
-    #[test]
-    fn claude_cli_kind_builds_a_runner() {
-        let r = runner_for(&cfg(RunnerKind::ClaudeCli, None), &env_resolver);
-        assert!(r.is_ok(), "claude-cli must always build");
-    }
-
-    #[test]
-    fn anthropic_api_with_resolvable_key_builds_a_runner() {
-        std::env::set_var("R1_TEST_KEY_PRESENT", "sk-test-123");
-        let r = runner_for(
-            &cfg(RunnerKind::AnthropicApi, Some("R1_TEST_KEY_PRESENT")),
-            &env_resolver,
-        );
-        std::env::remove_var("R1_TEST_KEY_PRESENT");
-        assert!(r.is_ok(), "anthropic-api with a resolvable key must build");
-    }
-
-    #[test]
-    fn anthropic_api_resolves_via_keychain_first() {
-        // A resolver that returns a key WITHOUT any env var set proves the
-        // keychain-first path: the factory uses whatever the resolver yields.
-        let kc_resolver = |_c: &RunnerConfig| Some("sk-from-keychain".to_string());
-        let r = runner_for(&cfg(RunnerKind::AnthropicApi, None), &kc_resolver);
-        assert!(r.is_ok(), "a keychain-resolved key must build even with no api_key_env");
-    }
-
-    #[test]
-    fn anthropic_api_with_no_resolvable_key_is_a_clear_error_not_a_panic() {
-        // Arc<dyn Runner> is not Debug, so match the Result rather than unwrap_err.
-        let none_resolver = |_c: &RunnerConfig| None;
-        match runner_for(&cfg(RunnerKind::AnthropicApi, None), &none_resolver) {
-            Err(runners::output::RunnerError::Other(msg)) => {
-                assert!(msg.to_lowercase().contains("api key"), "msg: {msg}");
-            }
-            Err(other) => panic!("expected Other, got {other:?}"),
-            Ok(_) => panic!("expected a clear error, got a runner"),
-        }
-    }
 }
 
 #[cfg(test)]
