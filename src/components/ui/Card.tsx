@@ -7,6 +7,9 @@ export interface CardProps {
   task: Task;
   tokens: number;
   onClick?: (taskId: string) => void;
+  /// Optional title override (④e: the board labels work-item cards by their
+  /// `item_key`). Falls back to the task's topic when absent.
+  label?: string;
 }
 
 /// Per-state border + background treatment (DESIGN.md §Card). Status comes from
@@ -30,7 +33,7 @@ function shell(state: Task["state"]): CSSProperties {
   }
 }
 
-export function Card({ task, tokens, onClick }: CardProps) {
+export function Card({ task, tokens, onClick, label }: CardProps) {
   const root: CSSProperties = {
     border: "1px solid",
     borderRadius: "var(--r-md)",
@@ -75,7 +78,7 @@ export function Card({ task, tokens, onClick }: CardProps) {
         </code>
         <StatePill state={task.state} />
       </div>
-      <div style={title}>{task.topic}</div>
+      <div style={title}>{label ?? task.topic}</div>
       <div style={meta}>
         <span style={cost}>{formatTokens(tokens)} tok</span>
         <span>a{task.attempts}</span>
