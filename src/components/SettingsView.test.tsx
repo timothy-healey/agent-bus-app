@@ -24,6 +24,7 @@ function baseProps(over: Partial<React.ComponentProps<typeof SettingsView>> = {}
     projects: [],
     activeProjectId: null,
     onRemoveProject: vi.fn().mockResolvedValue(undefined),
+    onSetTargetRepo: vi.fn().mockResolvedValue(undefined),
     onListWorktrees: vi.fn().mockResolvedValue([]),
     onRemoveWorktree: vi.fn().mockResolvedValue(undefined),
     ...over,
@@ -90,15 +91,34 @@ describe("SettingsView", () => {
   });
 
   it("lists projects and exposes remove", () => {
-    render(<SettingsView {...baseProps({ projects: [{ id: "p1", name: "Alpha", root_path: "/a", active_pipeline_id: null, created_at: 0, updated_at: 0 }] })} />);
+    render(<SettingsView {...baseProps({ projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, active_pipeline_id: null, created_at: 0, updated_at: 0 }] })} />);
     expect(screen.getByText("Alpha")).toBeInTheDocument();
     // The project row's own remove button (worktrees expander collapsed by default).
     expect(screen.getByRole("button", { name: "remove" })).toBeInTheDocument();
   });
+
+  it("renders a Target repo field per project and saves it (A5)", async () => {
+    const onSetTargetRepo = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView {...baseProps({
+      projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: "/old", active_pipeline_id: null, created_at: 0, updated_at: 0 }],
+      onSetTargetRepo,
+    })} />);
+    const input = screen.getByRole("textbox", { name: "Target repo" }) as HTMLInputElement;
+    expect(input.value).toBe("/old");
+    fireEvent.change(input, { target: { value: "~/new-repo" } });
+    // The target-repo row's own save button (the Git section also has a "save").
+    // Walk up from the input until we find the row that also holds a save button.
+    let row = input.parentElement as HTMLElement;
+    while (row && within(row).queryAllByRole("button", { name: "save" }).length === 0) {
+      row = row.parentElement as HTMLElement;
+    }
+    fireEvent.click(within(row).getByRole("button", { name: "save" }));
+    await waitFor(() => expect(onSetTargetRepo).toHaveBeenCalledWith("p1", "~/new-repo"));
+  });
 });
 
 const oneProject = [
-  { id: "p1", name: "Alpha", root_path: "/home/u/proj", active_pipeline_id: null, created_at: 0, updated_at: 0 },
+  { id: "p1", name: "Alpha", root_path: "/home/u/proj", target_repo: null, active_pipeline_id: null, created_at: 0, updated_at: 0 },
 ];
 
 describe("SettingsView worktrees (S2)", () => {

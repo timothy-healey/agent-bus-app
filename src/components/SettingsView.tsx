@@ -2,6 +2,7 @@ import { useState, type CSSProperties } from "react";
 import type { UsageSnapshot } from "../ipc/usage";
 import type { GitConfig, Project, WorktreeEntry } from "../ipc/workspace";
 import { Button } from "./ui/Button";
+import { FolderPickerField } from "./FolderPickerField";
 import { formatTokens } from "../lib/cost";
 import { useTheme } from "../hooks/useTheme";
 
@@ -20,6 +21,8 @@ export interface SettingsViewProps {
   projects: Project[];
   activeProjectId: string | null;
   onRemoveProject: (id: string) => Promise<void>;
+  // Target repo (A5) — binds ${target_repo} for all teams' scope resolution.
+  onSetTargetRepo: (projectId: string, targetRepo: string | null) => Promise<void>;
   // Worktree cleanup (S2)
   onListWorktrees: (projectId: string) => Promise<WorktreeEntry[]>;
   onRemoveWorktree: (projectId: string, path: string) => Promise<void>;
@@ -28,6 +31,37 @@ export interface SettingsViewProps {
 function basename(p: string): string {
   const parts = p.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? p;
+}
+
+/** Per-project Target repo editor (A5). Seeds from the project's stored value;
+ *  reuses FolderPickerField + a save action calling workspace_set_target_repo. */
+function ProjectTargetRepo(props: {
+  project: Project;
+  onSave: (targetRepo: string | null) => Promise<void>;
+}) {
+  const { project, onSave } = props;
+  const [val, setVal] = useState(project.target_repo ?? "");
+  const [busy, setBusy] = useState(false);
+  return (
+    <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "flex-end" }}>
+      <div style={{ flex: 1 }}>
+        <FolderPickerField label="Target repo" value={val} onChange={setVal} placeholder="~/projects/your-repo" disabled={busy} />
+      </div>
+      <Button
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await onSave(val.trim() || null);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "saving…" : "save"}
+      </Button>
+    </div>
+  );
 }
 
 function ProjectWorktrees(props: {
@@ -121,7 +155,7 @@ export function SettingsView(props: SettingsViewProps) {
     usage, onSetBudget, onSetAutoMeter,
     apiKeyPresent, onSetApiKey, onClearApiKey,
     gitConfig, onSaveGitConfig,
-    projects, activeProjectId, onRemoveProject,
+    projects, activeProjectId, onRemoveProject, onSetTargetRepo,
     onListWorktrees, onRemoveWorktree,
   } = props;
 
@@ -281,6 +315,7 @@ export function SettingsView(props: SettingsViewProps) {
               </div>
               <Button onClick={() => onRemoveProject(p.id)}>remove</Button>
             </div>
+            <ProjectTargetRepo project={p} onSave={(path) => onSetTargetRepo(p.id, path)} />
             <ProjectWorktrees project={p} onList={onListWorktrees} onRemove={onRemoveWorktree} />
           </div>
         ))}
