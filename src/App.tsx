@@ -7,14 +7,17 @@ import { ViewSwitcher, type View } from "./components/ViewSwitcher";
 import { PipelineView } from "./components/PipelineView";
 import { useProjects } from "./hooks/useProjects";
 import { useTasks } from "./hooks/useTasks";
+import { useRuns } from "./hooks/useRuns";
+import { useStoreOccupancy } from "./hooks/useStoreOccupancy";
 import { BoardView } from "./components/BoardView";
 import { ListView } from "./components/ListView";
+import { RunSelector } from "./components/RunSelector";
 import { SettingsView } from "./components/SettingsView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
 import { activateProject, readArtifact, removeProject, workspaceSetTargetRepo, workspaceSetSkillSources, listWorktrees, removeWorktree, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
 import { setRunnerApiKey, clearRunnerApiKey, getRunnerApiKeyStatus, ANTHROPIC_API_KEY_ID } from "./ipc/secrets";
-import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
+import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, startRun as startRunCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
 import { listPipelines, loadPipeline, pipelineToDraft, type DraftPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
@@ -33,7 +36,30 @@ export default function App() {
 
   const activeProject: Project | null = projects[0] ?? null;
 
-  const { tasks, reload: reloadTasks } = useTasks();
+  const { tasks, reload: reloadTasks, tasksByRun } = useTasks();
+  // ④e: the board is run-scoped. useRuns tracks the project's runs + the selected
+  // run (defaults to the active/newest run, follows fresh runs when unpinned);
+  // useStoreOccupancy feeds the lane "n/cap" indicators for that run.
+  const { runs, selectedRun, activeRun, select: selectRun } = useRuns(activeProject?.id ?? null);
+  const { occupancy } = useStoreOccupancy(selectedRun?.id ?? null);
+  const [starting, setStarting] = useState(false);
+  // Cards shown on the board/list are scoped to the selected run. Before any run
+  // exists (or for legacy run-less tasks) the board simply shows nothing.
+  const scopedTasks = selectedRun ? tasksByRun.get(selectedRun.id) ?? [] : [];
+
+  async function handleStartRun() {
+    setStarting(true);
+    try {
+      const run = await startRunCmd();
+      // land on the new run immediately; the run-changed event also refetches.
+      selectRun(run.id);
+    } catch {
+      /* a start failure surfaces via the absence of a new run; keep the UI calm */
+    } finally {
+      setStarting(false);
+    }
+  }
+
   const liveLog = useTaskLog();
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   // A lineage click overrides which artifact the pane shows (D5: single pane).
@@ -219,6 +245,18 @@ export default function App() {
         onToggleBrake={toggleBrake}
       />
       <ViewSwitcher active={view} onChange={setView} />
+      {/* ④e: the run selector + Start run control scope the run-scoped views
+          (board/list). Hidden on pipeline/settings and when no project is active. */}
+      {activeProject != null && (view === "board" || view === "list") && (
+        <RunSelector
+          runs={runs}
+          selectedRun={selectedRun}
+          activeRun={activeRun}
+          onSelect={selectRun}
+          onStartRun={handleStartRun}
+          starting={starting}
+        />
+      )}
       <main style={{ flex: 1, overflow: "auto" }}>
         {view === "pipeline" ? (
           <PipelineView pipeline={pipeline} onEdit={activeProject && pipeline ? openEditor : undefined} />
@@ -244,7 +282,7 @@ export default function App() {
           <ProjectList />
         ) : view === "list" ? (
           <ListView
-            tasks={tasks}
+            tasks={scopedTasks}
             tokensByTask={usage?.tokens_by_task ?? {}}
             now={Math.floor(Date.now() / 1000)}
             onOpenCard={setOpenTaskId}
@@ -252,7 +290,9 @@ export default function App() {
         ) : (
           <BoardView
             pipeline={pipeline}
-            tasks={tasks}
+            tasks={scopedTasks}
+            occupancy={occupancy}
+            hasRun={selectedRun != null}
             tokensByTask={usage?.tokens_by_task ?? {}}
             onOpenCard={setOpenTaskId}
           />

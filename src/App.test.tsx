@@ -12,7 +12,22 @@ const tasks = [
 ];
 
 vi.mock("./hooks/useTasks", () => ({
-  useTasks: () => ({ tasks, loading: false, reload: vi.fn() }),
+  useTasks: () => ({
+    tasks, loading: false, reload: vi.fn(),
+    // ④e: the board scopes by run; T-40 is keyed under run R-1 so it shows on
+    // the board when R-1 is the selected run.
+    tasksByRun: new Map([["R-1", tasks]]),
+  }),
+}));
+
+const run1 = { id: "R-1", pipeline: "pl", project_id: "p", generator_dry: false, completed: false, created_at: 0 };
+vi.mock("./hooks/useRuns", () => ({
+  useRuns: () => ({
+    runs: [run1], loading: false, selectedRun: run1, activeRun: run1, select: vi.fn(), reload: vi.fn(),
+  }),
+}));
+vi.mock("./hooks/useStoreOccupancy", () => ({
+  useStoreOccupancy: () => ({ occupancy: [], loading: false, reload: vi.fn() }),
 }));
 vi.mock("./hooks/useProjects", () => ({
   useProjects: () => ({
