@@ -619,6 +619,7 @@ mod tests {
             outputs: Routes { on_approve: approve.map(String::from), on_revise: revise.map(String::from), on_reject: Some("needs-human".into()) },
             workers: Workers::default(),
             role: pipeline::model::Role::default(),
+            store: pipeline::model::Store::default(),
         }
     }
 

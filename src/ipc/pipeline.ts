@@ -49,6 +49,12 @@ export interface Workers {
   max: number;
 }
 
+/** A team's bounded input store (runtime redesign). `capacity` is the WIP limit
+ *  that drives backpressure to the upstream. */
+export interface Store {
+  capacity: number;
+}
+
 export interface Team {
   id: string;
   name: string;
@@ -61,6 +67,7 @@ export interface Team {
   outputs: Routes;
   workers: Workers;
   role: "producer" | "reviewer";
+  store: Store;
 }
 
 export interface Gate {

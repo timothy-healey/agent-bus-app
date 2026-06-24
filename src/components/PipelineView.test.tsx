@@ -18,6 +18,7 @@ const pipeline: Pipeline = {
       outputs: { on_approve: "spec-writers", on_revise: null, on_reject: null },
       workers: { min: 1, max: 3 },
       role: "producer",
+      store: { capacity: 8 },
     },
   ],
   gates: [{ id: "gate-1-spec", label: "Gate 1 — Spec Approval", downstream: "planners" }],
@@ -62,7 +63,7 @@ describe("PipelineView", () => {
     const p: Pipeline = {
       id: "p", name: "Flow", description: "", schema_version: 1,
       teams: [
-        { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer" },
+        { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
       ],
       gates: [{ id: "gate-1", label: "Gate 1", downstream: "writer" }],
       escalations: [], forks: [], joins: [],

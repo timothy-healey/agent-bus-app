@@ -322,7 +322,7 @@ mod tests {
                 id: "t1".into(), name: "T1".into(), prompt: "t1.md".into(),
                 scope: Default::default(), runner: None,
                 outputs: Default::default(), workers: Default::default(),
-                role: Default::default(),
+                role: Default::default(), store: Default::default(),
             }],
             gates: vec![], escalations: vec![], forks: vec![], joins: vec![],
         };
@@ -349,7 +349,7 @@ mod tests {
                 id: "entry2".into(), name: "E2".into(), prompt: "e2.md".into(),
                 scope: Default::default(), runner: None,
                 outputs: Default::default(), workers: Default::default(),
-                role: Default::default(),
+                role: Default::default(), store: Default::default(),
             }],
             gates: vec![], escalations: vec![], forks: vec![], joins: vec![],
         };

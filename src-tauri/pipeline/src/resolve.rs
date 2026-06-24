@@ -60,6 +60,7 @@ mod tests {
             outputs: Routes::default(),
             workers: Workers::default(),
             role: crate::model::Role::default(),
+            store: crate::model::Store::default(),
         }
     }
 
