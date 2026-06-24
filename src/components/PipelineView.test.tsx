@@ -16,7 +16,8 @@ const pipeline: Pipeline = {
       runner: { kind: "claude-cli", model: "claude-opus-4-7", effort: { mode: "extended-high" } },
       scope: { reads: ["${target_repo}"], writes: ["${project}/artifacts/analyses"], tools: ["Read"] },
       outputs: { on_approve: "spec-writers", on_revise: null, on_reject: null },
-      workers: { default: 1, max: 3 },
+      workers: { min: 1, max: 3 },
+      role: "producer",
     },
   ],
   gates: [{ id: "gate-1-spec", label: "Gate 1 — Spec Approval", downstream: "planners" }],
@@ -61,7 +62,7 @@ describe("PipelineView", () => {
     const p: Pipeline = {
       id: "p", name: "Flow", description: "", schema_version: 1,
       teams: [
-        { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { default: 1, max: 1 } },
+        { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer" },
       ],
       gates: [{ id: "gate-1", label: "Gate 1", downstream: "writer" }],
       escalations: [], forks: [], joins: [],

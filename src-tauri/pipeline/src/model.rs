@@ -151,13 +151,16 @@ pub struct Routes {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workers {
-    pub default: u32,
+    /// Minimum live workers for this team's pool (the always-on floor). Renamed
+    /// from `default` to align code with the context-map invariant
+    /// `workers.count ≥ team.workers.min` (vet F2). UI label: "Scale (min·max)".
+    pub min: u32,
     pub max: u32,
 }
 
 impl Default for Workers {
     fn default() -> Self {
-        Self { default: 1, max: 1 }
+        Self { min: 1, max: 1 }
     }
 }
 
@@ -320,7 +323,7 @@ mod tests {
 
     #[test]
     fn workers_default_is_one_one() {
-        assert_eq!(Workers::default(), Workers { default: 1, max: 1 });
+        assert_eq!(Workers::default(), Workers { min: 1, max: 1 });
     }
 
     #[test]

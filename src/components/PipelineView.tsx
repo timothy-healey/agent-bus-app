@@ -77,7 +77,7 @@ export function PipelineView({ pipeline, onEdit }: PipelineViewProps) {
           <div style={meta}>
             {t.runner?.kind ?? "—"} · {t.runner?.model ?? "—"} · effort{" "}
             {t.runner?.effort ? effortLabel(t.runner.effort) : "—"} · workers{" "}
-            {t.workers.default}/{t.workers.max}
+            {t.workers.min}/{t.workers.max}
           </div>
           <div style={{ ...meta, marginTop: 4 }}>
             {t.outputs.on_approve && <span>approve → {t.outputs.on_approve}&nbsp;&nbsp;</span>}

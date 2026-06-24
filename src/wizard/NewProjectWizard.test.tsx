@@ -18,7 +18,7 @@ vi.mock("../ipc/pipeline", () => ({
 
 // A draft with one team, enough to reach + render the review step.
 function draftWithTeam() {
-  return { ...emptyDraft(), teams: [{ id: "research", name: "Research", prompt_body: "", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { default: 1, max: 1 } }] };
+  return { ...emptyDraft(), teams: [{ id: "research", name: "Research", prompt_body: "", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 } }] };
 }
 
 // Open the wizard, fill basics, generate, and advance through to the review step.
@@ -56,7 +56,7 @@ describe("NewProjectWizard", () => {
   });
 
   it("starts on Basics and generates a draft, advancing to Teams", async () => {
-    const draft = { ...emptyDraft(), teams: [{ id: "research", name: "Research", prompt_body: "", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { default: 1, max: 1 } }] };
+    const draft = { ...emptyDraft(), teams: [{ id: "research", name: "Research", prompt_body: "", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 } }] };
     kickoffMock.mockResolvedValueOnce(draft);
     render(<NewProjectWizard open={true} onClose={() => {}} onCreated={() => {}} />);
     fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "Demo" } });
@@ -72,7 +72,7 @@ describe("NewProjectWizard", () => {
     const seeded = {
       ...emptyDraft(),
       id: "ddd-spec-plan-impl",
-      teams: [{ id: "research", name: "Research", prompt_body: "x", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { default: 1, max: 1 } }],
+      teams: [{ id: "research", name: "Research", prompt_body: "x", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 } }],
     };
     listSeedTemplatesMock.mockResolvedValue([{ id: "ddd-spec-plan-impl", name: "DDD Spec → Plan → Implement", description: "d" }]);
     seedTemplateMock.mockResolvedValueOnce(seeded);

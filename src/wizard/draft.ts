@@ -27,7 +27,7 @@ function defaultTeam(id: string, name: string): DraftTeam {
     runner: { kind: "claude-cli", model: "claude-opus-4-8", effort: { mode: "standard" }, api_key_env: null },
     scope: { reads: [], writes: [], tools: [] },
     outputs: {},
-    workers: { default: 1, max: 1 },
+    workers: { min: 1, max: 1 },
   };
 }
 

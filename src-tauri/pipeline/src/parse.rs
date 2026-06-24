@@ -42,7 +42,7 @@ teams:
     outputs:
       on_approve: gate-1-spec
     workers:
-      default: 1
+      min: 1
       max: 3
 gates:
   - id: gate-1-spec

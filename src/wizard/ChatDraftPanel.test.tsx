@@ -20,7 +20,7 @@ describe("ChatDraftPanel", () => {
 
   it("sends a turn with the current draft and applies updated_draft", async () => {
     const draft = emptyDraft();
-    const updated = { ...draft, teams: [{ id: "research", name: "Research", prompt_body: "", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { default: 1, max: 1 } }] };
+    const updated = { ...draft, teams: [{ id: "research", name: "Research", prompt_body: "", runner: { kind: "claude-cli", model: "m", effort: { mode: "standard" } }, scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 } }] };
     designSessionTurnMock.mockResolvedValueOnce({ reply_text: "added research", updated_draft: updated, issues: [] });
     const onDraftChange = vi.fn();
 
