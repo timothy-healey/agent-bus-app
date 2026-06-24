@@ -118,14 +118,17 @@ flowchart TB
 
 > **Cross-reference, not composition.** Each Worker holds a `task_id`; each Task holds an optional `claim` referring to a worker. Two aggregates, joined by reference. One transaction can mutate one Task without locking the pool, and vice-versa.
 
-#### Aggregate: `Run` (bounded-buffer assembly line — ④a foundation, migration 012)
+> **④d cutover — the WorkerPool now drives the bounded-buffer engine.** At activation the `PipelineActivator` spawns **one generator loop** for the source team + **`workers.max` transformer loops** per other team (the pool is now real — `scale_team` reports the ceiling). Each loop polls its `engine` step (`generate_once` / `transform_once` / `fork_once`) for the project's **latest active run**, reserves-before-claim (backpressure), and on a settling step emits `task-changed`; on `try_finish_run` completion it emits `run-changed` + `usage-changed`. The old single-task `pool::process_one_claim` + `router::route` linear flow is **retired** (compiled-but-unwired, flagged `// DEAD: superseded by engine.rs`; a cleanup item). Gate verdicts route through `engine::apply_gate_verdict`.
+
+#### Aggregate: `Run` (bounded-buffer assembly line — ④a foundation/migration 012; **LIVE ④d**)
 
 | | |
 |---|---|
 | **Root identity** | `run_id` (one execution of a pipeline — the tree of work-items from a single Start) |
 | **Composition** | `pipeline`, `project_id`, `generator_dry`, `completed`, `created_at` |
-| **Invariants** | • **Completes exactly once** — `UPDATE runs SET completed=1 WHERE id=? AND completed=0` (single-writer guard; rows-affected==1 is the sole completer) <br> • The completion *precondition* (generator dry AND all stores empty AND no running workers) is computed by the caller (④b/④h); `try_complete` is only the guard |
-| **Module** | `runtime::run_store` |
+| **Invariants** | • **Completes exactly once** — `UPDATE runs SET completed=1 WHERE id=? AND completed=0` (single-writer guard; rows-affected==1 is the sole completer) <br> • The completion *precondition* (generator dry AND all stores empty AND no running/gated workers AND no open fan-out group) is checked by `engine::try_finish_run`; `try_complete` is only the guard |
+| **Lifecycle** | **Start a run** (`runtime::api::start_run(topic: Option)`) creates the run + `ensure`s every team store at capacity; the generator loop kicks. `inject_topic` is a thin wrapper (terminal `/inject` still works). **Complete** is `try_finish_run` → emits `run-changed`. **Stop** = the brake. `latest_active_for_project` selects the run the loops drive. |
+| **Module** | `runtime::run_store` + `runtime::engine` |
 
 #### Aggregate: `Store` (bounded buffer — the backpressure boundary)
 
@@ -138,7 +141,7 @@ flowchart TB
 
 > **Generator ledger** (not an aggregate root — a per-`(run_id, source-stage)` append-only key set in `runtime::generator_ledger`): the dedup + dry-detection source of truth. `record_keys` (INSERT OR IGNORE) returns the count of NEW keys (0 ⇒ a dry pass); `found_keys` is the already-found set handed to the generator each pass.
 >
-> **Work-item.** The `Task` aggregate gains `run_id` + `item_key` (the candidate key — lineage/dedup identity), additive/nullable on `tasks` (migration 012) until ④b wires the worker pools onto the stores.
+> **Work-item.** The `Task` aggregate gains `run_id` + `item_key` (the candidate key — lineage/dedup identity), additive/nullable on `tasks` (migration 012). As of the ④d cutover the worker pools drive the stores live; the board still groups Tasks (work-items ARE tasks), with run/store/pool indicators arriving in ④e.
 
 ### Review
 
