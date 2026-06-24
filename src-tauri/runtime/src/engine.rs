@@ -98,6 +98,10 @@ pub enum StepOutcome {
     /// A gate verdict could not be applied yet because the downstream store was
     /// full (approve backpressure) — the gated item stays put; retry later.
     GateBackpressure { task_id: String },
+    /// A join barrier completed but its continuation (downstream or
+    /// revise-to-producer) store was full — the group is already marked
+    /// completed; the continuation is retried by a later driver round.
+    JoinBackpressure { group_id: String },
 }
 
 /// The collaborators one engine step needs. Cheap to clone (Arcs). The
@@ -552,7 +556,11 @@ pub async fn fork_once(
     ctx.fanout.create(&group).await?;
     for lane in &fork.lanes {
         ctx.fanout.seed_lane(&group_id, lane).await?;
-        let sib = Task::forked(&task, lane, &group_id, &join.id, now_unix());
+        let mut sib = Task::forked(&task, lane, &group_id, &join.id, now_unix());
+        // Carry the forked item's attempts onto the lanes so the join's
+        // revise-once policy survives a re-fork (a re-revised item that fans out
+        // again keeps its attempt count — see `resolve_join_barrier`).
+        sib.attempts = task.attempts;
         ctx.tasks.insert(&sib).await?;
     }
 
@@ -598,6 +606,172 @@ fn lane_reaches(p: &Pipeline, entry: &str, join_id: &str) -> bool {
         return false;
     }
     false
+}
+
+/// Settle a lane's terminal verdict against its fan-out group barrier (④c task
+/// 5). Mirrors `pool::resolve_barrier`: records the lane verdict (honoring the
+/// join's policy — full barrier default, P2 `cancel_on_reject`, P3 `quorum`),
+/// parks the lane task Done at the join, and — when THIS caller completes the
+/// group (the completes-once guard) — produces the single continuation:
+///
+/// * **all-approve / quorum-met** (`Continuation::Downstream`) → reserve+commit a
+///   queued continuation work-item into `join.downstream` (block-before-claim;
+///   `JoinBackpressure` if full).
+/// * **any non-approve** (`Continuation::NeedsHuman`) under the DEFAULT policy
+///   (full barrier, no quorum / no cancel-on-reject) → **collect-all,
+///   revise-once**: route the joined item BACK to its producing team for one
+///   revision pass (attempts carried + bumped). A SECOND failure (the item was
+///   already revised once — lane attempts ≥ 2) escalates to needs-human instead.
+///   Under quorum / cancel-on-reject, a failure escalates to needs-human (the
+///   early-resolution policies do not revise).
+///
+/// `lane_task` is the settling lane work-item (carrying `group_id` / `lane` /
+/// `join_target`). Reuses the FanOutGroup barrier methods + completes-once guard
+/// unchanged.
+pub async fn resolve_join_barrier(
+    ctx: &EngineContext,
+    lane_task: &mut Task,
+    verdict: agent_bus_core::Verdict,
+) -> Result<StepOutcome, EngineError> {
+    use agent_bus_core::Verdict;
+    let group_id = lane_task
+        .group_id
+        .clone()
+        .ok_or_else(|| EngineError::NoRoute("lane task has no group".into()))?;
+    let lane = lane_task.lane.clone().unwrap_or_default();
+    let join = lane_task
+        .join_target
+        .as_deref()
+        .and_then(|jt| ctx.pipeline.joins.iter().find(|j| j.id == jt));
+    let quorum = join.and_then(|j| j.quorum);
+    let early_cancel = quorum.is_none() && join.map(|j| j.cancel_on_reject).unwrap_or(false);
+    let is_failure = verdict == Verdict::Reject;
+    let revise_eligible = quorum.is_none() && !early_cancel;
+    // Revise-once: a lane already on its 2nd+ attempt has been revised once;
+    // a further failure escalates rather than revising again.
+    let already_revised = lane_task.attempts >= 2;
+    let lane_attempts = lane_task.attempts;
+
+    let outcome = if let Some(q) = quorum {
+        ctx.fanout.record_and_try_quorum(&group_id, &lane, verdict, q).await?
+    } else if early_cancel && is_failure {
+        ctx.fanout.record_failure_and_early_cancel(&group_id, &lane, verdict).await?
+    } else {
+        ctx.fanout.record_and_try_complete(&group_id, &lane, verdict).await?
+    };
+
+    // Park this lane task Done at its join (mirrors pool.rs).
+    lane_task.state = TaskState::Done;
+    lane_task.current_stage = lane_task.join_target.clone().unwrap_or_else(|| lane_task.current_stage.clone());
+    lane_task.updated_at = now_unix();
+    ctx.tasks.update(lane_task).await?;
+
+    let crate::fanout_store::BarrierOutcome::Completed(cont) = outcome else {
+        return Ok(StepOutcome::Idle); // lane parked; barrier not yet complete
+    };
+
+    // Trim outstanding lanes for an early resolution (P2/P3) so queued siblings
+    // aren't run wastefully (reuse the existing atomic cancel).
+    if (early_cancel && is_failure) || quorum.is_some() {
+        ctx.tasks.cancel_outstanding_lanes(&group_id, now_unix()).await?;
+    }
+
+    match cont {
+        crate::fanout_group::Continuation::Downstream(ds) => {
+            // All-approve / quorum-met: reserve+commit the continuation downstream.
+            ctx.stores
+                .ensure(&ctx.run_id, &ds, stage_store_capacity(ctx, &ds))
+                .await?;
+            if !ctx.stores.reserve(&ctx.run_id, &ds).await? {
+                return Ok(StepOutcome::JoinBackpressure { group_id });
+            }
+            let child = Task::work_item(
+                lane_task.project_id.clone(),
+                lane_task.pipeline.clone(),
+                ctx.run_id.clone(),
+                lane_task.item_key.clone().unwrap_or_default(),
+                ds.clone(),
+                lane_task.parent_artifact.clone(),
+                lane_task.target_repo.clone(),
+                now_unix(),
+            );
+            ctx.tasks.insert(&child).await?;
+            Ok(StepOutcome::Advanced {
+                task_id: lane_task.id.0.clone(),
+                downstream: ds,
+                produced_keys: vec![lane_task.item_key.clone().unwrap_or_default()],
+            })
+        }
+        crate::fanout_group::Continuation::NeedsHuman => {
+            // Default policy: collect-all, revise-once. Route the joined item back
+            // to its producer for ONE revision; a second failure escalates.
+            if revise_eligible && !already_revised {
+                if let Some(producer) = producer_of_join(ctx, &group_id).await? {
+                    ctx.stores
+                        .ensure(&ctx.run_id, &producer, stage_store_capacity(ctx, &producer))
+                        .await?;
+                    if !ctx.stores.reserve(&ctx.run_id, &producer).await? {
+                        return Ok(StepOutcome::JoinBackpressure { group_id });
+                    }
+                    let mut child = Task::work_item(
+                        lane_task.project_id.clone(),
+                        lane_task.pipeline.clone(),
+                        ctx.run_id.clone(),
+                        lane_task.item_key.clone().unwrap_or_default(),
+                        producer.clone(),
+                        lane_task.parent_artifact.clone(),
+                        lane_task.target_repo.clone(),
+                        now_unix(),
+                    );
+                    // Carry + bump attempts: the bundled critiques are composed at
+                    // re-claim, and the count makes the revision a one-shot.
+                    child.attempts = (lane_attempts + 1).min(MAX_ATTEMPTS);
+                    ctx.tasks.insert(&child).await?;
+                    return Ok(StepOutcome::Revised { task_id: lane_task.id.0.clone(), producer });
+                }
+            }
+            // No producer to revise to, or already revised once / a non-revise
+            // policy → escalate to needs-human (one continuation work-item).
+            let esc = escalation_id(ctx);
+            let mut child = Task::work_item(
+                lane_task.project_id.clone(),
+                lane_task.pipeline.clone(),
+                ctx.run_id.clone(),
+                lane_task.item_key.clone().unwrap_or_default(),
+                esc.clone(),
+                lane_task.parent_artifact.clone(),
+                lane_task.target_repo.clone(),
+                now_unix(),
+            );
+            child.state = TaskState::NeedsHuman;
+            ctx.tasks.insert(&child).await?;
+            Ok(StepOutcome::Escalated { task_id: lane_task.id.0.clone() })
+        }
+    }
+}
+
+/// The producing team that feeds a fan-out group: the team whose `on_approve`
+/// targets the FORK paired with the group's join. The group's `join_target`
+/// gives the join; the fork is the one whose lanes all reach that join; the
+/// producer is the team pointing at that fork. `None` if not found (then the
+/// barrier escalates rather than revising).
+async fn producer_of_join(ctx: &EngineContext, group_id: &str) -> Result<Option<String>, EngineError> {
+    let group = ctx.fanout.load(group_id).await?;
+    let join_id = &group.join_target;
+    let Some(fork) = ctx
+        .pipeline
+        .forks
+        .iter()
+        .find(|f| f.lanes.iter().all(|lane| lane_reaches(&ctx.pipeline, lane, join_id)))
+    else {
+        return Ok(None);
+    };
+    Ok(ctx
+        .pipeline
+        .teams
+        .iter()
+        .find(|t| t.outputs.on_approve.as_deref() == Some(&fork.id))
+        .map(|t| t.id.clone()))
 }
 
 /// Run at most one generator (source) pass for `source_team`, loop-until-dry +
@@ -1482,7 +1656,149 @@ mod tests {
         assert_eq!(fork_once(&ctx, &fork).await.unwrap(), StepOutcome::Idle);
     }
 
-    // ---- Task 5: generator (loop-until-dry) ----
+    // ---- Task 5: join barrier (collect-all / revise-once default + P2/P3) ----
+
+    /// Seed a fan-out group of two lanes (ddd, sec) for the join `join_id`,
+    /// returning the lane tasks (queued, attempts as given). The group's
+    /// join_target/downstream come from the matching join in the pipeline.
+    async fn seed_group(ctx: &EngineContext, join_id: &str, attempts: u32) -> Vec<Task> {
+        let join = ctx.pipeline.joins.iter().find(|j| j.id == join_id).unwrap().clone();
+        let group_id = "G-test".to_string();
+        let group = FanOutGroup {
+            id: group_id.clone(),
+            pipeline: "p".into(),
+            join_target: join.id.clone(),
+            downstream: join.downstream.clone(),
+            expected_lanes: vec!["ddd".into(), "sec".into()],
+            completed: false,
+            parent_group_id: None,
+            parent_lane: None,
+        };
+        ctx.fanout.create(&group).await.unwrap();
+        let mut out = Vec::new();
+        for lane in ["ddd", "sec"] {
+            ctx.fanout.seed_lane(&group_id, lane).await.unwrap();
+            let mut t = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), lane.into(), Some("plan.md".into()), None, 100);
+            t.group_id = Some(group_id.clone());
+            t.lane = Some(lane.into());
+            t.join_target = Some(join.id.clone());
+            t.attempts = attempts;
+            t.state = TaskState::Running;
+            ctx.tasks.insert(&t).await.unwrap();
+            out.push(t);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn join_all_approve_commits_continuation_downstream() {
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        ctx.stores.ensure(&ctx.run_id, "ddd", 8).await.unwrap();
+        ctx.stores.ensure(&ctx.run_id, "sec", 8).await.unwrap();
+        let mut lanes = seed_group(&ctx, "rejoin", 1).await;
+        // both lanes approve -> last completes -> downstream spec
+        let o1 = resolve_join_barrier(&ctx, &mut lanes[0], agent_bus_core::Verdict::Approve).await.unwrap();
+        assert_eq!(o1, StepOutcome::Idle, "first lane parks");
+        let o2 = resolve_join_barrier(&ctx, &mut lanes[1], agent_bus_core::Verdict::Approve).await.unwrap();
+        assert!(matches!(o2, StepOutcome::Advanced { downstream, .. } if downstream == "spec"));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(1));
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].current_stage, "spec");
+        assert!(ctx.fanout.load("G-test").await.unwrap().completed);
+    }
+
+    #[tokio::test]
+    async fn join_one_reject_default_routes_revise_once_back_to_producer() {
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let mut lanes = seed_group(&ctx, "rejoin", 1).await; // first attempt
+        resolve_join_barrier(&ctx, &mut lanes[0], agent_bus_core::Verdict::Approve).await.unwrap();
+        let o2 = resolve_join_barrier(&ctx, &mut lanes[1], agent_bus_core::Verdict::Reject).await.unwrap();
+        // collect-all/revise-once: routed back to the producer (research), not escalated
+        assert_eq!(o2, StepOutcome::Revised { task_id: lanes[1].id.0.clone(), producer: "research".into() });
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "research").await.unwrap(), Some(1));
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].current_stage, "research");
+        assert_eq!(queued[0].attempts, 2, "revise bumps attempts (one-shot marker)");
+        // no needs-human item created on the first revise
+        assert_eq!(ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn join_second_failure_escalates_revise_is_once_only() {
+        // attempts already 2 -> the item was revised once -> a further failure
+        // escalates to needs-human instead of revising again.
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let mut lanes = seed_group(&ctx, "rejoin", 2).await;
+        resolve_join_barrier(&ctx, &mut lanes[0], agent_bus_core::Verdict::Approve).await.unwrap();
+        let o2 = resolve_join_barrier(&ctx, &mut lanes[1], agent_bus_core::Verdict::Reject).await.unwrap();
+        assert_eq!(o2, StepOutcome::Escalated { task_id: lanes[1].id.0.clone() });
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 1);
+        assert_eq!(nh[0].current_stage, "needs-human");
+    }
+
+    #[tokio::test]
+    async fn join_p2_cancel_on_reject_escalates_immediately_without_revise() {
+        // A join with cancel_on_reject: one reject resolves NOW to needs-human,
+        // cancelling the outstanding lane (P2). No revise.
+        use pipeline::model::{Fork, Join};
+        let p = pipeline_full(
+            vec![
+                team("research", Some("fan"), Role::Producer, 8),
+                team("ddd", Some("rejoin"), Role::Reviewer, 8),
+                team("sec", Some("rejoin"), Role::Reviewer, 8),
+                team("spec", None, Role::Producer, 8),
+            ],
+            vec![],
+            vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
+            vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "spec".into(), cancel_on_reject: true, quorum: None }],
+        );
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let mut lanes = seed_group(&ctx, "rejoin", 1).await;
+        // lane[0] (ddd) rejects -> early-cancel completes immediately, escalates,
+        // and cancels the still-running lane[1].
+        lanes[1].state = TaskState::Queued; // make it cancellable
+        ctx.tasks.update(&lanes[1]).await.unwrap();
+        let o = resolve_join_barrier(&ctx, &mut lanes[0], agent_bus_core::Verdict::Reject).await.unwrap();
+        assert_eq!(o, StepOutcome::Escalated { task_id: lanes[0].id.0.clone() });
+        assert!(ctx.fanout.load("G-test").await.unwrap().completed);
+        // the outstanding lane was cancelled (parked done), not left queued
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Queued).await.unwrap().len(), 0);
+        // escalated, never revised back to research
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "research").await.unwrap(), None);
+        assert_eq!(ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn join_p3_quorum_reached_early_commits_downstream() {
+        use pipeline::model::{Fork, Join};
+        let p = pipeline_full(
+            vec![
+                team("research", Some("fan"), Role::Producer, 8),
+                team("ddd", Some("rejoin"), Role::Reviewer, 8),
+                team("sec", Some("rejoin"), Role::Reviewer, 8),
+                team("spec", None, Role::Producer, 8),
+            ],
+            vec![],
+            vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
+            vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "spec".into(), cancel_on_reject: false, quorum: Some(1) }],
+        );
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+        let mut lanes = seed_group(&ctx, "rejoin", 1).await;
+        lanes[1].state = TaskState::Queued;
+        ctx.tasks.update(&lanes[1]).await.unwrap();
+        // quorum 1: first approval reaches quorum -> downstream immediately
+        let o = resolve_join_barrier(&ctx, &mut lanes[0], agent_bus_core::Verdict::Approve).await.unwrap();
+        assert!(matches!(o, StepOutcome::Advanced { downstream, .. } if downstream == "spec"));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(1));
+        // the other lane was cancelled (quorum decided early)
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Queued).await.unwrap().iter().filter(|t| t.lane.is_some()).count(), 0);
+    }
+
+    // ---- ④b Task 5: generator (loop-until-dry) ----
 
     #[tokio::test]
     async fn generate_emits_bounded_by_free_slots_then_dedups_then_retires() {
