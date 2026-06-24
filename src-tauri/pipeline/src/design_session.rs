@@ -6,9 +6,68 @@
 //! extracts + parses + best-effort-applies the slice (the trust boundary). The
 //! prose is never parsed for state.
 
-use crate::draft::{apply_slice, best_effort_validate, DraftPipeline, Slice};
+use crate::draft::{apply_slice, best_effort_validate, DraftPipeline, PromptSlice, Slice, TeamsSlice, WiringSlice};
 use llm_chat::chat::{ChatRequest, ChatRunner};
 use serde::{Deserialize, Serialize};
+
+/// Compact JSON Schema for a slice type, derived from the Rust type via schemars.
+/// This is the single source of truth (the **slice schema**): the prompt and
+/// `parse_slice` are generated from the SAME types, so they can never drift.
+fn slice_schema<T: schemars::JsonSchema>() -> String {
+    serde_json::to_string(&schemars::schema_for!(T)).unwrap_or_default()
+}
+
+/// The kickoff one-shot system prompt: prose + a fenced ```json TEAMS slice whose
+/// shape is the DERIVED slice schema (one source of truth). Prose rules kept
+/// (2–5 teams, slug ids).
+pub fn kickoff_system_prompt() -> String {
+    format!(
+        "You are designing a multi-team Claude Code agent pipeline from a one-line \
+description. Reply with a short paragraph of prose, THEN a fenced ```json block \
+containing ONLY the team set. The object MUST include \"kind\":\"teams\" and match \
+this JSON Schema (the team-set payload):\n\
+```json\n{schema}\n```\n\
+Use 2 to 5 teams. ids are lowercase slugs. Emit ONLY the json in the fenced block.",
+        schema = slice_schema::<TeamsSlice>()
+    )
+}
+
+/// The per-step Design Session system prompt with the DERIVED slice schema embedded
+/// (the **slice schema** — one source of truth). The prose rules are kept; only the
+/// hand-written shape literal is replaced by the generated schema. Built at call
+/// time because the schema string is computed from the types.
+pub fn step_system_prompt(step: Step) -> String {
+    match step {
+        Step::Teams => format!(
+            "You are refining the TEAM SET of a pipeline being designed. Reply with \
+prose, THEN a fenced ```json block with the FULL updated team set (this replaces \
+the previous set). The object MUST include \"kind\":\"teams\" and match this JSON \
+Schema (the team-set payload):\n\
+```json\n{schema}\n```\n\
+Preserve existing team ids the user wants to keep. Only the json mutates state.",
+            schema = slice_schema::<TeamsSlice>()
+        ),
+        Step::Prompts => format!(
+            "You are writing ONE team's responsibility prompt. Reply with prose, THEN \
+a fenced ```json block. The object MUST include \"kind\":\"prompt\" and match this \
+JSON Schema (the prompt payload):\n\
+```json\n{schema}\n```\n\
+team_id must be one of the existing teams. Only the json mutates state.",
+            schema = slice_schema::<PromptSlice>()
+        ),
+        Step::Wiring => format!(
+            "You are wiring the pipeline's flow (routes, optional fork/join lanes, and \
+optional human-review gates). Reply with prose, THEN a fenced ```json block. The \
+object MUST include \"kind\":\"wiring\" and match this JSON Schema (the wiring \
+payload):\n\
+```json\n{schema}\n```\n\
+A gate is a human-review checkpoint: a team routes to it via on_approve, and the \
+gate forwards approved work to its downstream. A fork must have >=2 lanes; NEVER \
+place a gate inside a fork lane. routes stay single-target. Only the json mutates state.",
+            schema = slice_schema::<WiringSlice>()
+        ),
+    }
+}
 
 /// Extract the first fenced code block from the model's prose. Prefers a
 /// ```` ```json ```` fence; falls back to the first bare ```` ``` ```` fence.
@@ -45,6 +104,71 @@ pub fn parse_slice(block: &str) -> Result<Slice, serde_json::Error> {
     serde_json::from_str::<Slice>(block)
 }
 
+/// Extract the fenced json block and parse it into a typed `Slice`, returning a
+/// SPECIFIC human-readable error on failure: a distinct message for "no fenced
+/// block" vs a serde structure/parse error. This is the single failure classifier
+/// the bounded repair turn re-prompts on (so the model is told exactly what to fix).
+fn extract_and_parse(prose: &str) -> Result<Slice, String> {
+    let block = extract_json_block(prose)
+        .ok_or_else(|| "no fenced ```json block was found in the reply".to_string())?;
+    parse_slice(&block).map_err(|e| format!("the fenced json did not match the slice schema: {e}"))
+}
+
+/// Bounded **repair turn** budget: up to this many repair re-prompts AFTER the
+/// initial turn (so at most `1 + MAX_REPAIR_RETRIES` model calls per emission).
+/// On exhausting it we behave as before DS-Schema — draft unchanged, prose surfaced.
+const MAX_REPAIR_RETRIES: usize = 2;
+
+/// Build a repair re-prompt naming the specific extract-or-parse failure. Sent on
+/// the SAME `dialogue_id` so the model sees its own prior bad output in context.
+fn repair_user_message(err: &str) -> String {
+    format!(
+        "Your previous reply could not be applied: {err}. Re-emit ONLY a single fenced \
+```json block that matches the JSON Schema in your instructions (include the correct \
+\"kind\"). Do not add any other text inside the fence."
+    )
+}
+
+/// Run one chat turn, then — on an extract-or-parse miss — up to `MAX_REPAIR_RETRIES`
+/// bounded **repair turns** on the SAME `dialogue_id`, each naming the specific
+/// failure. Returns the final reply prose plus the parsed `Slice` if any turn
+/// produced a valid one (else `None` => the caller leaves the draft unchanged). A
+/// runner error (e.g. rate-limit) short-circuits with the error prose and no slice.
+async fn chat_with_repair(
+    runner: &dyn ChatRunner,
+    dialogue_id: &str,
+    system_prompt: &str,
+    initial_user_message: String,
+) -> (String, Option<Slice>) {
+    let mut user_message = initial_user_message;
+    let mut last_text = String::new();
+    for attempt in 0..=MAX_REPAIR_RETRIES {
+        let req = ChatRequest {
+            dialogue_id: dialogue_id.to_string(),
+            system_prompt: system_prompt.to_string(),
+            user_message,
+            model: "claude-opus-4-8".to_string(),
+            thinking_budget: 8192,
+        };
+        match runner.chat(&req).await {
+            Ok(reply) => {
+                last_text = reply.text.clone();
+                match extract_and_parse(&reply.text) {
+                    Ok(slice) => return (reply.text, Some(slice)),
+                    Err(err) => {
+                        if attempt == MAX_REPAIR_RETRIES {
+                            return (last_text, None); // give up; draft unchanged
+                        }
+                        user_message = repair_user_message(&err);
+                    }
+                }
+            }
+            Err(e) => return (format!("[design session error] {e}"), None),
+        }
+    }
+    (last_text, None)
+}
+
 /// The wizard steps that carry a chat (2–4). Step 1 is basics (no chat) and
 /// step 5 is review (no chat); the kickoff one-shot is its own call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,51 +188,7 @@ impl Step {
             Step::Wiring => "wiring",
         }
     }
-
-    /// The step-specific system prompt. Each documents the fenced-json mini-schema
-    /// the model must emit (the structured-emit contract). The schemas mirror the
-    /// `Slice` variants in draft.rs — keep them in sync.
-    fn system_prompt(self) -> &'static str {
-        match self {
-            Step::Teams => TEAMS_SYSTEM_PROMPT,
-            Step::Prompts => PROMPTS_SYSTEM_PROMPT,
-            Step::Wiring => WIRING_SYSTEM_PROMPT,
-        }
-    }
 }
-
-const KICKOFF_SYSTEM_PROMPT: &str = "\
-You are designing a multi-team Claude Code agent pipeline from a one-line \
-description. Reply with a short paragraph of prose, THEN a fenced ```json block \
-containing ONLY the team set, exactly this schema:\n\
-```json\n{\"kind\":\"teams\",\"teams\":[{\"id\":\"<slug>\",\"name\":\"<Display Name>\"}]}\n```\n\
-Use 2–5 teams. ids are lowercase slugs. Do not include anything but the json in \
-the fenced block.";
-
-const TEAMS_SYSTEM_PROMPT: &str = "\
-You are refining the TEAM SET of a pipeline being designed. Reply with prose, \
-THEN a fenced ```json block with the FULL updated team set (this replaces the \
-previous set), schema:\n\
-```json\n{\"kind\":\"teams\",\"teams\":[{\"id\":\"<slug>\",\"name\":\"<Display Name>\"}]}\n```\n\
-Preserve existing team ids the user wants to keep. Only the json mutates state.";
-
-const PROMPTS_SYSTEM_PROMPT: &str = "\
-You are writing ONE team's responsibility prompt. Reply with prose, THEN a fenced \
-```json block, schema:\n\
-```json\n{\"kind\":\"prompt\",\"team_id\":\"<existing team id>\",\"prompt_body\":\"<the operating prompt>\"}\n```\n\
-team_id must be one of the existing teams. Only the json mutates state.";
-
-const WIRING_SYSTEM_PROMPT: &str = "\
-You are wiring the pipeline's flow (routes, optional fork/join lanes, and optional \
-human-review gates). Reply with prose, THEN a fenced ```json block, schema:\n\
-```json\n{\"kind\":\"wiring\",\
-\"routes\":[{\"team_id\":\"<id>\",\"on_approve\":\"<id|null>\",\"on_revise\":null,\"on_reject\":null}],\
-\"forks\":[{\"id\":\"fork-1\",\"lanes\":[\"<team id>\",\"<team id>\"]}],\
-\"joins\":[{\"id\":\"join-1\",\"waits_for\":[\"<team id>\",\"<team id>\"],\"downstream\":\"<id>\"}],\
-\"gates\":[{\"id\":\"gate-1\",\"label\":\"<human-readable>\",\"downstream\":\"<id>\"}]}\n```\n\
-A gate is a human-review checkpoint: a team routes to it via on_approve, and the \
-gate forwards approved work to its downstream. A fork must have >=2 lanes; NEVER \
-place a gate inside a fork lane. routes stay single-target. Only the json mutates state.";
 
 /// Build the user message for a turn: the user's words plus the current draft as
 /// JSON, so manual edits the user made (the other half of the two-way binding,
@@ -142,19 +222,16 @@ pub async fn kickoff_generate(
     draft.description = description.to_string();
     draft.id = slug_id(description);
 
-    let req = ChatRequest {
-        dialogue_id: format!("{session_id}:kickoff"),
-        system_prompt: KICKOFF_SYSTEM_PROMPT.to_string(),
-        user_message: description.to_string(),
-        model: "claude-opus-4-8".to_string(),
-        thinking_budget: 8192,
-    };
-    if let Ok(reply) = runner.chat(&req).await {
-        if let Some(block) = extract_json_block(&reply.text) {
-            if let Ok(slice) = parse_slice(&block) {
-                apply_slice(&mut draft, slice);
-            }
-        }
+    let dialogue_id = format!("{session_id}:kickoff");
+    let (_text, slice) = chat_with_repair(
+        runner,
+        &dialogue_id,
+        &kickoff_system_prompt(),
+        description.to_string(),
+    )
+    .await;
+    if let Some(slice) = slice {
+        apply_slice(&mut draft, slice);
     }
     draft
 }
@@ -171,24 +248,17 @@ pub async fn design_session_turn(
     mut draft: DraftPipeline,
     user_message: &str,
 ) -> TurnResult {
-    let req = ChatRequest {
-        dialogue_id: format!("{session_id}:{}", step.slug()),
-        system_prompt: step.system_prompt().to_string(),
-        user_message: turn_user_message(user_message, &draft),
-        model: "claude-opus-4-8".to_string(),
-        thinking_budget: 8192,
-    };
-    let reply_text = match runner.chat(&req).await {
-        Ok(reply) => {
-            if let Some(block) = extract_json_block(&reply.text) {
-                if let Ok(slice) = parse_slice(&block) {
-                    apply_slice(&mut draft, slice);
-                }
-            }
-            reply.text
-        }
-        Err(e) => format!("[design session error] {e}"),
-    };
+    let dialogue_id = format!("{session_id}:{}", step.slug());
+    let (reply_text, slice) = chat_with_repair(
+        runner,
+        &dialogue_id,
+        &step_system_prompt(step),
+        turn_user_message(user_message, &draft),
+    )
+    .await;
+    if let Some(slice) = slice {
+        apply_slice(&mut draft, slice);
+    }
     // best-effort issues are surfaced inline in the wizard (W1); never block.
     let issues = best_effort_validate(&draft);
     TurnResult { reply_text, updated_draft: draft, issues }
@@ -251,6 +321,24 @@ mod tests {
         assert!(parse_slice("{not json").is_err());
     }
 
+    #[test]
+    fn extract_and_parse_reports_a_specific_error_for_no_fence() {
+        let err = extract_and_parse("just prose, no fenced block").unwrap_err();
+        assert!(err.to_lowercase().contains("no fenced") || err.to_lowercase().contains("json block"));
+    }
+
+    #[test]
+    fn extract_and_parse_reports_a_specific_error_for_malformed_json() {
+        let err = extract_and_parse("ok\n```json\n{not valid\n```").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn extract_and_parse_returns_the_slice_on_success() {
+        let slice = extract_and_parse("ok\n```json\n{\"kind\":\"teams\",\"teams\":[]}\n```").unwrap();
+        assert!(matches!(slice, crate::draft::Slice::Teams(_)));
+    }
+
     use crate::draft::{DraftPipeline, DraftTeam};
     use llm_chat::chat::{ChatReply, ChatUsage};
     use llm_chat::fake::FakeChatRunner;
@@ -296,6 +384,65 @@ mod tests {
         let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "garble").await;
         assert_eq!(out.updated_draft, before); // unchanged
         assert!(out.reply_text.contains("clarify"));
+    }
+
+    #[tokio::test]
+    async fn turn_repairs_a_malformed_first_reply_then_applies_the_valid_slice() {
+        // first reply: prose with NO fenced block -> triggers a repair turn;
+        // second reply: a valid prompt slice.
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let malformed = reply("I think research should investigate. (forgot the json)");
+        let good = reply("Here:\n```json\n{\"kind\":\"prompt\",\"team_id\":\"research\",\
+            \"prompt_body\":\"You investigate the repo and write findings.\"}\n```");
+        let runner = FakeChatRunner::new(vec![malformed, good]);
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "set research prompt").await;
+        // the slice from the REPAIR turn was applied
+        assert_eq!(out.updated_draft.teams[0].prompt_body, "You investigate the repo and write findings.");
+        // exactly 2 calls were made (initial + 1 repair)
+        let received = runner.received.lock().unwrap();
+        assert_eq!(received.len(), 2);
+        // the repair request named the failure + re-prompted on the SAME dialogue id
+        assert_eq!(received[1].dialogue_id, "sess-1:prompts");
+        assert!(received[1].user_message.to_lowercase().contains("json"));
+    }
+
+    #[tokio::test]
+    async fn turn_gives_up_after_two_repair_retries_and_leaves_the_draft_unchanged() {
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let before = draft.clone();
+        // every reply is malformed (no fence). FakeChatRunner clamps to the last
+        // reply, so all three calls return malformed.
+        let runner = FakeChatRunner::new(vec![reply("nope, still no json block here")]);
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "set research prompt").await;
+        assert_eq!(out.updated_draft, before); // unchanged after giving up
+        // initial + 2 repair retries = 3 calls
+        assert_eq!(runner.received.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn turn_does_not_repair_when_the_first_reply_is_valid() {
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let good = reply("ok\n```json\n{\"kind\":\"prompt\",\"team_id\":\"research\",\"prompt_body\":\"x\"}\n```");
+        let runner = FakeChatRunner::new(vec![good]);
+        let _ = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "go").await;
+        // only ONE call — no wasted repair turn on a good first reply
+        assert_eq!(runner.received.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kickoff_repairs_a_malformed_first_reply_then_builds_the_draft() {
+        let malformed = reply("Two teams: research and writers. (json omitted)");
+        let good = reply("```json\n{\"kind\":\"teams\",\"teams\":[\
+            {\"id\":\"research\",\"name\":\"Research\"},{\"id\":\"writers\",\"name\":\"Writers\"}]}\n```");
+        let runner = FakeChatRunner::new(vec![malformed, good]);
+        let draft = kickoff_generate(&runner, "sess-1", "research+writing pipeline").await;
+        assert_eq!(draft.teams.len(), 2);
+        let received = runner.received.lock().unwrap();
+        assert_eq!(received.len(), 2); // initial + 1 repair
+        assert_eq!(received[1].dialogue_id, "sess-1:kickoff");
     }
 
     #[tokio::test]
@@ -351,7 +498,39 @@ mod tests {
 
     #[test]
     fn wiring_system_prompt_documents_the_gates_schema() {
-        assert!(WIRING_SYSTEM_PROMPT.contains("gates"));
-        assert!(WIRING_SYSTEM_PROMPT.contains("downstream"));
+        let p = step_system_prompt(Step::Wiring);
+        assert!(p.contains("gates"));
+        assert!(p.contains("downstream"));
+    }
+
+    #[test]
+    fn step_prompt_embeds_the_derived_slice_schema() {
+        // The wiring prompt must contain the schema serialized from WiringSlice via
+        // schemars — proving it is GENERATED, not a hand-written literal.
+        let p = step_system_prompt(Step::Wiring);
+        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::WiringSlice)).unwrap();
+        assert!(p.contains(&schema), "wiring prompt must embed the derived WiringSlice schema");
+        // prose rules are kept
+        assert!(p.contains("fork") && p.contains(">=2"));
+    }
+
+    #[test]
+    fn step_prompts_no_longer_carry_a_hand_written_slice_object_literal() {
+        // The old hand-written shape used a bare {"kind":"teams","teams":[{"id":...}]}
+        // sample-instance literal. Assert the teams prompt now embeds the DERIVED
+        // schema for the teams slice (a JSON Schema, not a sample instance).
+        let p = step_system_prompt(Step::Teams);
+        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::TeamsSlice)).unwrap();
+        assert!(p.contains(&schema));
+        // a JSON Schema carries "properties"/"type" metadata; a hand-written sample would not
+        assert!(p.contains("properties") || p.contains("\"type\""));
+    }
+
+    #[test]
+    fn kickoff_prompt_embeds_the_derived_teams_schema() {
+        let p = kickoff_system_prompt();
+        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::TeamsSlice)).unwrap();
+        assert!(p.contains(&schema));
+        assert!(p.contains('2') && p.contains('5')); // 2–5 teams rule kept
     }
 }

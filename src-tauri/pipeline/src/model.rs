@@ -158,7 +158,7 @@ impl Default for Workers {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Gate {
     pub id: String,
     pub label: String,
@@ -174,13 +174,13 @@ pub struct Escalation {
     pub triggers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Fork {
     pub id: String,
     pub lanes: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Join {
     pub id: String,
     pub waits_for: Vec<String>,
@@ -267,6 +267,18 @@ mod tests {
             outputs: Routes::default(),
             workers: Workers::default(),
         }
+    }
+
+    #[test]
+    fn wiring_node_types_derive_json_schema() {
+        // Fork/Join/Gate must produce a schema (WiringSlice embeds them).
+        let fork = schemars::schema_for!(Fork);
+        let s = serde_json::to_string(&fork).unwrap();
+        assert!(s.contains("lanes"), "Fork schema should expose lanes: {s}");
+        let join = serde_json::to_string(&schemars::schema_for!(Join)).unwrap();
+        assert!(join.contains("waits_for") && join.contains("downstream"));
+        let gate = serde_json::to_string(&schemars::schema_for!(Gate)).unwrap();
+        assert!(gate.contains("downstream") && gate.contains("label"));
     }
 
     #[test]
