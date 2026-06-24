@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { NodeDrawer } from "./NodeDrawer";
 import { emptyDraft, addTeam } from "../draft";
 import type { DraftPipeline } from "../../ipc/pipeline";
+import type { SkillEntry } from "../../ipc/skills";
 
 function teamDraft(): DraftPipeline {
   return addTeam(emptyDraft(), "research", "Research");
@@ -59,6 +61,43 @@ describe("NodeDrawer — team editor round-trips", () => {
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "claude-haiku-4" } });
     expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("claude-haiku-4");
+  });
+});
+
+describe("NodeDrawer — A4 skill autocomplete on the prompt field", () => {
+  const skills: SkillEntry[] = [
+    { name: "brainstorming", kind: "skill", namespace: "superpowers", description: "Explore intent", verbs: [], source: "global", qualified: false },
+    { name: "ddd-council", kind: "skill", namespace: "ddd-council", description: "council", verbs: ["vet"], source: "project", qualified: false },
+  ];
+
+  function ControlledDrawer({ initial = "" }: { initial?: string }) {
+    const [draft, setDraft] = useState<DraftPipeline>(() => {
+      const d = teamDraft();
+      return { ...d, teams: d.teams.map((t) => ({ ...t, prompt_body: initial })) };
+    });
+    return <NodeDrawer draft={draft} selectedId="research" onChange={setDraft} onClose={() => {}} skills={skills} />;
+  }
+
+  it("typing '/' in the prompt opens the popover; selecting inserts the token", async () => {
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    render(<ControlledDrawer />);
+    const ta = screen.getByLabelText("prompt for research") as HTMLTextAreaElement;
+    fireEvent.change(ta, { target: { value: "/bra" } });
+    ta.setSelectionRange(4, 4);
+    fireEvent.click(ta); // re-evaluate the trigger with the caret in place
+    await waitFor(() => expect(screen.getByRole("listbox")).toBeInTheDocument());
+    // Pick the brainstorming row explicitly (the catalog has more than one entry).
+    const option = screen.getAllByRole("option").find((o) => o.textContent?.includes("/brainstorming"))!;
+    fireEvent.mouseDown(option);
+    await waitFor(() => expect((screen.getByLabelText("prompt for research") as HTMLTextAreaElement).value).toBe("/brainstorming "));
+    vi.unstubAllGlobals();
+  });
+
+  it("recognized tokens get the highlight class in the mirror overlay", () => {
+    render(<ControlledDrawer initial="run /brainstorming and /nope" />);
+    const tinted = document.querySelectorAll('.abp-skill-token[data-recognized="true"]');
+    expect(tinted.length).toBe(1);
+    expect(tinted[0].textContent).toBe("/brainstorming");
   });
 });
 

@@ -22,6 +22,7 @@ import { addNode, connect, removeNode, removeEdge, NODE_KINDS, type NodeKind } f
 import { nodeTypes } from "./canvas/nodes/CanvasNodes";
 import { NodeDrawer } from "./canvas/NodeDrawer";
 import { Button } from "../components/ui/Button";
+import type { SkillEntry } from "../ipc/skills";
 
 /// PipelineCanvas — the primary Pipeline Authoring surface (spec). Controlled by
 /// the same {draft, onChange} contract as the form steps it replaces.
@@ -33,6 +34,11 @@ import { Button } from "../components/ui/Button";
 interface PipelineCanvasProps {
   draft: DraftPipeline;
   onChange: (d: DraftPipeline) => void;
+  /// A4 — the discovered skill catalog for the prompt autocomplete (empty when no
+  /// project context, e.g. the new-project wizard before create).
+  skills?: SkillEntry[];
+  /// A4 — re-scan the catalog ("refresh skills" affordance). Hidden when absent.
+  onRefreshSkills?: () => void;
 }
 
 /// Edge stroke per route kind (DESIGN.md §Pipeline-editor edges): hand-off /
@@ -53,7 +59,7 @@ const PALETTE_LABEL: Record<NodeKind, string> = {
   escalation: "Escalation",
 };
 
-function CanvasInner({ draft, onChange }: PipelineCanvasProps) {
+function CanvasInner({ draft, onChange, skills = [], onRefreshSkills }: PipelineCanvasProps) {
   // LOCAL, ephemeral position map (spec §Positions) — never persisted.
   const [positions, setPositions] = useState<Record<string, XY>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -141,6 +147,13 @@ function CanvasInner({ draft, onChange }: PipelineCanvasProps) {
         {NODE_KINDS.map((k) => (
           <Button key={k} size="sm" onClick={() => add(k)} aria-label={`add ${k}`}>{PALETTE_LABEL[k]}</Button>
         ))}
+        {onRefreshSkills && (
+          <span style={{ marginLeft: "auto" }}>
+            <Button size="sm" variant="ghost" onClick={onRefreshSkills} aria-label="refresh skills" title="Re-scan installed skills + commands">
+              Refresh skills
+            </Button>
+          </span>
+        )}
       </div>
 
       {issues.length > 0 && (
@@ -173,7 +186,7 @@ function CanvasInner({ draft, onChange }: PipelineCanvasProps) {
         </ReactFlow>
       </div>
 
-      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} />
+      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} skills={skills} />
     </div>
   );
 }
