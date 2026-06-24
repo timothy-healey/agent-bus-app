@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { EVENTS } from "./events";
 
 export type Role = "user" | "assistant";
 
@@ -54,5 +55,5 @@ export interface ConversationDelta {
 export async function onConversationDelta(
   cb: (delta: ConversationDelta) => void,
 ): Promise<UnlistenFn> {
-  return await listen<ConversationDelta>("conversation.delta", (e) => cb(e.payload));
+  return await listen<ConversationDelta>(EVENTS.conversationDelta, (e) => cb(e.payload));
 }

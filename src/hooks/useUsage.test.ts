@@ -38,7 +38,7 @@ describe("useUsage", () => {
     const { result } = renderHook(() => useUsage());
     await waitFor(() => expect(result.current.snapshot?.window_pct).toBe(0.2));
     await act(async () => { await Promise.resolve(); });
-    act(() => listeners["usage.changed"]?.({ payload: null }));
+    act(() => listeners["usage-changed"]?.({ payload: null }));
     await waitFor(() => expect(result.current.snapshot?.window_pct).toBe(0.8));
   });
 });

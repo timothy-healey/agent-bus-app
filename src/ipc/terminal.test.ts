@@ -32,7 +32,7 @@ describe("terminal ipc", () => {
     });
     const got: Array<{ text: string; reset: boolean }> = [];
     await onConversationDelta((d) => got.push(d));
-    expect(listenMock).toHaveBeenCalledWith("conversation.delta", expect.any(Function));
+    expect(listenMock).toHaveBeenCalledWith("conversation-delta", expect.any(Function));
     handlers[0]({ payload: { text: "hi", reset: false } });
     expect(got).toEqual([{ text: "hi", reset: false }]);
   });

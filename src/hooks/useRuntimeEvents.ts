@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { EVENTS } from "../ipc/events";
 
 export interface RuntimeEventHandlers {
   onTaskChanged?: (taskId: string) => void;
@@ -12,7 +13,7 @@ export function useRuntimeEvents({ onTaskChanged }: RuntimeEventHandlers): void 
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     (async () => {
-      const un = await listen<string>("task.changed", (event) => {
+      const un = await listen<string>(EVENTS.taskChanged, (event) => {
         onTaskChanged?.(event.payload);
       });
       if (cancelled) un();
