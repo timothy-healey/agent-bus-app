@@ -359,6 +359,77 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     Ok(StepOutcome::Generated { keys: committed })
 }
 
+/// The result of driving a pipeline to quiescence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuiescenceReport {
+    /// Whether the run completed (generator dry + stores empty + no running).
+    pub completed: bool,
+    /// Whether backpressure was observed at least once during the drive (a full
+    /// store turned away a generator pass or a transformer reservation).
+    pub backpressure_seen: bool,
+    /// How many driver rounds ran before quiescence.
+    pub rounds: usize,
+}
+
+/// Drive the whole pipeline to quiescence (the in-memory pool driver — proves
+/// the bounded-buffer model end-to-end without touching the live activator).
+///
+/// `source` is the generator (entry) team; `transformers` are every non-source
+/// team, in flow order. Each round runs one generator pass then one transformer
+/// step per team. The loop ends when a round makes NO progress — the generator is
+/// Retired/Backpressure and every transformer is Idle/Backpressure/Braked — then
+/// it tries to finish the run. A `max_rounds` bound prevents a runaway loop on a
+/// logic error.
+///
+/// Single-threaded and deterministic: it is a test/driver harness, not the live
+/// scheduler (worker pools + tokio loops land at cutover, ④d).
+pub async fn run_pool_until_quiescent(
+    ctx: &EngineContext,
+    source: &Team,
+    transformers: &[Team],
+    max_rounds: usize,
+) -> Result<QuiescenceReport, EngineError> {
+    let mut backpressure_seen = false;
+    let mut rounds = 0;
+    for _ in 0..max_rounds {
+        rounds += 1;
+        let mut progressed = false;
+
+        // Run the generator until it can't place more this round (filling the
+        // downstream store to capacity is what surfaces backpressure): loop until
+        // a pass returns Backpressure / Retired / produces nothing.
+        loop {
+            match generate_once(ctx, source).await? {
+                StepOutcome::Generated { keys } if !keys.is_empty() => {
+                    progressed = true;
+                    continue;
+                }
+                StepOutcome::Backpressure => {
+                    backpressure_seen = true;
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        // One transformer step per non-source team.
+        for team in transformers {
+            match transform_once(ctx, team).await? {
+                StepOutcome::Advanced { .. } | StepOutcome::Failed { .. } => progressed = true,
+                StepOutcome::Backpressure => backpressure_seen = true,
+                _ => {}
+            }
+        }
+
+        if !progressed {
+            let completed = try_finish_run(ctx, &ctx.run_id).await?;
+            return Ok(QuiescenceReport { completed, backpressure_seen, rounds });
+        }
+    }
+    let completed = try_finish_run(ctx, &ctx.run_id).await?;
+    Ok(QuiescenceReport { completed, backpressure_seen, rounds })
+}
+
 /// Attempt to finish the run: complete it (exactly once) iff the completion
 /// precondition holds — the generator is dry AND every stage store is empty
 /// (occupancy 0) AND no work-item of this run is `running`. Returns `true` iff
@@ -879,6 +950,58 @@ mod tests {
         other.state = TaskState::Running;
         ctx.tasks.insert(&other).await.unwrap();
         assert!(try_finish_run(&ctx, &ctx.run_id).await.unwrap());
+    }
+
+    // ---- Task 7: end-to-end pool driver (the crux) ----
+
+    #[tokio::test]
+    async fn crux_generator_overfills_single_worker_drains_with_backpressure_then_completes() {
+        // Pipeline: source -> spec(capacity 2) -> done(terminal).
+        // The generator wants to emit M=5 > capacity candidates; the bounded
+        // spec store (cap 2) forces backpressure; a single-worker spec transformer
+        // drains items to the terminal `done` stage one at a time; the run
+        // completes when the generator is dry and all stores are empty.
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", Some("done"), Role::Producer, 2),
+            team("done", None, Role::Producer, 16),
+        ]);
+        // Generator emits 5 candidates the first pass (capped to free slots each
+        // call), keeps offering the same 5 (deduped by the ledger), then nothing.
+        let batch = "KEY: c1\nKEY: c2\nKEY: c3\nKEY: c4\nKEY: c5";
+        let runner = Arc::new(FakeRunner::new(vec![
+            Ok(items_out(batch)),
+            Ok(items_out(batch)),
+            Ok(items_out(batch)),
+            Ok(items_out(batch)),
+            // transformer outputs (spec/done) reuse the last response too: any
+            // non-empty KEY works for a 1->1 transform. Keep emitting a batch so
+            // both source passes AND transformer steps get a parseable item.
+        ]));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 2).await.unwrap();
+        ctx.stores.ensure(&ctx.run_id, "done", 16).await.unwrap();
+
+        let source = ctx.pipeline.teams[0].clone();
+        let transformers = vec![ctx.pipeline.teams[1].clone(), ctx.pipeline.teams[2].clone()];
+
+        let report = run_pool_until_quiescent(&ctx, &source, &transformers, 200).await.unwrap();
+
+        assert!(report.completed, "run completes when dry + empty + idle");
+        assert!(report.backpressure_seen, "the bounded spec store (cap 2) applied backpressure");
+
+        // all 5 candidates were generated exactly once (ledger dedup)
+        assert_eq!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().len(), 5);
+        // every store drained to empty
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "done").await.unwrap(), Some(0));
+        // no work-item left queued or running; 5 items flowed through to Done
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Queued).await.unwrap().len(), 0);
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Running).await.unwrap().len(), 0);
+        // 5 spec children + 5 done children all settled Done = 10 done tasks
+        let done = ctx.tasks.list_by_state(TaskState::Done).await.unwrap();
+        assert_eq!(done.len(), 10, "5 spec + 5 done work-items all settled");
+        assert!(ctx.runs.get(&ctx.run_id).await.unwrap().generator_dry);
     }
 
     #[test]
