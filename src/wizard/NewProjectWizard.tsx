@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { kickoffGenerate, listSeedTemplates, seedTemplate, type DraftPipeline, type SeedTemplateSummary, type Step } from "../ipc/pipeline";
+import { createProjectFromDraft, kickoffGenerate, listSeedTemplates, seedTemplate, type DraftPipeline, type SeedTemplateSummary, type Step } from "../ipc/pipeline";
 import type { Project } from "../ipc/workspace";
 import { emptyDraft, WIZARD_STEPS, type WizardStep } from "./draft";
 import { ChatDraftPanel } from "./ChatDraftPanel";
@@ -33,6 +33,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
   const [description, setDescription] = useState("");
   const [draft, setDraft] = useState<DraftPipeline>(emptyDraft());
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   // a stable per-open dialogue session id (D8).
   const sessionId = useMemo(() => `wiz-${Math.random().toString(36).slice(2)}`, [open]);
   const [templates, setTemplates] = useState<SeedTemplateSummary[]>([]);
@@ -89,6 +90,21 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
     }
   }
 
+  // Step 5 Create: hard-validate → write → activate via create_project_from_draft.
+  // A hard-validation failure comes back as an error and nothing is written.
+  async function create() {
+    setBusy(true);
+    setError(null);
+    try {
+      const project = await createProjectFromDraft(name, root, { ...draft, name, description });
+      onCreated(project as Project);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div style={overlay} onClick={requestClose}>
       <div
@@ -105,6 +121,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
           ))}
         </div>
 
+        <div style={body}>
         {step === "basics" && (
           <div>
             <label style={lbl}>Project name<input aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} style={inp} /></label>
@@ -134,7 +151,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
         )}
 
         {(step === "teams" || step === "prompts" || step === "wiring") && (
-          <div style={{ height: 420 }}>
+          <div style={{ height: 520 }}>
             <h3 style={{ fontSize: "var(--ts-md)", textTransform: "capitalize" }}>{step}</h3>
             {step === "wiring" ? (
               // Wiring's draft view is the read-only viewer; chat still drives edits.
@@ -158,14 +175,24 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
         )}
 
         {step === "review" && (
-          <ReviewStep basics={{ name, root, description }} draft={draft} onCreated={onCreated} />
+          <ReviewStep basics={{ name, root, description }} draft={draft} error={error} />
         )}
+        </div>
 
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: "var(--sp-5)" }}>
+        <div style={footer}>
           <Button variant="ghost" onClick={requestClose}>Cancel</Button>
           <div style={{ display: "flex", gap: 8 }}>
-            {idx > 0 && step !== "review" && <Button onClick={() => go(WIZARD_STEPS[idx - 1])}>Back</Button>}
-            {step !== "basics" && step !== "review" && <Button onClick={() => go(WIZARD_STEPS[idx + 1])}>Next</Button>}
+            {step !== "basics" && (
+              <Button onClick={() => go(step === "review" ? "wiring" : WIZARD_STEPS[idx - 1])}>Back</Button>
+            )}
+            {(step === "teams" || step === "prompts" || step === "wiring") && (
+              <Button onClick={() => go(WIZARD_STEPS[idx + 1])}>Next</Button>
+            )}
+            {step === "review" && (
+              <Button variant="primary" onClick={create} disabled={busy}>
+                {busy ? "Creating…" : "Create project"}
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -174,6 +201,8 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
 }
 
 const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "var(--scrim)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 };
-const panel: React.CSSProperties = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: "var(--sp-7)", minWidth: 720, maxWidth: 900 };
+const panel: React.CSSProperties = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: "var(--sp-7)", width: "min(1100px, 94vw)", height: "92vh", display: "flex", flexDirection: "column", overflow: "hidden" };
+const body: React.CSSProperties = { flex: 1, overflowY: "auto", minHeight: 0 };
+const footer: React.CSSProperties = { display: "flex", justifyContent: "space-between", marginTop: "var(--sp-5)" };
 const lbl: React.CSSProperties = { display: "block", fontSize: "var(--ts-sm)", color: "var(--text-3)", marginBottom: "var(--sp-3)" };
 const inp: React.CSSProperties = { width: "100%", background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit", fontSize: 12 };
