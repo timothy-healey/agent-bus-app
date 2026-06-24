@@ -1,9 +1,8 @@
 //! Engine — the bounded-buffer assembly-line execution core (Runtime redesign
-//! ④b). A NEW, parallel runtime built on the ④a aggregates (`StoreRepo`,
-//! `RunStore`, `GeneratorLedger`) + the work-item `Task`. It is **additive and
-//! unwired**: the existing single-task `pool.rs` runtime stays untouched and
-//! green, and nothing here is referenced by the activator / composition root.
-//! Cutover is a later plan (④d).
+//! ④b). The live runtime built on the ④a aggregates (`StoreRepo`, `RunStore`,
+//! `GeneratorLedger`) + the work-item `Task`. The activator / composition root
+//! drives this engine's per-run worker loops (④d cutover; the prior single-task
+//! pool was retired and deleted in the post-cutover cleanup).
 //!
 //! The model (see the bounded-buffer spec):
 //!   * Stages are connected by capacity-limited **stores**; a full store applies
@@ -33,6 +32,28 @@ use runners::output::Runner;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+
+/// Resolve the effective `${target_repo}` for a task: the task's own value
+/// overrides the project-level default (A5). The SINGLE precedence fn so the rule
+/// lives in one place (vet F2). Pure.
+///
+/// PRESERVED from the deleted single-task `pool` module at the ④d cleanup. NOTE
+/// (correctness gap): the bounded-buffer engine's worker `invoke` (below) binds
+/// `${target_repo}` from `EngineContext.target_repo` (the project-level default)
+/// ONLY — it does NOT yet consult `task.target_repo`, so this precedence rule is
+/// NOT applied by the live engine today. Work-items carry no `target_repo` in v1
+/// (see `EngineContext.target_repo` doc), so the gap is currently latent; this fn
+/// is kept as the canonical precedence home for when the engine threads a
+/// per-item `target_repo` override into the PathVars build.
+pub fn effective_target_repo(
+    task_target: Option<&str>,
+    project_default: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    task_target
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| project_default.map(|p| p.to_path_buf()))
+}
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -104,9 +125,9 @@ pub enum StepOutcome {
     JoinBackpressure { group_id: String },
 }
 
-/// The collaborators one engine step needs. Cheap to clone (Arcs). The
-/// bounded-buffer dual of `PoolContext`: it bundles the ④a aggregates plus the
-/// `Runner` ACL seam, the pipeline, and the project/repo roots + a prompt reader.
+/// The collaborators one engine step needs. Cheap to clone (Arcs). It bundles
+/// the ④a aggregates plus the `Runner` ACL seam, the pipeline, and the
+/// project/repo roots + a prompt reader.
 #[derive(Clone)]
 pub struct EngineContext {
     /// The run this engine instance is driving.
@@ -221,7 +242,7 @@ fn role_str(team: &Team) -> &'static str {
 /// the produced item is committed into the reserved slot as a child work-item and
 /// this team's own input slot is freed (the item left). On failure the reservation
 /// is released and the item follows the operational-failure path (a bounded
-/// synthetic revise → needs-human), mirroring `pool::process_one_claim`.
+/// synthetic revise → needs-human).
 pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutcome, EngineError> {
     // 1. BRAKE
     if ctx.brake.is_on() {
@@ -528,8 +549,8 @@ pub async fn fork_once(
     if ctx.brake.is_on() {
         return Ok(StepOutcome::Braked);
     }
-    // The fork's paired join: the join all of the fork's lanes reach (mirrors
-    // pool.rs's pairing). Its downstream + id seed the FanOutGroup.
+    // The fork's paired join: the join all of the fork's lanes reach. Its
+    // downstream + id seed the FanOutGroup.
     let join = ctx
         .pipeline
         .joins
@@ -610,9 +631,7 @@ pub async fn fork_once(
 
 /// Walk a lane from its entry team toward `join_id`, following on_approve. A team
 /// hop follows on_approve; a gate hop follows the gate's downstream. Reaching
-/// `join_id` is success. Bounded by total node count to terminate. Mirrors
-/// `pool::lane_reaches` (kept private there; re-stated here for the engine to
-/// avoid touching pool.rs). PURE.
+/// `join_id` is success. Bounded by total node count to terminate. PURE.
 fn lane_reaches(p: &Pipeline, entry: &str, join_id: &str) -> bool {
     let bound = p.teams.len() + p.gates.len() + p.forks.len() + p.joins.len() + 1;
     let mut current = entry.to_string();
@@ -639,7 +658,7 @@ fn lane_reaches(p: &Pipeline, entry: &str, join_id: &str) -> bool {
 }
 
 /// Settle a lane's terminal verdict against its fan-out group barrier (④c task
-/// 5). Mirrors `pool::resolve_barrier`: records the lane verdict (honoring the
+/// 5): records the lane verdict (honoring the
 /// join's policy — full barrier default, P2 `cancel_on_reject`, P3 `quorum`),
 /// parks the lane task Done at the join, and — when THIS caller completes the
 /// group (the completes-once guard) — produces the single continuation:
@@ -690,7 +709,7 @@ pub async fn resolve_join_barrier(
         ctx.fanout.record_and_try_complete(&group_id, &lane, verdict).await?
     };
 
-    // Park this lane task Done at its join (mirrors pool.rs).
+    // Park this lane task Done at its join.
     lane_task.state = TaskState::Done;
     lane_task.current_stage = lane_task.join_target.clone().unwrap_or_else(|| lane_task.current_stage.clone());
     lane_task.updated_at = now_unix();
@@ -1187,8 +1206,8 @@ async fn invoke(
     Ok(parse_items(&output.final_text))
 }
 
-/// The operational-failure path for a transformer (mirrors `pool.rs`'s synthetic
-/// revise fallback): bump attempts; under the cap re-queue the item at the SAME
+/// The operational-failure path for a transformer (a synthetic revise
+/// fallback): bump attempts; under the cap re-queue the item at the SAME
 /// stage for another pass; at the cap escalate it to needs-human. Not a
 /// model-produced verdict — an operational safety valve so a broken invocation
 /// never strands a `running` work-item.
@@ -1356,6 +1375,28 @@ mod tests {
 
     fn approve_out() -> RunnerOutput {
         RunnerOutput { verdict: agent_bus_core::Verdict::Approve, artifact_path: None, final_text: String::new(), usage: RunnerUsage::default() }
+    }
+
+    #[test]
+    fn task_target_repo_overrides_project_default() {
+        use std::path::{Path, PathBuf};
+        // task value wins
+        assert_eq!(
+            super::effective_target_repo(Some("/task-repo"), Some(Path::new("/proj-repo"))),
+            Some(PathBuf::from("/task-repo"))
+        );
+        // no task value → project default
+        assert_eq!(
+            super::effective_target_repo(None, Some(Path::new("/proj-repo"))),
+            Some(PathBuf::from("/proj-repo"))
+        );
+        // blank task value → project default (not an empty repo)
+        assert_eq!(
+            super::effective_target_repo(Some("  "), Some(Path::new("/proj-repo"))),
+            Some(PathBuf::from("/proj-repo"))
+        );
+        // neither → None
+        assert_eq!(super::effective_target_repo(None, None), None);
     }
 
     #[tokio::test]

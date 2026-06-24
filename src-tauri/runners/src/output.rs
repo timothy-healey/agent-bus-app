@@ -79,7 +79,7 @@ pub struct InvocationRequest {
     /// **EXPERIMENTAL (S3) · macOS-only · CLI-runner-only.** When `Some`, the CLI
     /// runner wraps the `claude` subprocess in `sandbox-exec -p <profile>`.
     /// CLI-shaped data owned by the Runners ACL — the SBPL idiom never crosses
-    /// the `Runner` trait outward: Runtime sets only the `PoolContext.sandbox`
+    /// the `Runner` trait outward: Runtime sets only the engine's `sandbox`
     /// bool and never reads this string. `None` (the default) = unchanged
     /// behavior. The AnthropicApiRunner ignores it (no subprocess to confine).
     /// Live confinement is structural-only (unverified) — NOT a proven boundary.
