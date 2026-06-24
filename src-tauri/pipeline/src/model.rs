@@ -61,6 +61,9 @@ pub struct Team {
     /// Producer vs reviewer (vet F8). Default producer; see `Role`.
     #[serde(default)]
     pub role: Role,
+    /// The team's bounded input store (runtime redesign). Defaulted; see `Store`.
+    #[serde(default)]
+    pub store: Store,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +213,26 @@ pub struct Join {
     pub quorum: Option<u32>,
 }
 
+/// Default bounded-store capacity when a team omits one (runtime redesign). A
+/// generous default so existing v2 pipelines keep flowing; authors tune it in
+/// the graph builder. The generator (source) team has no input store and ignores it.
+pub const DEFAULT_STORE_CAPACITY: u32 = 8;
+
+/// A team's input **store**: the bounded buffer feeding the team (runtime
+/// redesign / DOMAIN Store). `capacity` is the WIP limit; a full store applies
+/// backpressure to the upstream. Additive-optional with a default so v2
+/// pipelines load unchanged; the runtime-behavior chunk enforces occupancy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Store {
+    pub capacity: u32,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self { capacity: DEFAULT_STORE_CAPACITY }
+    }
+}
+
 /// A team's role in the pipeline (graph-builder vet F8). A **reviewer** emits a
 /// verdict (approve/revise/reject) on each item it sees; a **producer** (incl.
 /// implementers) hands its output forward without a verdict. Additive enum,
@@ -287,6 +310,7 @@ mod tests {
             outputs: Routes::default(),
             workers: Workers::default(),
             role: Role::default(),
+            store: Store::default(),
         }
     }
 
@@ -319,6 +343,20 @@ mod tests {
         assert_eq!(serde_json::to_string(&Role::Reviewer).unwrap(), "\"reviewer\"");
         let r: Role = serde_json::from_str("\"producer\"").unwrap();
         assert_eq!(r, Role::Producer);
+    }
+
+    #[test]
+    fn team_store_defaults_when_absent() {
+        let json = r#"{"id":"t","name":"T","prompt":"p.md","scope":{},"outputs":{}}"#;
+        let t: Team = serde_json::from_str(json).unwrap();
+        assert_eq!(t.store.capacity, DEFAULT_STORE_CAPACITY);
+    }
+
+    #[test]
+    fn store_round_trips() {
+        let s = Store { capacity: 3 };
+        let back: Store = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.capacity, 3);
     }
 
     #[test]

@@ -13,7 +13,7 @@ describe("buildPipelineGraph", () => {
   it("creates a node per team, gate, fork, join and escalation", () => {
     const g = buildPipelineGraph(
       pipe({
-        teams: [{ id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer" }],
+        teams: [{ id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } }],
         gates: [{ id: "gate-1", label: "Gate 1", downstream: "impl" }],
         escalations: [{ id: "needs-human", triggers: [] }],
         forks: [{ id: "fork-1", lanes: ["a", "b"] }],
@@ -28,7 +28,7 @@ describe("buildPipelineGraph", () => {
     const g = buildPipelineGraph(
       pipe({
         teams: [
-          { id: "a", name: "A", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer" },
+          { id: "a", name: "A", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
         ],
         gates: [{ id: "gate-1", label: "G", downstream: "b" }],
       }),
@@ -40,7 +40,7 @@ describe("buildPipelineGraph", () => {
 
   it("classifies revise as a back-edge and reject as escalate", () => {
     const team = (id: string, name: string, outputs: Record<string, string> = {}) => ({
-      id, name, prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs, workers: { min: 1, max: 1 }, role: "producer" as const,
+      id, name, prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs, workers: { min: 1, max: 1 }, role: "producer" as const, store: { capacity: 8 },
     });
     const g = buildPipelineGraph(
       pipe({
@@ -62,9 +62,9 @@ describe("buildPipelineGraph", () => {
     const g = buildPipelineGraph(
       pipe({
         teams: [
-          { id: "spec-review", name: "Spec Review", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer" },
-          { id: "impl", name: "Implementer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer" },
-          { id: "plan", name: "Planner", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer" },
+          { id: "spec-review", name: "Spec Review", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "impl", name: "Implementer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "plan", name: "Planner", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
         ],
       }),
     );

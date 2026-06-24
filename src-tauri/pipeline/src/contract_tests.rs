@@ -8,7 +8,7 @@
 
 #![cfg(test)]
 
-use crate::model::{Escalation, Gate, Pipeline, Role, Routes, RunnerConfig, Scope, Team, Workers};
+use crate::model::{Escalation, Gate, Pipeline, Role, Routes, RunnerConfig, Scope, Store, Team, Workers};
 use crate::draft::{DraftPipeline, DraftTeam, Slice, SliceTeam, TeamsSlice};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde_json::Value;
@@ -46,6 +46,7 @@ fn full_team() -> Team {
         },
         workers: Workers { min: 1, max: 3 },
         role: Role::default(),
+        store: Store::default(),
     }
 }
 
@@ -82,7 +83,7 @@ fn pipeline_key_set_matches_ts() {
 #[test]
 fn team_key_set_matches_ts() {
     let v = serde_json::to_value(full_team()).unwrap();
-    assert_eq!(keys(&v), set(&["id", "name", "prompt", "runner", "scope", "outputs", "workers", "role"]));
+    assert_eq!(keys(&v), set(&["id", "name", "prompt", "runner", "scope", "outputs", "workers", "role", "store"]));
 }
 
 /// Locks `src/ipc/pipeline.ts:12-17` `interface RunnerConfig`:
