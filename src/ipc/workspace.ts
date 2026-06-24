@@ -6,6 +6,8 @@ export interface Project {
   name: string;
   root_path: string;
   target_repo: string | null;
+  /** A4: extra `.claude` roots scanned for skill autocomplete (beyond global). */
+  skill_sources: string[];
   active_pipeline_id: string | null;
   created_at: number;
   updated_at: number;
@@ -76,6 +78,14 @@ export async function workspaceSetTargetRepo(
   targetRepo: string | null,
 ): Promise<void> {
   await invoke<void>("workspace_set_target_repo", { id, target_repo: targetRepo });
+}
+
+/** Set a project's extra skill sources (A4). Empty list = global only. */
+export async function workspaceSetSkillSources(
+  id: string,
+  sources: string[],
+): Promise<void> {
+  await invoke<void>("workspace_set_skill_sources", { id, sources });
 }
 
 export interface WorktreeEntry {

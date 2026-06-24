@@ -25,6 +25,7 @@ function baseProps(over: Partial<React.ComponentProps<typeof SettingsView>> = {}
     activeProjectId: null,
     onRemoveProject: vi.fn().mockResolvedValue(undefined),
     onSetTargetRepo: vi.fn().mockResolvedValue(undefined),
+    onSetSkillSources: vi.fn().mockResolvedValue(undefined),
     onListWorktrees: vi.fn().mockResolvedValue([]),
     onRemoveWorktree: vi.fn().mockResolvedValue(undefined),
     ...over,
@@ -91,7 +92,7 @@ describe("SettingsView", () => {
   });
 
   it("lists projects and exposes remove", () => {
-    render(<SettingsView {...baseProps({ projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, active_pipeline_id: null, created_at: 0, updated_at: 0 }] })} />);
+    render(<SettingsView {...baseProps({ projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, skill_sources: [], active_pipeline_id: null, created_at: 0, updated_at: 0 }] })} />);
     expect(screen.getByText("Alpha")).toBeInTheDocument();
     // The project row's own remove button (worktrees expander collapsed by default).
     expect(screen.getByRole("button", { name: "remove" })).toBeInTheDocument();
@@ -100,7 +101,7 @@ describe("SettingsView", () => {
   it("renders a Target repo field per project and saves it (A5)", async () => {
     const onSetTargetRepo = vi.fn().mockResolvedValue(undefined);
     render(<SettingsView {...baseProps({
-      projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: "/old", active_pipeline_id: null, created_at: 0, updated_at: 0 }],
+      projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: "/old", skill_sources: [], active_pipeline_id: null, created_at: 0, updated_at: 0 }],
       onSetTargetRepo,
     })} />);
     const input = screen.getByRole("textbox", { name: "Target repo" }) as HTMLInputElement;
@@ -115,10 +116,41 @@ describe("SettingsView", () => {
     fireEvent.click(within(row).getByRole("button", { name: "save" }));
     await waitFor(() => expect(onSetTargetRepo).toHaveBeenCalledWith("p1", "~/new-repo"));
   });
+
+  it("shows the global skill source as locked and lists project sources (A4)", () => {
+    render(<SettingsView {...baseProps({
+      projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, skill_sources: ["/work/.claude"], active_pipeline_id: null, created_at: 0, updated_at: 0 }],
+    })} />);
+    const list = screen.getByLabelText("skill sources for p1");
+    expect(list).toHaveTextContent("~/.claude");
+    expect(list).toHaveTextContent("global · locked");
+    expect(list).toHaveTextContent("/work/.claude");
+  });
+
+  it("adds a skill source via the folder field (A4)", async () => {
+    const onSetSkillSources = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView {...baseProps({
+      projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, skill_sources: [], active_pipeline_id: null, created_at: 0, updated_at: 0 }],
+      onSetSkillSources,
+    })} />);
+    fireEvent.change(screen.getByLabelText("Add a project .claude root"), { target: { value: "/new/.claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "add skill source" }));
+    await waitFor(() => expect(onSetSkillSources).toHaveBeenCalledWith("p1", ["/new/.claude"]));
+  });
+
+  it("removes a skill source (A4)", async () => {
+    const onSetSkillSources = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView {...baseProps({
+      projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, skill_sources: ["/work/.claude"], active_pipeline_id: null, created_at: 0, updated_at: 0 }],
+      onSetSkillSources,
+    })} />);
+    fireEvent.click(screen.getByRole("button", { name: "remove skill source /work/.claude" }));
+    await waitFor(() => expect(onSetSkillSources).toHaveBeenCalledWith("p1", []));
+  });
 });
 
 const oneProject = [
-  { id: "p1", name: "Alpha", root_path: "/home/u/proj", target_repo: null, active_pipeline_id: null, created_at: 0, updated_at: 0 },
+  { id: "p1", name: "Alpha", root_path: "/home/u/proj", target_repo: null, skill_sources: [], active_pipeline_id: null, created_at: 0, updated_at: 0 },
 ];
 
 describe("SettingsView worktrees (S2)", () => {
