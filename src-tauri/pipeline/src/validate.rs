@@ -7,7 +7,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PipelineValidationError {
-    #[error("unsupported schema_version {found} (this build supports 1 and {max})")]
+    #[error("unsupported schema_version {found} (this build supports 1..={max})")]
     UnsupportedSchemaVersion { found: u32, max: u32 },
     #[error("fork/join nodes require schema_version: 2")]
     ForkRequiresV2,
@@ -41,6 +41,8 @@ pub enum PipelineValidationError {
     QuorumOutOfRange { join: String, quorum: u32, lanes: u32 },
     #[error("fork nesting exceeds the maximum depth of {max} (fork '{fork}' is at depth {depth})")]
     NestingTooDeep { fork: String, depth: u32, max: u32 },
+    #[error("team '{team}' store.capacity must be >= 1")]
+    StoreCapacityZero { team: String },
 }
 
 /// Max fork nesting depth (DD-P1-5). A top-level fork is depth 1; a fork reached
@@ -122,8 +124,8 @@ fn check_lane_reachable(
 /// Validate a Pipeline against the aggregate invariants. Returns Ok(()) when
 /// the graph is well-formed.
 pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
-    // schema_version supported
-    if p.schema_version != 1 && p.schema_version != SCHEMA_VERSION {
+    // schema_version supported (1..=SCHEMA_VERSION; older versions still load)
+    if p.schema_version < 1 || p.schema_version > SCHEMA_VERSION {
         return Err(PipelineValidationError::UnsupportedSchemaVersion {
             found: p.schema_version,
             max: SCHEMA_VERSION,
@@ -135,6 +137,13 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
 
     if p.teams.is_empty() {
         return Err(PipelineValidationError::NoTeams);
+    }
+
+    // Store capacity is a WIP limit: a zero-capacity store can never admit work.
+    for t in &p.teams {
+        if t.store.capacity == 0 {
+            return Err(PipelineValidationError::StoreCapacityZero { team: t.id.clone() });
+        }
     }
 
     // R5: every team must end up with a fully-specified runner. validate runs on
@@ -313,6 +322,21 @@ mod tests {
     #[test]
     fn a_well_formed_pipeline_validates() {
         assert_eq!(validate(&valid_pipeline()), Ok(()));
+    }
+
+    #[test]
+    fn rejects_zero_store_capacity() {
+        let mut p = valid_pipeline();
+        p.teams[0].store.capacity = 0;
+        let err = validate(&p).unwrap_err();
+        assert!(format!("{err:?}").contains("StoreCapacity"));
+    }
+
+    #[test]
+    fn accepts_schema_version_three() {
+        let mut p = valid_pipeline();
+        p.schema_version = 3;
+        assert!(validate(&p).is_ok());
     }
 
     #[test]

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// The current pipeline schema version. Pipeline Authoring ↔ Runtime is a
 /// Shared Kernel keyed on this number (context-map.md). Bumping it is a
 /// breaking change reviewed by both contexts.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pipeline {
@@ -327,8 +327,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_constant_is_two() {
-        assert_eq!(SCHEMA_VERSION, 2);
+    fn schema_version_constant_is_three() {
+        assert_eq!(SCHEMA_VERSION, 3);
     }
 
     #[test]
