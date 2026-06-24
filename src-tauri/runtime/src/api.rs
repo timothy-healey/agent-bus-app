@@ -327,6 +327,67 @@ pub async fn list_tasks(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn list_runs(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+    project_id: String,
+) -> Result<Vec<Run>, String> {
+    state
+        .runs
+        .list_for_project(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// One stage's bounded store as the board surfaces it (Runtime redesign ④e):
+/// the live `occupancy` from the StoreRepo paired with the stage's authored
+/// `capacity`. Capacity is NOT held by the runtime aggregate — it is resolved at
+/// the composition root from the active pipeline's `Team.store.capacity` (the
+/// `run_store_occupancy` command reads `RuntimeState.active().pipeline`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoreOccupancy {
+    pub stage: String,
+    pub occupancy: u32,
+    pub capacity: u32,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn run_store_occupancy(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+    run_id: String,
+) -> Result<Vec<StoreOccupancy>, String> {
+    run_store_occupancy_inner(state.as_ref(), &run_id).await
+}
+
+/// Per-team store occupancy for a run, one entry per team in the active
+/// pipeline's declared order. Capacity comes from the active pipeline (the
+/// composition root's source of truth — the runtime aggregate does not hold
+/// capacities); occupancy comes from the StoreRepo (0 when the store hasn't been
+/// ensured yet for this run/stage). The source/generator team has no input store
+/// but is still listed (occupancy 0 / its authored capacity) so the board shows
+/// every lane consistently.
+pub async fn run_store_occupancy_inner(
+    state: &RuntimeState,
+    run_id: &str,
+) -> Result<Vec<StoreOccupancy>, String> {
+    let active = state.active();
+    let mut out = Vec::with_capacity(active.pipeline.teams.len());
+    for team in &active.pipeline.teams {
+        let occupancy = state
+            .stores
+            .occupancy(run_id, &team.id)
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        out.push(StoreOccupancy {
+            stage: team.id.clone(),
+            occupancy,
+            capacity: team.store.capacity,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn brake_on(state: tauri::State<'_, Arc<RuntimeState>>, reason: Option<String>) -> BrakeState {
     state.brake.set_on(reason.unwrap_or_else(|| "manual".to_string()));
     state.brake.state()
@@ -518,6 +579,48 @@ mod tests {
             project_target_repo: None,
         });
         assert!(start_run_inner(&state, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_runs_lists_the_projects_runs_newest_first() {
+        let state = state_with_two_team_pipeline().await;
+        let r1 = start_run_inner(&state, None).await.unwrap();
+        let r2 = start_run_inner(&state, None).await.unwrap();
+        let runs = state.runs.list_for_project("proj").await.unwrap();
+        // both runs are present (newest-first ordering is covered by RunStore's
+        // own test with distinct created_at; both here share a second-resolution
+        // timestamp so we only assert membership here).
+        assert_eq!(runs.len(), 2);
+        let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&r1.id.as_str()));
+        assert!(ids.contains(&r2.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn run_store_occupancy_reports_each_team_with_pipeline_capacity() {
+        let state = state_with_two_team_pipeline().await;
+        let run = start_run_inner(&state, None).await.unwrap();
+        // reserve two slots in `spec` so occupancy is observable.
+        assert!(state.stores.reserve(&run.id, "spec").await.unwrap());
+        assert!(state.stores.reserve(&run.id, "spec").await.unwrap());
+        let occ = run_store_occupancy_inner(&state, &run.id).await.unwrap();
+        // one entry per team, in declared order (research source, then spec).
+        assert_eq!(occ.len(), 2);
+        assert_eq!(occ[0].stage, "research");
+        assert_eq!(occ[0].occupancy, 0);
+        assert_eq!(occ[0].capacity, 5, "capacity comes from the active pipeline");
+        assert_eq!(occ[1].stage, "spec");
+        assert_eq!(occ[1].occupancy, 2);
+        assert_eq!(occ[1].capacity, 3);
+    }
+
+    #[tokio::test]
+    async fn run_store_occupancy_reports_zero_for_unensured_run() {
+        // a run id with no ensured stores still yields one entry per team at 0.
+        let state = state_with_two_team_pipeline().await;
+        let occ = run_store_occupancy_inner(&state, "R-ghost").await.unwrap();
+        assert_eq!(occ.len(), 2);
+        assert!(occ.iter().all(|o| o.occupancy == 0));
     }
 
     #[tokio::test]

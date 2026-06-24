@@ -1324,6 +1324,8 @@ pub fn run() {
             runtime::api::reject_gate,
             runtime::api::revise_gate,
             runtime::api::list_tasks,
+            runtime::api::list_runs,
+            runtime::api::run_store_occupancy,
             runtime::api::brake_on,
             runtime::api::brake_off,
             runtime::api::brake_state,
