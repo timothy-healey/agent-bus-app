@@ -359,6 +359,33 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     Ok(StepOutcome::Generated { keys: committed })
 }
 
+/// Attempt to finish the run: complete it (exactly once) iff the completion
+/// precondition holds — the generator is dry AND every stage store is empty
+/// (occupancy 0) AND no work-item of this run is `running`. Returns `true` iff
+/// THIS call completed the run (`RunStore::try_complete`'s conditional-UPDATE
+/// guard arbitrates exactly-once under any race). Returns `false` if the
+/// precondition is unmet or the run was already completed.
+pub async fn try_finish_run(ctx: &EngineContext, run_id: &str) -> Result<bool, EngineError> {
+    // 1. The generator must be dry.
+    if !ctx.runs.get(run_id).await?.generator_dry {
+        return Ok(false);
+    }
+    // 2. Every stage store must be empty. The stage stores are the pipeline
+    //    teams' input stores.
+    for team in &ctx.pipeline.teams {
+        if ctx.stores.occupancy(run_id, &team.id).await?.unwrap_or(0) > 0 {
+            return Ok(false);
+        }
+    }
+    // 3. No running work-item belongs to this run.
+    let running = ctx.tasks.list_by_state(TaskState::Running).await?;
+    if running.iter().any(|t| t.run_id.as_deref() == Some(run_id)) {
+        return Ok(false);
+    }
+    // Precondition holds → complete exactly once.
+    Ok(ctx.runs.try_complete(run_id).await?)
+}
+
 /// The capacity of the source's downstream store. Read from the (already-ensured)
 /// store row when present; otherwise fall back to the authored capacity of the
 /// downstream team (so a not-yet-ensured store still bounds the pass).
@@ -802,6 +829,56 @@ mod tests {
         assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Generated { keys: vec!["only".into()] });
         assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Retired);
         assert_eq!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().len(), 1);
+    }
+
+    // ---- Task 6: run completion ----
+
+    #[tokio::test]
+    async fn try_finish_completes_once_only_when_dry_and_empty_and_idle() {
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", None, Role::Producer, 8),
+        ]);
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        ctx.stores.ensure(&ctx.run_id, "source", 8).await.unwrap();
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+
+        // not dry yet -> no completion
+        assert!(!try_finish_run(&ctx, &ctx.run_id).await.unwrap());
+
+        ctx.runs.set_generator_dry(&ctx.run_id).await.unwrap();
+
+        // dry but a store is occupied -> no completion
+        ctx.stores.reserve(&ctx.run_id, "spec").await.unwrap();
+        assert!(!try_finish_run(&ctx, &ctx.run_id).await.unwrap());
+        ctx.stores.release(&ctx.run_id, "spec").await.unwrap();
+
+        // dry + empty but a running work-item exists -> no completion
+        let mut running = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "r".into(), "spec".into(), None, None, 100);
+        running.state = TaskState::Running;
+        ctx.tasks.insert(&running).await.unwrap();
+        assert!(!try_finish_run(&ctx, &ctx.run_id).await.unwrap());
+
+        // drain the running item -> precondition holds -> completes once
+        running.state = TaskState::Done;
+        ctx.tasks.update(&running).await.unwrap();
+        assert!(try_finish_run(&ctx, &ctx.run_id).await.unwrap(), "first call completes");
+        assert!(ctx.runs.get(&ctx.run_id).await.unwrap().completed);
+        // second call no-ops (completes-once guard)
+        assert!(!try_finish_run(&ctx, &ctx.run_id).await.unwrap(), "second call no-ops");
+    }
+
+    #[tokio::test]
+    async fn try_finish_ignores_running_items_of_other_runs() {
+        let p = pipeline(vec![team("spec", None, Role::Producer, 8)]);
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+        ctx.runs.set_generator_dry(&ctx.run_id).await.unwrap();
+        // a running item belonging to a DIFFERENT run must not block this run
+        let mut other = Task::work_item("proj".into(), "p".into(), "OTHER".into(), "o".into(), "spec".into(), None, None, 100);
+        other.state = TaskState::Running;
+        ctx.tasks.insert(&other).await.unwrap();
+        assert!(try_finish_run(&ctx, &ctx.run_id).await.unwrap());
     }
 
     #[test]
