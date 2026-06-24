@@ -59,6 +59,16 @@ export function BoardView({
     );
   }
 
+  // No run scoped yet: a single teaching empty state rather than a wall of empty
+  // lanes that imply data. Mirrors the "no active pipeline" hint's calm treatment.
+  if (!hasRun) {
+    return (
+      <div style={{ padding: "var(--sp-10)", color: "var(--text-3)", fontSize: "var(--ts-base)" }}>
+        no run scoped. start a run to populate the board.
+      </div>
+    );
+  }
+
   const lanes = buildLanes(pipeline, tasks);
   // Per-team lookups for the lane indicators: store occupancy (keyed by stage)
   // and the team's worker ceiling (Workers.max).
@@ -80,20 +90,15 @@ export function BoardView({
   const indicators: CSSProperties = {
     display: "flex",
     gap: "var(--sp-3)",
-    marginBottom: 8,
+    marginBottom: "var(--sp-2)",
     fontSize: "var(--ts-xs)",
     color: "var(--text-3)",
     fontVariantNumeric: "tabular-nums",
   };
-  const metric: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 4 };
+  const metric: CSSProperties = { display: "inline-flex", alignItems: "center", gap: "var(--sp-1)" };
 
   return (
     <div style={board}>
-      {!hasRun && (
-        <div style={{ position: "absolute", padding: "var(--sp-3) var(--sp-8)", color: "var(--text-3)", fontSize: "var(--ts-base)" }}>
-          no run scoped — start a run to populate the board.
-        </div>
-      )}
       {lanes.map((l) => {
         const occ = l.kind === "team" ? occByStage.get(l.id) : undefined;
         // Pool busy = running work-items currently at this team's stage.
@@ -103,19 +108,20 @@ export function BoardView({
           <div key={l.id} style={laneStyle}>
             <div style={laneHeaderStyle(l)}>{l.label}</div>
             {l.kind === "team" && (
-              <div style={indicators} aria-label={`${l.label} capacity`}>
+              <div style={indicators}>
                 <span
                   style={metric}
                   title="store occupancy / capacity"
                   role="progressbar"
-                  aria-label={`${l.label} store occupancy`}
+                  aria-label={`${l.label} store`}
                   aria-valuemin={0}
                   aria-valuemax={occ?.capacity ?? 0}
                   aria-valuenow={occ?.occupancy ?? 0}
+                  aria-valuetext={occ ? `${occ.occupancy} of ${occ.capacity}` : "empty"}
                 >
                   store {occ ? `${occ.occupancy}/${occ.capacity}` : "—"}
                 </span>
-                <span style={metric} title="busy workers / max workers">
+                <span style={metric} title="busy workers / max workers" aria-label={`${l.label} workers ${busy} of ${max} busy`}>
                   pool {busy}/{max}
                 </span>
               </div>

@@ -46,6 +46,12 @@ describe("RunSelector", () => {
     expect(btn).toBeDisabled();
   });
 
+  it("shows a loading hint (not the empty state) during the initial fetch", () => {
+    render(<RunSelector runs={[]} selectedRun={null} activeRun={null} onSelect={() => {}} onStartRun={() => {}} loading />);
+    expect(screen.getByText(/loading runs/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no runs yet/i)).not.toBeInTheDocument();
+  });
+
   it("runOptionLabel reflects active / running / completed", () => {
     expect(runOptionLabel(run("R-12345678"), true)).toMatch(/active/);
     expect(runOptionLabel(run("R-12345678"), false)).toMatch(/running/);
