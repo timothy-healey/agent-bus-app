@@ -8,7 +8,7 @@
 
 #![cfg(test)]
 
-use crate::model::{Escalation, Gate, Pipeline, Routes, RunnerConfig, Scope, Team, Workers};
+use crate::model::{Escalation, Gate, Pipeline, Role, Routes, RunnerConfig, Scope, Team, Workers};
 use crate::draft::{DraftPipeline, DraftTeam, Slice, SliceTeam, TeamsSlice};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde_json::Value;
@@ -45,6 +45,7 @@ fn full_team() -> Team {
             on_reject: Some("needs-human".into()),
         },
         workers: Workers { default: 1, max: 3 },
+        role: Role::default(),
     }
 }
 

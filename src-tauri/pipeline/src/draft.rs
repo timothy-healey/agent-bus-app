@@ -320,6 +320,7 @@ impl DraftPipeline {
                     scope: t.scope.clone(),
                     outputs: t.outputs.clone(),
                     workers: t.workers.clone(),
+                    role: crate::model::Role::default(),
                 })
                 .collect(),
             gates: self.gates.clone(),

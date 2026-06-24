@@ -59,6 +59,7 @@ mod tests {
             scope: Scope::default(),
             outputs: Routes::default(),
             workers: Workers::default(),
+            role: crate::model::Role::default(),
         }
     }
 

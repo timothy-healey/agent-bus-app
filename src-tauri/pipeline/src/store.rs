@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn save_round_trips_through_yaml() {
-        use crate::model::{Escalation, Pipeline, Routes, Scope, Team, TeamRunnerConfig, Workers};
+        use crate::model::{Escalation, Pipeline, Role, Routes, Scope, Team, TeamRunnerConfig, Workers};
         use agent_bus_core::{EffortMode, RunnerKind};
         let store = PipelineStore::new(temp_root());
         let p = Pipeline {
@@ -130,6 +130,7 @@ mod tests {
                 scope: Scope::default(),
                 outputs: Routes { on_approve: Some("needs-human".into()), on_revise: None, on_reject: None },
                 workers: Workers::default(),
+                role: Role::default(),
             }],
             gates: vec![],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],
@@ -142,7 +143,7 @@ mod tests {
 
     #[test]
     fn load_resolves_pipeline_defaults_into_each_team() {
-        use crate::model::{Escalation, Pipeline, PipelineDefaults, Routes, Scope, Team, Workers};
+        use crate::model::{Escalation, Pipeline, PipelineDefaults, Role, Routes, Scope, Team, Workers};
         use agent_bus_core::{EffortMode, RunnerKind};
         let store = PipelineStore::new(temp_root());
         // author a pipeline whose team omits its runner; pipeline default supplies it
@@ -160,6 +161,7 @@ mod tests {
                 scope: Scope::default(),
                 outputs: Routes { on_approve: Some("needs-human".into()), on_revise: None, on_reject: None },
                 workers: Workers::default(),
+                role: Role::default(),
             }],
             gates: vec![],
             escalations: vec![Escalation { id: "needs-human".into(), triggers: vec![] }],

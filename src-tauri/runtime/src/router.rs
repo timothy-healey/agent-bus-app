@@ -125,7 +125,7 @@ pub fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pipeline::model::{Escalation, Gate, Routes, Scope, Team, TeamRunnerConfig, Workers};
+    use pipeline::model::{Escalation, Gate, Role, Routes, Scope, Team, TeamRunnerConfig, Workers};
     use agent_bus_core::{EffortMode, RunnerKind};
 
     fn team(id: &str, approve: Option<&str>, revise: Option<&str>, reject: Option<&str>) -> Team {
@@ -137,6 +137,7 @@ mod tests {
             scope: Scope::default(),
             outputs: Routes { on_approve: approve.map(String::from), on_revise: revise.map(String::from), on_reject: reject.map(String::from) },
             workers: Workers::default(),
+            role: Role::default(),
         }
     }
 
