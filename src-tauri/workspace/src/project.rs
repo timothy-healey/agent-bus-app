@@ -7,6 +7,10 @@ pub struct Project {
     pub id: ProjectId,
     pub name: String,
     pub root_path: PathBuf,
+    /// `${target_repo}` default for all teams (A5). Tilde-expanded at create,
+    /// same discipline as root_path. None = unset.
+    #[serde(default)]
+    pub target_repo: Option<String>,
     pub active_pipeline_id: Option<PipelineId>,
     pub created_at: i64,    // unix epoch seconds
     pub updated_at: i64,
@@ -20,6 +24,7 @@ impl Project {
             id: ProjectId(format!("proj-{}", uuid::Uuid::new_v4())),
             name,
             root_path,
+            target_repo: None,
             active_pipeline_id: None,
             created_at: now_unix,
             updated_at: now_unix,
@@ -37,6 +42,7 @@ mod tests {
         assert!(p.id.0.starts_with("proj-"), "id was {}", p.id.0);
         assert_eq!(p.name, "Test");
         assert_eq!(p.root_path, PathBuf::from("/tmp/test"));
+        assert_eq!(p.target_repo, None);
         assert_eq!(p.active_pipeline_id, None);
         assert_eq!(p.created_at, 1_700_000_000);
         assert_eq!(p.updated_at, 1_700_000_000);

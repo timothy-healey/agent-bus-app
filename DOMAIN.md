@@ -57,8 +57,8 @@ Reasoning: this project is *being designed* (no code yet). The default verb is `
 Initial entries — extracted per-context as `/ddd-council language` is run on each. See `docs/context-map.md` for the full strategic + tactical model.
 
 ### Cross-context (the kernel)
-- **Project** — a workspace with a root directory, an active pipeline, and a registered set of pipelines
-- **Path variables** — `${project}` (project root), `${target_repo}` (the splose-monorepo or other repo being modified), `${task_id}` (the in-flight task), `${agent_bus}` (alias for `${project}` for migration-era code)
+- **Project** — a workspace with a root directory, an **optional target repo** (binds `${target_repo}`; A5), an active pipeline, and a registered set of pipelines
+- **Path variables** — `${project}` (project root), `${target_repo}` (the repo a task targets — the splose-monorepo or other repo being modified; **defaults to the Project's `target_repo`** and is overridden per-task at inject — A5), `${task_id}` (the in-flight task), `${agent_bus}` (alias for `${project}` for migration-era code). The project→task default is applied by one precedence fn (`runtime::pool::effective_target_repo`, task overrides project) at both the worker-loop PathVars build and inject; the Project's value is read at the composition root (`load_active`) and handed to Runtime/the pool as a plain string — Runtime never learns about the Project type. The native folder picker that captures it is a UI/Workspace concern sealed behind the `pickFolder()` IPC wrapper over `@tauri-apps/plugin-dialog` (A3).
 
 ### Pipeline Authoring
 - **Pipeline** — the graph: a versioned (`schema_version`) collection of teams, gates, escalations

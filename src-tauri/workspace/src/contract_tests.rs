@@ -19,25 +19,27 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 }
 
 /// Locks `src/ipc/workspace.ts:3-10` `interface Project`:
-/// { id, name, root_path, active_pipeline_id, created_at, updated_at }.
-/// `active_pipeline_id` is `string | null` (TS) → here it is `Option<PipelineId>`
-/// and must still appear as a key when `Some` (serde serialises Option fields).
+/// { id, name, root_path, target_repo, active_pipeline_id, created_at, updated_at }.
+/// `active_pipeline_id` and `target_repo` are `string | null` (TS) → here
+/// `Option<_>`, and must still appear as keys when `Some` (serde serialises them).
 #[test]
 fn project_key_set_and_string_ids_match_ts() {
-    // Fully populated: active_pipeline_id = Some so every key appears.
+    // Fully populated: active_pipeline_id + target_repo = Some so every key appears.
     let mut p = Project::new("My Project".into(), PathBuf::from("/repos/app"), 1_700_000_000);
     p.active_pipeline_id = Some(PipelineId("pipe-1".into()));
+    p.target_repo = Some("/repos/target".into());
 
     let v = serde_json::to_value(&p).unwrap();
     assert_eq!(
         keys(&v),
-        set(&["id", "name", "root_path", "active_pipeline_id", "created_at", "updated_at"]),
+        set(&["id", "name", "root_path", "target_repo", "active_pipeline_id", "created_at", "updated_at"]),
     );
 
     // Newtype id + PathBuf serialise as bare strings (TS `string`).
     assert!(v["id"].is_string());
     assert!(v["root_path"].is_string());
     assert_eq!(v["root_path"], Value::String("/repos/app".into()));
+    assert!(v["target_repo"].is_string()); // Some(String) → bare string
     assert!(v["active_pipeline_id"].is_string()); // Some(PipelineId) → bare string
     assert!(v["created_at"].is_number());
     assert!(v["updated_at"].is_number());

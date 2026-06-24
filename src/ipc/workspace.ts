@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 export interface Project {
   id: string;
   name: string;
   root_path: string;
+  target_repo: string | null;
   active_pipeline_id: string | null;
   created_at: number;
   updated_at: number;
@@ -50,6 +52,23 @@ export async function setActivePipeline(
 
 export async function removeProject(id: string): Promise<void> {
   await invoke<void>("workspace_remove_project", { id });
+}
+
+/** Open the native folder picker; returns the chosen absolute path, or null if
+ *  cancelled. Single directory selection. Sole crossing point for the
+ *  `@tauri-apps/plugin-dialog` idiom (A3) — components depend on this wrapper, not
+ *  the plugin (vet F3, same ACL-seal discipline as the keychain/git seams). */
+export async function pickFolder(): Promise<string | null> {
+  const result = await open({ directory: true, multiple: false });
+  return typeof result === "string" ? result : null;
+}
+
+/** Set (or clear) a project's target repo (A5). Clears when null/empty. */
+export async function workspaceSetTargetRepo(
+  id: string,
+  targetRepo: string | null,
+): Promise<void> {
+  await invoke<void>("workspace_set_target_repo", { id, target_repo: targetRepo });
 }
 
 export interface WorktreeEntry {
