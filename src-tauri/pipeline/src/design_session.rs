@@ -114,6 +114,61 @@ fn extract_and_parse(prose: &str) -> Result<Slice, String> {
     parse_slice(&block).map_err(|e| format!("the fenced json did not match the slice schema: {e}"))
 }
 
+/// Bounded **repair turn** budget: up to this many repair re-prompts AFTER the
+/// initial turn (so at most `1 + MAX_REPAIR_RETRIES` model calls per emission).
+/// On exhausting it we behave as before DS-Schema — draft unchanged, prose surfaced.
+const MAX_REPAIR_RETRIES: usize = 2;
+
+/// Build a repair re-prompt naming the specific extract-or-parse failure. Sent on
+/// the SAME `dialogue_id` so the model sees its own prior bad output in context.
+fn repair_user_message(err: &str) -> String {
+    format!(
+        "Your previous reply could not be applied: {err}. Re-emit ONLY a single fenced \
+```json block that matches the JSON Schema in your instructions (include the correct \
+\"kind\"). Do not add any other text inside the fence."
+    )
+}
+
+/// Run one chat turn, then — on an extract-or-parse miss — up to `MAX_REPAIR_RETRIES`
+/// bounded **repair turns** on the SAME `dialogue_id`, each naming the specific
+/// failure. Returns the final reply prose plus the parsed `Slice` if any turn
+/// produced a valid one (else `None` => the caller leaves the draft unchanged). A
+/// runner error (e.g. rate-limit) short-circuits with the error prose and no slice.
+async fn chat_with_repair(
+    runner: &dyn ChatRunner,
+    dialogue_id: &str,
+    system_prompt: &str,
+    initial_user_message: String,
+) -> (String, Option<Slice>) {
+    let mut user_message = initial_user_message;
+    let mut last_text = String::new();
+    for attempt in 0..=MAX_REPAIR_RETRIES {
+        let req = ChatRequest {
+            dialogue_id: dialogue_id.to_string(),
+            system_prompt: system_prompt.to_string(),
+            user_message,
+            model: "claude-opus-4-8".to_string(),
+            thinking_budget: 8192,
+        };
+        match runner.chat(&req).await {
+            Ok(reply) => {
+                last_text = reply.text.clone();
+                match extract_and_parse(&reply.text) {
+                    Ok(slice) => return (reply.text, Some(slice)),
+                    Err(err) => {
+                        if attempt == MAX_REPAIR_RETRIES {
+                            return (last_text, None); // give up; draft unchanged
+                        }
+                        user_message = repair_user_message(&err);
+                    }
+                }
+            }
+            Err(e) => return (format!("[design session error] {e}"), None),
+        }
+    }
+    (last_text, None)
+}
+
 /// The wizard steps that carry a chat (2–4). Step 1 is basics (no chat) and
 /// step 5 is review (no chat); the kickoff one-shot is its own call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,19 +222,16 @@ pub async fn kickoff_generate(
     draft.description = description.to_string();
     draft.id = slug_id(description);
 
-    let req = ChatRequest {
-        dialogue_id: format!("{session_id}:kickoff"),
-        system_prompt: kickoff_system_prompt(),
-        user_message: description.to_string(),
-        model: "claude-opus-4-8".to_string(),
-        thinking_budget: 8192,
-    };
-    if let Ok(reply) = runner.chat(&req).await {
-        if let Some(block) = extract_json_block(&reply.text) {
-            if let Ok(slice) = parse_slice(&block) {
-                apply_slice(&mut draft, slice);
-            }
-        }
+    let dialogue_id = format!("{session_id}:kickoff");
+    let (_text, slice) = chat_with_repair(
+        runner,
+        &dialogue_id,
+        &kickoff_system_prompt(),
+        description.to_string(),
+    )
+    .await;
+    if let Some(slice) = slice {
+        apply_slice(&mut draft, slice);
     }
     draft
 }
@@ -196,24 +248,17 @@ pub async fn design_session_turn(
     mut draft: DraftPipeline,
     user_message: &str,
 ) -> TurnResult {
-    let req = ChatRequest {
-        dialogue_id: format!("{session_id}:{}", step.slug()),
-        system_prompt: step_system_prompt(step),
-        user_message: turn_user_message(user_message, &draft),
-        model: "claude-opus-4-8".to_string(),
-        thinking_budget: 8192,
-    };
-    let reply_text = match runner.chat(&req).await {
-        Ok(reply) => {
-            if let Some(block) = extract_json_block(&reply.text) {
-                if let Ok(slice) = parse_slice(&block) {
-                    apply_slice(&mut draft, slice);
-                }
-            }
-            reply.text
-        }
-        Err(e) => format!("[design session error] {e}"),
-    };
+    let dialogue_id = format!("{session_id}:{}", step.slug());
+    let (reply_text, slice) = chat_with_repair(
+        runner,
+        &dialogue_id,
+        &step_system_prompt(step),
+        turn_user_message(user_message, &draft),
+    )
+    .await;
+    if let Some(slice) = slice {
+        apply_slice(&mut draft, slice);
+    }
     // best-effort issues are surfaced inline in the wizard (W1); never block.
     let issues = best_effort_validate(&draft);
     TurnResult { reply_text, updated_draft: draft, issues }
@@ -339,6 +384,65 @@ mod tests {
         let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "garble").await;
         assert_eq!(out.updated_draft, before); // unchanged
         assert!(out.reply_text.contains("clarify"));
+    }
+
+    #[tokio::test]
+    async fn turn_repairs_a_malformed_first_reply_then_applies_the_valid_slice() {
+        // first reply: prose with NO fenced block -> triggers a repair turn;
+        // second reply: a valid prompt slice.
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let malformed = reply("I think research should investigate. (forgot the json)");
+        let good = reply("Here:\n```json\n{\"kind\":\"prompt\",\"team_id\":\"research\",\
+            \"prompt_body\":\"You investigate the repo and write findings.\"}\n```");
+        let runner = FakeChatRunner::new(vec![malformed, good]);
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "set research prompt").await;
+        // the slice from the REPAIR turn was applied
+        assert_eq!(out.updated_draft.teams[0].prompt_body, "You investigate the repo and write findings.");
+        // exactly 2 calls were made (initial + 1 repair)
+        let received = runner.received.lock().unwrap();
+        assert_eq!(received.len(), 2);
+        // the repair request named the failure + re-prompted on the SAME dialogue id
+        assert_eq!(received[1].dialogue_id, "sess-1:prompts");
+        assert!(received[1].user_message.to_lowercase().contains("json"));
+    }
+
+    #[tokio::test]
+    async fn turn_gives_up_after_two_repair_retries_and_leaves_the_draft_unchanged() {
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let before = draft.clone();
+        // every reply is malformed (no fence). FakeChatRunner clamps to the last
+        // reply, so all three calls return malformed.
+        let runner = FakeChatRunner::new(vec![reply("nope, still no json block here")]);
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "set research prompt").await;
+        assert_eq!(out.updated_draft, before); // unchanged after giving up
+        // initial + 2 repair retries = 3 calls
+        assert_eq!(runner.received.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn turn_does_not_repair_when_the_first_reply_is_valid() {
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let good = reply("ok\n```json\n{\"kind\":\"prompt\",\"team_id\":\"research\",\"prompt_body\":\"x\"}\n```");
+        let runner = FakeChatRunner::new(vec![good]);
+        let _ = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "go").await;
+        // only ONE call — no wasted repair turn on a good first reply
+        assert_eq!(runner.received.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kickoff_repairs_a_malformed_first_reply_then_builds_the_draft() {
+        let malformed = reply("Two teams: research and writers. (json omitted)");
+        let good = reply("```json\n{\"kind\":\"teams\",\"teams\":[\
+            {\"id\":\"research\",\"name\":\"Research\"},{\"id\":\"writers\",\"name\":\"Writers\"}]}\n```");
+        let runner = FakeChatRunner::new(vec![malformed, good]);
+        let draft = kickoff_generate(&runner, "sess-1", "research+writing pipeline").await;
+        assert_eq!(draft.teams.len(), 2);
+        let received = runner.received.lock().unwrap();
+        assert_eq!(received.len(), 2); // initial + 1 repair
+        assert_eq!(received[1].dialogue_id, "sess-1:kickoff");
     }
 
     #[tokio::test]
