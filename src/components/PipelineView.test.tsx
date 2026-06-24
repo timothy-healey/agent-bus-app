@@ -71,7 +71,7 @@ describe("PipelineView", () => {
     const { container } = render(<PipelineView pipeline={p} />);
     expect(screen.getByTestId("pipeline-graph")).toBeInTheDocument();
     expect(container.querySelector('[data-node-role="gate"]')).not.toBeNull();
-    expect(container.querySelector('[data-edge-kind="forward"]')).not.toBeNull();
+    expect(container.querySelector('[data-edge-kind="hand-off"]')).not.toBeNull();
   });
 
   it("shows an empty-state when pipeline is null", () => {
