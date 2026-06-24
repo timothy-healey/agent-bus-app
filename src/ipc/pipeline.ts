@@ -191,8 +191,9 @@ export async function createProjectFromDraft(
   name: string,
   root: string,
   draft: DraftPipeline,
-): Promise<{ id: string; name: string; root_path: string; active_pipeline_id: string | null; created_at: number; updated_at: number }> {
-  return await invoke("create_project_from_draft", { name, root, draft });
+  targetRepo?: string | null,
+): Promise<{ id: string; name: string; root_path: string; target_repo: string | null; active_pipeline_id: string | null; created_at: number; updated_at: number }> {
+  return await invoke("create_project_from_draft", { name, root, draft, target_repo: targetRepo ?? null });
 }
 
 /** Load a project's pipeline (resolved) into an editable DraftPipeline, reading
