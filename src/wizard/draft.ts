@@ -1,4 +1,8 @@
-import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join } from "../ipc/pipeline";
+import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join, Workers } from "../ipc/pipeline";
+
+/** Default WIP capacity for a new team's input store (mirrors the backend
+ *  default authored in WiringStep.draftToPipeline before this chunk). */
+const DEFAULT_STORE_CAPACITY = 8;
 
 export const WIZARD_STEPS = ["basics", "teams", "prompts", "wiring", "review"] as const;
 export type WizardStep = (typeof WIZARD_STEPS)[number];
@@ -28,6 +32,8 @@ function defaultTeam(id: string, name: string): DraftTeam {
     scope: { reads: [], writes: [], tools: [] },
     outputs: {},
     workers: { min: 1, max: 1 },
+    role: "producer",
+    store: { capacity: DEFAULT_STORE_CAPACITY },
   };
 }
 
@@ -64,6 +70,26 @@ function parseCsv(raw: string): string[] {
 
 export function setTeamEffort(d: DraftPipeline, id: string, effort: EffortMode): DraftPipeline {
   return mapTeams(d, (t) => (t.id === id ? { ...t, runner: { ...t.runner, effort } } : t));
+}
+
+/// Set a team's authoring role (vet F8). Producer = one hand-off edge; reviewer =
+/// the approve·revise·reject verdict triple.
+export function setTeamRole(d: DraftPipeline, id: string, role: "producer" | "reviewer"): DraftPipeline {
+  return mapTeams(d, (t) => (t.id === id ? { ...t, role } : t));
+}
+
+/// Set a team's input-store WIP capacity (chunk ①). Floored at 1; non-finite → 1.
+export function setTeamStoreCapacity(d: DraftPipeline, id: string, capacity: number): DraftPipeline {
+  const cap = Number.isFinite(capacity) ? Math.max(1, Math.floor(capacity)) : 1;
+  return mapTeams(d, (t) => (t.id === id ? { ...t, store: { capacity: cap } } : t));
+}
+
+/// Set a team's Scale (min · max). Clamps min ≥ 1 and max ≥ min so the dial can
+/// never author an invalid range.
+export function setTeamWorkers(d: DraftPipeline, id: string, workers: Workers): DraftPipeline {
+  const min = Number.isFinite(workers.min) ? Math.max(1, Math.floor(workers.min)) : 1;
+  const max = Number.isFinite(workers.max) ? Math.max(min, Math.floor(workers.max)) : min;
+  return mapTeams(d, (t) => (t.id === id ? { ...t, workers: { min, max } } : t));
 }
 
 export function setTeamTools(d: DraftPipeline, id: string, raw: string): DraftPipeline {
