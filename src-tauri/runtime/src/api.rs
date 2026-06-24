@@ -24,6 +24,10 @@ pub struct RuntimeState {
     pub project_id: String,
     /// The active project root path (for scope/worktree resolution).
     pub project_root: String,
+    /// Project-level `${target_repo}` default (A5). When an inject supplies no
+    /// target_repo, the new task defaults to this. A plain resolved string handed
+    /// in at the composition root (Runtime never learns about the Project type).
+    pub project_target_repo: Option<String>,
 }
 
 fn now_unix() -> i64 {
@@ -52,12 +56,20 @@ pub async fn inject_topic_inner(
     target_repo: Option<String>,
 ) -> Result<Task, String> {
     let stage = entry_stage(&state.pipeline)?;
+    // A5: default the stored task's target_repo to the project's when the caller
+    // supplies none — task overrides project. Reuse the SINGLE precedence fn the
+    // worker PathVars build uses, so the rule lives in one place (vet F2).
+    let effective = crate::pool::effective_target_repo(
+        target_repo.as_deref(),
+        state.project_target_repo.as_deref().map(std::path::Path::new),
+    )
+    .map(|p| p.to_string_lossy().into_owned());
     let task = Task::injected(
         state.project_id.clone(),
         state.pipeline.id.clone(),
         stage,
         topic,
-        target_repo,
+        effective,
         now_unix(),
     );
     state.tasks.insert(&task).await.map_err(|e| e.to_string())?;
@@ -257,5 +269,55 @@ mod tests {
         for name in ["inject_topic", "approve_gate", "reject_gate", "revise_gate", "brake_on", "brake_off", "scale_team"] {
             assert!(t.iter().any(|s| s.name == name), "missing tool {name}");
         }
+    }
+
+    async fn state_with_project_target_repo(project_default: Option<&str>) -> RuntimeState {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        // tasks table lives in migration 003 (which needs 001's projects table).
+        sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,name,root_path,created_at,updated_at) VALUES ('proj','n','/p',0,0)")
+            .execute(&pool).await.unwrap();
+        let pipeline = Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 1,
+            defaults: None,
+            teams: vec![pipeline::model::Team {
+                id: "t1".into(), name: "T1".into(), prompt: "t1.md".into(),
+                scope: Default::default(), runner: None,
+                outputs: Default::default(), workers: Default::default(),
+            }],
+            gates: vec![], escalations: vec![], forks: vec![], joins: vec![],
+        };
+        RuntimeState {
+            tasks: Arc::new(TaskStore::new(pool)),
+            brake: Arc::new(Brake::new()),
+            pipeline: Arc::new(pipeline),
+            project_id: "proj".into(),
+            project_root: "/p".into(),
+            project_target_repo: project_default.map(String::from),
+        }
+    }
+
+    #[tokio::test]
+    async fn inject_defaults_target_repo_to_project_when_unset() {
+        let state = state_with_project_target_repo(Some("/proj-repo")).await;
+        let task = inject_topic_inner(&state, "topic".into(), None).await.unwrap();
+        assert_eq!(task.target_repo, Some("/proj-repo".to_string()));
+    }
+
+    #[tokio::test]
+    async fn inject_task_target_repo_overrides_project_default() {
+        let state = state_with_project_target_repo(Some("/proj-repo")).await;
+        let task = inject_topic_inner(&state, "t".into(), Some("/task-repo".into())).await.unwrap();
+        assert_eq!(task.target_repo, Some("/task-repo".to_string()));
+    }
+
+    #[tokio::test]
+    async fn inject_no_project_default_leaves_target_repo_none() {
+        let state = state_with_project_target_repo(None).await;
+        let task = inject_topic_inner(&state, "t".into(), None).await.unwrap();
+        assert_eq!(task.target_repo, None);
     }
 }
