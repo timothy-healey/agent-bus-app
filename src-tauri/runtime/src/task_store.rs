@@ -17,11 +17,30 @@ pub enum TaskStoreError {
     BadState(String),
 }
 
-type Row = (
-    String, String, String, String, Option<String>, Option<String>,
-    String, String, i64, Option<String>, Option<String>, i64, i64,
-    Option<String>, Option<String>, Option<String>,
-);
+// A named FromRow struct (not a tuple): the task row now has 18 columns, past
+// sqlx's tuple-`FromRow` arity limit (16). FromRow matches by column name, so
+// the SELECT order is decoupled from field order.
+#[derive(sqlx::FromRow)]
+struct Row {
+    id: String,
+    project_id: String,
+    pipeline: String,
+    topic: String,
+    target_repo: Option<String>,
+    target_scope: Option<String>,
+    current_stage: String,
+    state: String,
+    attempts: i64,
+    parent_artifact: Option<String>,
+    review_artifact: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    group_id: Option<String>,
+    lane: Option<String>,
+    join_target: Option<String>,
+    run_id: Option<String>,
+    item_key: Option<String>,
+}
 
 pub struct TaskStore {
     pool: SqlitePool,
@@ -36,8 +55,8 @@ impl TaskStore {
         sqlx::query(
             "INSERT INTO tasks (id, project_id, pipeline, topic, target_repo, target_scope,
              current_stage, state, attempts, parent_artifact, review_artifact, created_at, updated_at,
-             group_id, lane, join_target)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             group_id, lane, join_target, run_id, item_key)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&task.id.0)
         .bind(&task.project_id)
@@ -55,37 +74,41 @@ impl TaskStore {
         .bind(&task.group_id)
         .bind(&task.lane)
         .bind(&task.join_target)
+        .bind(&task.run_id)
+        .bind(&task.item_key)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
     fn row_to_task(r: Row) -> Result<Task, TaskStoreError> {
-        let state = TaskState::parse(&r.7).ok_or_else(|| TaskStoreError::BadState(r.7.clone()))?;
+        let state = TaskState::parse(&r.state).ok_or_else(|| TaskStoreError::BadState(r.state.clone()))?;
         Ok(Task {
-            id: TaskId(r.0),
-            project_id: r.1,
-            pipeline: r.2,
-            topic: r.3,
-            target_repo: r.4,
-            target_scope: r.5,
-            current_stage: r.6,
+            id: TaskId(r.id),
+            project_id: r.project_id,
+            pipeline: r.pipeline,
+            topic: r.topic,
+            target_repo: r.target_repo,
+            target_scope: r.target_scope,
+            current_stage: r.current_stage,
             state,
-            attempts: r.8 as u32,
-            parent_artifact: r.9,
-            review_artifact: r.10,
-            created_at: r.11,
-            updated_at: r.12,
-            group_id: r.13,
-            lane: r.14,
-            join_target: r.15,
+            attempts: r.attempts as u32,
+            parent_artifact: r.parent_artifact,
+            review_artifact: r.review_artifact,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            group_id: r.group_id,
+            lane: r.lane,
+            join_target: r.join_target,
+            run_id: r.run_id,
+            item_key: r.item_key,
         })
     }
 
     const SELECT: &'static str =
         "SELECT id, project_id, pipeline, topic, target_repo, target_scope, current_stage,
          state, attempts, parent_artifact, review_artifact, created_at, updated_at,
-         group_id, lane, join_target FROM tasks";
+         group_id, lane, join_target, run_id, item_key FROM tasks";
 
     pub async fn get(&self, id: &TaskId) -> Result<Task, TaskStoreError> {
         let row = sqlx::query_as::<_, Row>(&format!("{} WHERE id = ?", Self::SELECT))
@@ -113,7 +136,8 @@ impl TaskStore {
     pub async fn update(&self, task: &Task) -> Result<(), TaskStoreError> {
         let res = sqlx::query(
             "UPDATE tasks SET current_stage=?, state=?, attempts=?, parent_artifact=?,
-             review_artifact=?, updated_at=?, group_id=?, lane=?, join_target=? WHERE id=?",
+             review_artifact=?, updated_at=?, group_id=?, lane=?, join_target=?,
+             run_id=?, item_key=? WHERE id=?",
         )
         .bind(&task.current_stage)
         .bind(task.state.as_str())
@@ -124,6 +148,8 @@ impl TaskStore {
         .bind(&task.group_id)
         .bind(&task.lane)
         .bind(&task.join_target)
+        .bind(&task.run_id)
+        .bind(&task.item_key)
         .bind(&task.id.0)
         .execute(&self.pool)
         .await?;
@@ -228,6 +254,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         pool
     }
 
@@ -301,6 +328,33 @@ mod tests {
         assert_eq!(back.group_id.as_deref(), Some("G-1"));
         assert_eq!(back.lane.as_deref(), Some("lane-a"));
         assert_eq!(back.join_target.as_deref(), Some("join-1"));
+    }
+
+    #[tokio::test]
+    async fn work_item_round_trips_run_id_and_item_key() {
+        let store = TaskStore::new(fresh_pool().await);
+        let wi = Task::work_item(
+            "p".into(), "pipe".into(), "R-1".into(), "src/a.rs".into(),
+            "spec".into(), Some("artifacts/research/src-a.md".into()), Some("/repo".into()), 100,
+        );
+        store.insert(&wi).await.unwrap();
+        let back = store.get(&wi.id).await.unwrap();
+        assert_eq!(back.run_id.as_deref(), Some("R-1"));
+        assert_eq!(back.item_key.as_deref(), Some("src/a.rs"));
+        assert_eq!(back.current_stage, "spec");
+        assert_eq!(back.parent_artifact.as_deref(), Some("artifacts/research/src-a.md"));
+        assert_eq!(back.state, TaskState::Queued);
+    }
+
+    #[tokio::test]
+    async fn legacy_task_has_null_run_and_key_fields() {
+        // A legacy injected task still loads with run_id/item_key None.
+        let store = TaskStore::new(fresh_pool().await);
+        let t = task("research");
+        store.insert(&t).await.unwrap();
+        let back = store.get(&t.id).await.unwrap();
+        assert_eq!(back.run_id, None);
+        assert_eq!(back.item_key, None);
     }
 
     #[tokio::test]

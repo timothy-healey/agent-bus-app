@@ -35,6 +35,8 @@ fn full_task() -> Task {
     t.group_id = Some("G-1".into());
     t.lane = Some("lane-a".into());
     t.join_target = Some("join-1".into());
+    t.run_id = Some("R-1".into());
+    t.item_key = Some("src/a.rs".into());
     t
 }
 
@@ -63,6 +65,8 @@ fn task_key_set_matches_ts() {
             "group_id",
             "lane",
             "join_target",
+            "run_id",
+            "item_key",
         ]),
     );
     // newtype id → bare string; counters → numbers.
