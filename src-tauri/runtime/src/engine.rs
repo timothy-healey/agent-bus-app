@@ -21,6 +21,7 @@
 //! into the system prompt (the L1 fix).
 
 use crate::brake::Brake;
+use crate::fanout_group::FanOutGroup;
 use crate::fanout_store::FanOutStore;
 use crate::generator_ledger::GeneratorLedger;
 use crate::revision::RevisionBundleReader;
@@ -232,18 +233,20 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     //    item is parked there in state `gated`). For a gate target we ensure the
     //    gate's store (it is not a team, so nothing else ensures it) with the
     //    default capacity before reserving — capacity = the human-backlog bound.
-    //    Forks/joins/escalations are NOT a transformer's on_approve target in the
-    //    assembly-line model (a fork is reached via a dedicated fork step; a join
-    //    via a lane's terminal approve) — they fall through to the generic store
-    //    path here, harmless if a store was ensured.
+    //    A FORK target is also a bounded store: the producer commits its item
+    //    QUEUED at the fork stage; a dedicated `fork_once` step then claims it and
+    //    expands the lanes (reserve-all-or-none). The fork store bounds how many
+    //    items await expansion. Joins/escalations are reached via a lane's
+    //    terminal approve / a verdict, never a transformer's on_approve here.
     let downstream = ctx.downstream_stage(team);
-    let downstream_is_gate = downstream
+    let downstream_kind = downstream
         .as_deref()
-        .map(|ds| matches!(resolve_target(&ctx.pipeline, ds), RouteTarget::Gate(_)))
-        .unwrap_or(false);
+        .map(|ds| resolve_target(&ctx.pipeline, ds));
+    // A gate or a fork target is a non-team node store; ensure it before reserving.
+    let downstream_is_gate = matches!(downstream_kind, Some(RouteTarget::Gate(_)));
+    let downstream_is_fork = matches!(downstream_kind, Some(RouteTarget::Fork(_)));
     if let Some(ds) = &downstream {
-        if downstream_is_gate {
-            // The gate store is not a team store; ensure it before reserving.
+        if downstream_is_gate || downstream_is_fork {
             ctx.stores
                 .ensure(&ctx.run_id, ds, pipeline::model::DEFAULT_STORE_CAPACITY)
                 .await?;
@@ -471,6 +474,130 @@ fn escalation_id(ctx: &EngineContext) -> String {
         .first()
         .map(|e| e.id.clone())
         .unwrap_or_else(|| "needs-human".to_string())
+}
+
+/// Expand at most one fork: claim a work-item queued at `fork`'s store and fan it
+/// out into one lane sibling per `fork.lanes`, creating a `FanOutGroup` (reused
+/// unchanged from P1–P3). **Within-item parallelism**: one item → N lanes →
+/// barrier (the join). Backpressure is ALL-OR-NONE — every lane store must admit
+/// a slot or NONE is taken (no partial expansion): if any lane store is full the
+/// expansion backs off, leaving the item queued at the fork for a later retry.
+///
+/// On success: create the group, seed each lane, reserve+commit one `forked`
+/// sibling per lane (carrying group_id + lane + join_target via `Task::forked`),
+/// mark the fork-store item Done (terminated forked), and free the fork-store
+/// slot. → `Advanced { downstream: fork.id, produced_keys: lane ids }`.
+pub async fn fork_once(
+    ctx: &EngineContext,
+    fork: &Fork,
+) -> Result<StepOutcome, EngineError> {
+    if ctx.brake.is_on() {
+        return Ok(StepOutcome::Braked);
+    }
+    // The fork's paired join: the join all of the fork's lanes reach (mirrors
+    // pool.rs's pairing). Its downstream + id seed the FanOutGroup.
+    let join = ctx
+        .pipeline
+        .joins
+        .iter()
+        .find(|j| fork.lanes.iter().all(|lane| lane_reaches(&ctx.pipeline, lane, &j.id)))
+        .ok_or_else(|| EngineError::NoRoute(fork.id.clone()))?;
+
+    // Claim one item parked at the fork. None → idle (no reservation was taken).
+    let now = now_unix();
+    let Some(mut task) = ctx.tasks.claim_next_for_stage(&fork.id, now).await? else {
+        return Ok(StepOutcome::Idle);
+    };
+
+    // ALL-OR-NONE lane reservation (no partial expansion / backpressure barrier).
+    // Ensure + reserve every lane store; on the first full lane, release the ones
+    // already taken, re-queue the item at the fork, and report Backpressure.
+    let mut reserved: Vec<&String> = Vec::new();
+    let mut all_reserved = true;
+    for lane in &fork.lanes {
+        ctx.stores
+            .ensure(&ctx.run_id, lane, stage_store_capacity(ctx, lane))
+            .await?;
+        if ctx.stores.reserve(&ctx.run_id, lane).await? {
+            reserved.push(lane);
+        } else {
+            all_reserved = false;
+            break;
+        }
+    }
+    if !all_reserved {
+        for lane in reserved {
+            ctx.stores.release(&ctx.run_id, lane).await?;
+        }
+        // Return the claimed item to the fork queue (it was flipped to running).
+        task.state = TaskState::Queued;
+        task.updated_at = now_unix();
+        ctx.tasks.update(&task).await?;
+        return Ok(StepOutcome::Backpressure);
+    }
+
+    // All lanes admitted. Create the group + seed lanes + commit a sibling per
+    // lane (reuse the FanOutGroup aggregate + Task::forked unchanged).
+    let group_id = format!("G-{}", uuid::Uuid::new_v4());
+    let group = FanOutGroup {
+        id: group_id.clone(),
+        pipeline: task.pipeline.clone(),
+        join_target: join.id.clone(),
+        downstream: join.downstream.clone(),
+        expected_lanes: fork.lanes.clone(),
+        completed: false,
+        parent_group_id: None,
+        parent_lane: None,
+    };
+    ctx.fanout.create(&group).await?;
+    for lane in &fork.lanes {
+        ctx.fanout.seed_lane(&group_id, lane).await?;
+        let sib = Task::forked(&task, lane, &group_id, &join.id, now_unix());
+        ctx.tasks.insert(&sib).await?;
+    }
+
+    // The original item terminates forked; free the fork-store slot it occupied.
+    task.state = TaskState::Done;
+    task.current_stage = fork.id.clone();
+    task.updated_at = now_unix();
+    ctx.tasks.update(&task).await?;
+    ctx.stores.release(&ctx.run_id, &fork.id).await?;
+
+    Ok(StepOutcome::Advanced {
+        task_id: task.id.0,
+        downstream: fork.id.clone(),
+        produced_keys: fork.lanes.clone(),
+    })
+}
+
+/// Walk a lane from its entry team toward `join_id`, following on_approve. A team
+/// hop follows on_approve; a gate hop follows the gate's downstream. Reaching
+/// `join_id` is success. Bounded by total node count to terminate. Mirrors
+/// `pool::lane_reaches` (kept private there; re-stated here for the engine to
+/// avoid touching pool.rs). PURE.
+fn lane_reaches(p: &Pipeline, entry: &str, join_id: &str) -> bool {
+    let bound = p.teams.len() + p.gates.len() + p.forks.len() + p.joins.len() + 1;
+    let mut current = entry.to_string();
+    for _ in 0..=bound {
+        if current == join_id {
+            return true;
+        }
+        if let Some(t) = p.teams.iter().find(|t| t.id == current) {
+            match t.outputs.on_approve.as_deref() {
+                Some(next) => {
+                    current = next.to_string();
+                    continue;
+                }
+                None => return false,
+            }
+        }
+        if let Some(g) = p.gates.iter().find(|g| g.id == current) {
+            current = g.downstream.clone();
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 /// Run at most one generator (source) pass for `source_team`, loop-until-dry +
@@ -1268,6 +1395,91 @@ mod tests {
         assert_eq!(transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap(), StepOutcome::Braked);
         // no reservation taken
         assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(0));
+    }
+
+    // ---- Task 4: fork expansion ----
+
+    fn fork_pipeline() -> Pipeline {
+        use pipeline::model::{Fork, Join};
+        // research --on_approve--> fan(fork). Lanes ddd + sec both --on_approve-->
+        // rejoin(join, downstream spec). spec is terminal.
+        pipeline_full(
+            vec![
+                team("research", Some("fan"), Role::Producer, 8),
+                team("ddd", Some("rejoin"), Role::Reviewer, 8),
+                team("sec", Some("rejoin"), Role::Reviewer, 8),
+                team("spec", None, Role::Producer, 8),
+            ],
+            vec![],
+            vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
+            vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "spec".into(), cancel_on_reject: false, quorum: None }],
+        )
+    }
+
+    #[tokio::test]
+    async fn fork_expands_one_item_into_lane_siblings_sharing_a_group() {
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let fork = ctx.pipeline.forks[0].clone();
+        // an item queued at the fork store, awaiting expansion
+        ctx.stores.ensure(&ctx.run_id, "fan", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "fan").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "fan".into(), Some("plan.md".into()), None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        let outcome = fork_once(&ctx, &fork).await.unwrap();
+        assert!(matches!(outcome, StepOutcome::Advanced { downstream, .. } if downstream == "fan"));
+        // fork-store slot freed; each lane store now holds one sibling
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "fan").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "ddd").await.unwrap(), Some(1));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "sec").await.unwrap(), Some(1));
+        // two lane siblings, queued, sharing one group + carrying join_target
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.len(), 2);
+        let groups: std::collections::HashSet<_> = queued.iter().filter_map(|t| t.group_id.clone()).collect();
+        assert_eq!(groups.len(), 1, "both siblings share one group");
+        for q in &queued {
+            assert_eq!(q.join_target.as_deref(), Some("rejoin"));
+            assert_eq!(q.item_key.as_deref(), Some("alpha"), "lineage key inherited");
+            assert_eq!(q.parent_artifact.as_deref(), Some("plan.md"));
+            assert!(["ddd", "sec"].contains(&q.current_stage.as_str()));
+            assert_eq!(q.lane.as_deref(), Some(q.current_stage.as_str()));
+        }
+        // the original item is Done (terminated forked)
+        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn fork_is_all_or_none_a_full_lane_store_backpressures_without_partial_expansion() {
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let fork = ctx.pipeline.forks[0].clone();
+        ctx.stores.ensure(&ctx.run_id, "fan", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "fan").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "fan".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+        // make the SECOND lane (sec) full so the all-or-none reservation must
+        // roll back the first lane's slot.
+        ctx.stores.ensure(&ctx.run_id, "sec", 1).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "sec").await.unwrap();
+
+        let outcome = fork_once(&ctx, &fork).await.unwrap();
+        assert_eq!(outcome, StepOutcome::Backpressure);
+        // NO partial expansion: ddd's slot rolled back, no siblings created
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "ddd").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "sec").await.unwrap(), Some(1));
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Queued).await.unwrap().len(), 1, "only the re-queued fork item");
+        // the fork item is back queued for a later retry; no group created
+        let reloaded = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!(reloaded.state, TaskState::Queued);
+        assert_eq!(reloaded.current_stage, "fan");
+        assert!(!ctx.fanout.has_open_group(&ctx.run_id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn fork_with_no_input_is_idle() {
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let fork = ctx.pipeline.forks[0].clone();
+        ctx.stores.ensure(&ctx.run_id, "fan", 8).await.unwrap();
+        assert_eq!(fork_once(&ctx, &fork).await.unwrap(), StepOutcome::Idle);
     }
 
     // ---- Task 5: generator (loop-until-dry) ----
