@@ -114,6 +114,17 @@ describe("SkillAutocomplete", () => {
     expect(tinted[0].textContent).toBe("/brainstorming");
   });
 
+  it("shows a no-match status when the query filters everything out", async () => {
+    render(<Harness />);
+    const ta = screen.getByLabelText("prompt for t1") as HTMLTextAreaElement;
+    typeSlash(ta, "/zzz-nope");
+    await waitFor(() => expect(screen.getByRole("status")).toBeTruthy());
+    expect(screen.getByRole("status").textContent).toContain("no skill or command matches");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    // aria-controls is not dangling when no listbox is present.
+    expect(ta.getAttribute("aria-controls")).toBeNull();
+  });
+
   it("sets combobox a11y attributes + aria-activedescendant", async () => {
     render(<Harness />);
     const ta = screen.getByLabelText("prompt for t1") as HTMLTextAreaElement;

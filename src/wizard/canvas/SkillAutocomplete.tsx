@@ -170,12 +170,15 @@ export function SkillAutocomplete({
   }, [value]);
 
   const open = mode.kind !== "closed";
-  const activeId =
-    mode.kind === "skills"
+  // A listbox is only in the DOM when there are rows to show (the verb cascade
+  // always has rows; the skill list only when there are matches).
+  const hasListbox =
+    (mode.kind === "skills" && matches.length > 0) || mode.kind === "verbs";
+  const activeId = !hasListbox
+    ? undefined
+    : mode.kind === "skills"
       ? `${listId}-s-${mode.active}`
-      : mode.kind === "verbs"
-        ? `${listId}-v-${mode.active}`
-        : undefined;
+      : `${listId}-v-${mode.active}`;
 
   return (
     <div style={{ position: "relative", ...style }}>
@@ -187,7 +190,7 @@ export function SkillAutocomplete({
         ref={taRef}
         aria-label={ariaLabel}
         aria-expanded={open}
-        aria-controls={open ? listId : undefined}
+        aria-controls={hasListbox ? listId : undefined}
         aria-activedescendant={activeId}
         role="combobox"
         aria-autocomplete="list"
@@ -201,6 +204,12 @@ export function SkillAutocomplete({
         style={textareaStyle}
         spellCheck={false}
       />
+
+      {mode.kind === "skills" && matches.length === 0 && skills.length > 0 && (
+        <div role="status" style={{ ...popoverStyle, display: "block" }}>
+          <span style={emptyText}>no skill or command matches “{mode.trigger.query}”</span>
+        </div>
+      )}
 
       {mode.kind === "skills" && matches.length > 0 && (
         <ul id={listId} role="listbox" aria-label="skills" style={popoverStyle}>
@@ -355,12 +364,16 @@ const popoverStyle: CSSProperties = {
 const rowStyle: CSSProperties = {
   padding: "var(--sp-2)",
   borderRadius: "var(--r-xs)",
+  border: "1px solid transparent",
   cursor: "pointer",
   fontSize: "var(--ts-sm)",
+  transition: "background var(--dur-fast) var(--ease-out)",
 };
 
+// Aligns to DESIGN.md §States "selected": accent-2 surface + accent-bd border.
 const rowActive: CSSProperties = {
-  background: "var(--accent-3)",
+  background: "var(--accent-2)",
+  borderColor: "var(--accent-bd)",
 };
 
 const tokenText: CSSProperties = {
@@ -373,6 +386,13 @@ const tag: CSSProperties = {
   fontSize: "var(--ts-xs)",
   color: "var(--text-3)",
   whiteSpace: "nowrap",
+};
+
+const emptyText: CSSProperties = {
+  display: "block",
+  padding: "var(--sp-2)",
+  fontSize: "var(--ts-sm)",
+  color: "var(--text-3)",
 };
 
 const descText: CSSProperties = {
