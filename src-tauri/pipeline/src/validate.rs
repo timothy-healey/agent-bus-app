@@ -273,7 +273,7 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Escalation, Gate, Routes, Scope, Team, TeamRunnerConfig, Workers};
+    use crate::model::{Escalation, Gate, Role, Routes, Scope, Team, TeamRunnerConfig, Workers};
     use agent_bus_core::{EffortMode, RunnerKind};
 
     fn team(id: &str, approve: Option<&str>) -> Team {
@@ -290,6 +290,7 @@ mod tests {
             scope: Scope::default(),
             outputs: Routes { on_approve: approve.map(String::from), on_revise: None, on_reject: None },
             workers: Workers::default(),
+            role: Role::default(),
         }
     }
 

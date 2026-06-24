@@ -58,6 +58,9 @@ pub struct Team {
     pub outputs: Routes,
     #[serde(default)]
     pub workers: Workers,
+    /// Producer vs reviewer (vet F8). Default producer; see `Role`.
+    #[serde(default)]
+    pub role: Role,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +207,20 @@ pub struct Join {
     pub quorum: Option<u32>,
 }
 
+/// A team's role in the pipeline (graph-builder vet F8). A **reviewer** emits a
+/// verdict (approve/revise/reject) on each item it sees; a **producer** (incl.
+/// implementers) hands its output forward without a verdict. Additive enum,
+/// default `producer` (matches L1 "producers default approve, reviewers judge").
+/// Routing/verdict semantics consume this in the runtime-behavior chunk; the
+/// graph builder reads it for role-aware edges (replacing the `teamRole` regex).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    #[default]
+    Producer,
+    Reviewer,
+}
+
 /// A node kind discriminator used by validation and the frontend viewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -266,6 +283,7 @@ mod tests {
             scope: Scope::default(),
             outputs: Routes::default(),
             workers: Workers::default(),
+            role: Role::default(),
         }
     }
 
@@ -284,6 +302,20 @@ mod tests {
     #[test]
     fn schema_version_constant_is_two() {
         assert_eq!(SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn team_role_defaults_to_producer_when_absent() {
+        let json = r#"{"id":"t","name":"T","prompt":"p.md","scope":{},"outputs":{}}"#;
+        let t: Team = serde_json::from_str(json).unwrap();
+        assert_eq!(t.role, Role::Producer);
+    }
+
+    #[test]
+    fn role_serializes_lowercase_and_round_trips() {
+        assert_eq!(serde_json::to_string(&Role::Reviewer).unwrap(), "\"reviewer\"");
+        let r: Role = serde_json::from_str("\"producer\"").unwrap();
+        assert_eq!(r, Role::Producer);
     }
 
     #[test]
