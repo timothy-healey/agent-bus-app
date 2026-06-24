@@ -15,6 +15,34 @@ use async_trait::async_trait;
 pub type SpawnFn =
     Box<dyn Fn(&[String]) -> Result<String, RunnerError> + Send + Sync>;
 
+/// Map a finished subprocess's (stdout, stderr, success) into the spawn result.
+/// Pure so it is unit-tested without a live `claude`. On success the stdout is
+/// returned verbatim for the parser. On a non-zero exit the stderr is inspected:
+/// rate-limit-looking stderr maps to `RateLimited`, anything else to `Other`
+/// (NOT `Spawn` — `Spawn` is reserved for the `.output()` io-error of a missing
+/// binary). This surfaces the real CLI stderr (e.g. a missing `--verbose`)
+/// instead of a vague `NoResult` from empty stdout.
+pub fn interpret_runner_output(
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    success: bool,
+) -> Result<String, RunnerError> {
+    if success {
+        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+    }
+    let err = String::from_utf8_lossy(&stderr).into_owned();
+    let lower = err.to_lowercase();
+    if lower.contains("rate") || lower.contains("429") || lower.contains("quota") {
+        Err(RunnerError::RateLimited(err))
+    } else if err.trim().is_empty() {
+        Err(RunnerError::Other(
+            "claude exited non-zero with no stderr".into(),
+        ))
+    } else {
+        Err(RunnerError::Other(err))
+    }
+}
+
 pub struct ClaudeCliRunner {
     spawn: SpawnFn,
 }
@@ -33,7 +61,11 @@ impl ClaudeCliRunner {
                     .args(rest)
                     .output()
                     .map_err(|e| RunnerError::Spawn(e.to_string()))?;
-                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+                interpret_runner_output(
+                    output.stdout,
+                    output.stderr,
+                    output.status.success(),
+                )
             }),
         }
     }
@@ -199,5 +231,47 @@ mod tests {
         let noop: crate::output::LogSink = Box::new(|_d: &str| {});
         let streamed = runner.invoke_stream(&req(), &noop).await.unwrap();
         assert_eq!(plain, streamed);
+    }
+
+    #[test]
+    fn interpret_runner_output_success_returns_stdout() {
+        let out =
+            interpret_runner_output(b"hello stdout".to_vec(), b"ignored".to_vec(), true).unwrap();
+        assert_eq!(out, "hello stdout");
+    }
+
+    #[test]
+    fn interpret_runner_output_rate_limit_stderr_maps_to_rate_limited() {
+        let err = interpret_runner_output(
+            Vec::new(),
+            b"Error: 429 quota exceeded".to_vec(),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RunnerError::RateLimited(_)));
+        assert!(err.is_rate_limited());
+    }
+
+    #[test]
+    fn interpret_runner_output_other_stderr_maps_to_other_with_text() {
+        let err = interpret_runner_output(
+            Vec::new(),
+            b"Error: When using --print, --output-format=stream-json requires --verbose".to_vec(),
+            false,
+        )
+        .unwrap_err();
+        match err {
+            RunnerError::Other(m) => assert!(m.contains("requires --verbose")),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interpret_runner_output_empty_stderr_uses_fallback_message() {
+        let err = interpret_runner_output(Vec::new(), Vec::new(), false).unwrap_err();
+        match err {
+            RunnerError::Other(m) => assert_eq!(m, "claude exited non-zero with no stderr"),
+            other => panic!("expected Other, got {other:?}"),
+        }
     }
 }

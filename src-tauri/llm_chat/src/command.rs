@@ -19,6 +19,10 @@ pub fn build_chat_args(req: &ChatRequest, resume: Option<&str>) -> Vec<String> {
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
+        // `claude --print --output-format stream-json` REQUIRES --verbose, or it
+        // exits non-zero with empty stdout. Inserted immediately after
+        // "stream-json" so the positional asserts on args[0..2] still hold.
+        "--verbose".into(),
         "--append-system-prompt".into(),
         req.system_prompt.clone(),
         "--model".into(),
@@ -56,6 +60,8 @@ mod tests {
         assert_eq!(args[0], "--print");
         assert_eq!(args[1], "--output-format");
         assert_eq!(args[2], "stream-json");
+        // --verbose is required for --print stream-json
+        assert!(args.iter().any(|a| a == "--verbose"));
         // model + budget present
         let m = args.iter().position(|a| a == "--model").unwrap();
         assert_eq!(args[m + 1], "claude-opus-4-8");
