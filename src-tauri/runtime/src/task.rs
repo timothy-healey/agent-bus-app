@@ -77,6 +77,14 @@ pub struct Task {
     pub lane: Option<String>,
     #[serde(default)]
     pub join_target: Option<String>,
+    /// The Run this work-item belongs to (Runtime redesign ④b). `None` for legacy
+    /// single-task pool tasks; `Some` for bounded-buffer engine work-items.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// The stable candidate key — the work-item's lineage + dedup identity
+    /// (Runtime redesign ④b). `None` for legacy tasks.
+    #[serde(default)]
+    pub item_key: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -117,6 +125,46 @@ impl Task {
             group_id: None,
             lane: None,
             join_target: None,
+            run_id: None,
+            item_key: None,
+        }
+    }
+
+    /// Construct a bounded-buffer engine work-item (Runtime redesign ④b): queued
+    /// at `stage`, belonging to `run_id`, identified by its candidate `item_key`,
+    /// carrying its `parent_artifact` (its input). Mints a fresh task id. The new
+    /// flowing unit of the assembly-line model — distinct from the legacy
+    /// `injected` linear task in that it carries Run + key identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn work_item(
+        project_id: String,
+        pipeline: String,
+        run_id: String,
+        item_key: String,
+        stage: String,
+        parent_artifact: Option<String>,
+        target_repo: Option<String>,
+        now_unix: i64,
+    ) -> Self {
+        Self {
+            id: TaskId(format!("T-{}", uuid::Uuid::new_v4())),
+            project_id,
+            pipeline,
+            topic: String::new(),
+            target_repo,
+            target_scope: None,
+            current_stage: stage,
+            state: TaskState::Queued,
+            attempts: 1,
+            parent_artifact,
+            review_artifact: None,
+            created_at: now_unix,
+            updated_at: now_unix,
+            group_id: None,
+            lane: None,
+            join_target: None,
+            run_id: Some(run_id),
+            item_key: Some(item_key),
         }
     }
 
@@ -148,6 +196,8 @@ impl Task {
             group_id: Some(group_id.to_string()),
             lane: Some(lane_entry_team.to_string()),
             join_target: Some(join_target.to_string()),
+            run_id: parent.run_id.clone(),
+            item_key: parent.item_key.clone(),
         }
     }
 
