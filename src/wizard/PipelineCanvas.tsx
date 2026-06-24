@@ -35,6 +35,16 @@ interface PipelineCanvasProps {
   onChange: (d: DraftPipeline) => void;
 }
 
+/// Edge stroke per route kind (DESIGN.md §Pipeline-editor edges): hand-off /
+/// approve = solid neutral; revise = dashed revise-purple; reject + any dangling
+/// route = dashed danger.
+function edgeStyle(kind: string, dangling: boolean): CSSProperties {
+  if (dangling) return { stroke: "var(--danger)", strokeDasharray: "4 3" };
+  if (kind === "revise") return { stroke: "var(--revise)", strokeDasharray: "4 3" };
+  if (kind === "reject") return { stroke: "var(--danger)", strokeDasharray: "4 3" };
+  return { stroke: "var(--text-3)" };
+}
+
 const PALETTE_LABEL: Record<NodeKind, string> = {
   team: "Team",
   gate: "Gate",
@@ -76,13 +86,7 @@ function CanvasInner({ draft, onChange }: PipelineCanvasProps) {
       target: e.target,
       label: e.label,
       animated: e.data.kind === "revise" || e.data.kind === "reject",
-      style: e.data.dangling
-        ? { stroke: "var(--danger)", strokeDasharray: "4 3" }
-        : e.data.kind === "revise"
-          ? { stroke: "var(--revise)", strokeDasharray: "4 3" }
-          : e.data.kind === "reject"
-            ? { stroke: "var(--danger)", strokeDasharray: "4 3" }
-            : { stroke: "var(--text-3)" },
+      style: edgeStyle(e.data.kind, e.data.dangling),
     })),
     [flow],
   );

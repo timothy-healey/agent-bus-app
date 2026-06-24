@@ -138,3 +138,28 @@ code, .mono {
     transform: none !important;
   }
 }
+
+/* React Flow (graph builder) — bind the library chrome to the design tokens so
+   the canvas reads as part of the app, not a third-party widget. */
+.react-flow__controls {
+  box-shadow: var(--shadow-card);
+}
+.react-flow__controls-button {
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.react-flow__controls-button:hover {
+  background: var(--surface-3);
+}
+.react-flow__controls-button svg { fill: var(--text-2); }
+.react-flow__edge-text { font-family: var(--font-mono); font-size: var(--ts-xs); fill: var(--text-3); }
+.react-flow__edge-textbg { fill: var(--bg-2); }
+.react-flow__attribution { display: none; }
+
+/* Reduced motion disables React Flow's animated edge dash (DESIGN.md §Motion). */
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge.animated .react-flow__edge-path {
+    animation: none !important;
+  }
+}
