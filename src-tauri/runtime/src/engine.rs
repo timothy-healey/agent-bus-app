@@ -83,6 +83,20 @@ pub enum StepOutcome {
     },
     /// The generator is dry (a pass yielded no new keys) — the source loop retires.
     Retired,
+    /// A gate verdict / a join settlement sent the item BACK to a producing team
+    /// for revision (gate `revise`, or a join's collect-all/revise-once). The
+    /// item is re-queued at `producer` carrying its feedback bundle.
+    Revised {
+        task_id: String,
+        /// The producing team the item was routed back to.
+        producer: String,
+    },
+    /// A gate `reject` / a barrier failure routed the item to the escalation
+    /// (needs-human) terminal.
+    Escalated { task_id: String },
+    /// A gate verdict could not be applied yet because the downstream store was
+    /// full (approve backpressure) — the gated item stays put; retry later.
+    GateBackpressure { task_id: String },
 }
 
 /// The collaborators one engine step needs. Cheap to clone (Arcs). The
@@ -329,6 +343,136 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     })
 }
 
+/// Apply a human's verdict to a GATED work-item (④c task 3 — the engine-side
+/// logic; the live `approve_gate`/`revise_gate`/`reject_gate` OHS commands are
+/// re-pointed at this at cutover, ④d). The task must be `gated` at a gate stage.
+///
+/// * **approve** → reserve a slot in the gate's `downstream` store
+///   (block-before-claim); if full, leave the item gated and report
+///   `GateBackpressure`. On success, commit a child work-item queued downstream,
+///   mark the gated task done, and free the gate slot. → `Advanced`.
+/// * **revise** → route the item BACK to its producing team's store (the team
+///   whose `on_approve` targets this gate), re-queued for another pass with its
+///   attempts bumped (the revision-bundle reader composes the feedback at
+///   re-claim). Free the gate slot. → `Revised`.
+/// * **reject** → escalate to the needs-human terminal; free the gate slot. →
+///   `Escalated`.
+///
+/// Reuses the Store reserve/release atomic guards — no count-then-act race.
+pub async fn apply_gate_verdict(
+    ctx: &EngineContext,
+    task_id: &str,
+    verdict: agent_bus_core::Verdict,
+) -> Result<StepOutcome, EngineError> {
+    use agent_bus_core::Verdict;
+    let mut task = ctx.tasks.get(&agent_bus_core::TaskId(task_id.to_string())).await?;
+    let gate_id = task.current_stage.clone();
+    // Resolve the gate this item is parked at.
+    let RouteTarget::Gate(gate) = resolve_target(&ctx.pipeline, &gate_id) else {
+        return Err(EngineError::NoRoute(gate_id));
+    };
+
+    match verdict {
+        Verdict::Approve => {
+            // Block-before-claim: reserve the gate's downstream store FIRST.
+            let downstream = &gate.downstream;
+            // The downstream may be a team store; ensure it bounds work even if
+            // not yet ensured (a gate's downstream is a normal stage store).
+            ctx.stores
+                .ensure(&ctx.run_id, downstream, stage_store_capacity(ctx, downstream))
+                .await?;
+            if !ctx.stores.reserve(&ctx.run_id, downstream).await? {
+                // Full → leave the item gated; the gate slot is NOT freed.
+                return Ok(StepOutcome::GateBackpressure { task_id: task.id.0 });
+            }
+            // Commit the approved item downstream as a queued child work-item.
+            let key = task.item_key.clone().unwrap_or_default();
+            let child = Task::work_item(
+                task.project_id.clone(),
+                task.pipeline.clone(),
+                ctx.run_id.clone(),
+                key.clone(),
+                downstream.clone(),
+                task.parent_artifact.clone(),
+                task.target_repo.clone(),
+                now_unix(),
+            );
+            ctx.tasks.insert(&child).await?;
+            // The gated item leaves the gate store: mark done + free the gate slot.
+            task.state = TaskState::Done;
+            task.updated_at = now_unix();
+            ctx.tasks.update(&task).await?;
+            ctx.stores.release(&ctx.run_id, &gate_id).await?;
+            Ok(StepOutcome::Advanced {
+                task_id: task.id.0,
+                downstream: downstream.clone(),
+                produced_keys: vec![key],
+            })
+        }
+        Verdict::Revise => {
+            // Route BACK to the producing team (the upstream whose on_approve
+            // targets this gate). Re-queue a child there with attempts bumped so
+            // the revision-bundle reader composes the feedback at re-claim.
+            let producer = producer_of_gate(ctx, &gate_id).ok_or_else(|| EngineError::NoRoute(gate_id.clone()))?;
+            ctx.stores
+                .ensure(&ctx.run_id, &producer, stage_store_capacity(ctx, &producer))
+                .await?;
+            if !ctx.stores.reserve(&ctx.run_id, &producer).await? {
+                return Ok(StepOutcome::GateBackpressure { task_id: task.id.0 });
+            }
+            let key = task.item_key.clone().unwrap_or_default();
+            let mut child = Task::work_item(
+                task.project_id.clone(),
+                task.pipeline.clone(),
+                ctx.run_id.clone(),
+                key,
+                producer.clone(),
+                task.parent_artifact.clone(),
+                task.target_repo.clone(),
+                now_unix(),
+            );
+            // A revise is a re-claim: bump attempts so compose_invocation_message
+            // pulls the persisted feedback bundle (revise-once feedback path).
+            child.attempts = (task.attempts + 1).min(MAX_ATTEMPTS);
+            ctx.tasks.insert(&child).await?;
+            task.state = TaskState::Done;
+            task.updated_at = now_unix();
+            ctx.tasks.update(&task).await?;
+            ctx.stores.release(&ctx.run_id, &gate_id).await?;
+            Ok(StepOutcome::Revised { task_id: task.id.0, producer })
+        }
+        Verdict::Reject => {
+            // Escalate to the needs-human terminal; free the gate slot.
+            task.state = TaskState::NeedsHuman;
+            task.current_stage = escalation_id(ctx);
+            task.updated_at = now_unix();
+            ctx.tasks.update(&task).await?;
+            ctx.stores.release(&ctx.run_id, &gate_id).await?;
+            Ok(StepOutcome::Escalated { task_id: task.id.0 })
+        }
+    }
+}
+
+/// The producing team that feeds a gate: the team whose `on_approve` targets the
+/// gate id. PURE-ish (reads the pipeline).
+fn producer_of_gate(ctx: &EngineContext, gate_id: &str) -> Option<String> {
+    ctx.pipeline
+        .teams
+        .iter()
+        .find(|t| t.outputs.on_approve.as_deref() == Some(gate_id))
+        .map(|t| t.id.clone())
+}
+
+/// The pipeline's escalation (needs-human) terminal id. Falls back to the
+/// conventional `"needs-human"` when no escalation node is declared.
+fn escalation_id(ctx: &EngineContext) -> String {
+    ctx.pipeline
+        .escalations
+        .first()
+        .map(|e| e.id.clone())
+        .unwrap_or_else(|| "needs-human".to_string())
+}
+
 /// Run at most one generator (source) pass for `source_team`, loop-until-dry +
 /// capacity-bounded (the spec's source loop). The source has no input store; it
 /// produces NEW items by scanning, deduped against the per-run found-key ledger.
@@ -356,7 +500,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     };
 
     // 2. Free downstream slots K.
-    let cap = source_team_downstream_capacity(ctx, &downstream);
+    let cap = stage_store_capacity(ctx, &downstream);
     let occ = ctx.stores.occupancy(&ctx.run_id, &downstream).await?.unwrap_or(0);
     let k = cap.saturating_sub(occ);
     if k == 0 {
@@ -555,14 +699,15 @@ pub async fn try_finish_run(ctx: &EngineContext, run_id: &str) -> Result<bool, E
     Ok(ctx.runs.try_complete(run_id).await?)
 }
 
-/// The capacity of the source's downstream store. Read from the (already-ensured)
-/// store row when present; otherwise fall back to the authored capacity of the
-/// downstream team (so a not-yet-ensured store still bounds the pass).
-fn source_team_downstream_capacity(ctx: &EngineContext, downstream: &str) -> u32 {
+/// The authored input-store capacity for a stage id (a team store). Falls back
+/// to `DEFAULT_STORE_CAPACITY` when the stage is not a team (e.g. a gate's
+/// downstream that is a sink, or a not-yet-ensured store). Used to bound a
+/// generator pass and to ensure team/gate-downstream/producer stores on demand.
+fn stage_store_capacity(ctx: &EngineContext, stage: &str) -> u32 {
     ctx.pipeline
         .teams
         .iter()
-        .find(|t| t.id == downstream)
+        .find(|t| t.id == stage)
         .map(|t| t.store.capacity)
         .unwrap_or(pipeline::model::DEFAULT_STORE_CAPACITY)
 }
@@ -588,6 +733,18 @@ async fn invoke(
     scope.writes.push(artifact_dir(&team.id));
     let scope_settings = prepare(&ctx.project_root, &team.id, &task.id.0, now, &scope, &vars)?;
 
+    // Compose the user message: the topic on a fresh pass, the topic + the
+    // persisted revise feedback bundle on a re-claim (attempts > 1) — the gate
+    // `revise` / join collect-all-revise-once feedback path. Reuses the
+    // revision-bundle CONSUMER unchanged (Runtime-local seam).
+    let user_message = crate::revision::compose_invocation_message(
+        &task.topic,
+        task.attempts,
+        ctx.revision_reader.as_deref(),
+        &task.id.0,
+    )
+    .await;
+
     let effective = team.effective_runner();
     let req = InvocationRequest {
         task_id: task.id.0.clone(),
@@ -595,7 +752,7 @@ async fn invoke(
         model: effective.model.clone(),
         thinking_budget: effective.effort.budget_tokens(),
         system_prompt,
-        user_message: task.topic.clone(),
+        user_message,
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
         sandbox_profile: None,
@@ -895,6 +1052,86 @@ mod tests {
         ctx.tasks.insert(&gated).await.unwrap();
         // dry, but the gate store is non-empty AND a gated item exists
         assert!(!try_finish_run(&ctx, &ctx.run_id).await.unwrap());
+    }
+
+    // ---- Task 3: gate verdict (engine fn) ----
+
+    async fn gated_item_ctx() -> (EngineContext, String) {
+        // research --> human-gate (downstream spec). One gated item sits in the
+        // gate store, having been produced by research.
+        let p = pipeline_full(
+            vec![team("research", Some("human-gate"), Role::Producer, 8), team("spec", None, Role::Producer, 8)],
+            vec![gate("human-gate", "spec")],
+            vec![], vec![],
+        );
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        ctx.stores.ensure(&ctx.run_id, "human-gate", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "human-gate").await.unwrap();
+        let mut t = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "human-gate".into(), Some("art.md".into()), None, 100);
+        t.state = TaskState::Gated;
+        ctx.tasks.insert(&t).await.unwrap();
+        (ctx, t.id.0)
+    }
+
+    #[tokio::test]
+    async fn gate_approve_commits_downstream_and_frees_the_gate_slot() {
+        let (ctx, id) = gated_item_ctx().await;
+        let outcome = apply_gate_verdict(&ctx, &id, agent_bus_core::Verdict::Approve).await.unwrap();
+        match outcome {
+            StepOutcome::Advanced { downstream, produced_keys, .. } => {
+                assert_eq!(downstream, "spec");
+                assert_eq!(produced_keys, vec!["alpha".to_string()]);
+            }
+            other => panic!("expected Advanced, got {other:?}"),
+        }
+        // gate slot freed; spec store now holds the queued child
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(1));
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].current_stage, "spec");
+        assert_eq!(queued[0].parent_artifact.as_deref(), Some("art.md"));
+        // the gated task is done
+        assert_eq!(ctx.tasks.get(&agent_bus_core::TaskId(id)).await.unwrap().state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn gate_approve_backpressures_when_downstream_full_and_keeps_item_gated() {
+        let (ctx, id) = gated_item_ctx().await;
+        // fill spec
+        ctx.stores.ensure(&ctx.run_id, "spec", 1).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "spec").await.unwrap();
+        let outcome = apply_gate_verdict(&ctx, &id, agent_bus_core::Verdict::Approve).await.unwrap();
+        assert_eq!(outcome, StepOutcome::GateBackpressure { task_id: id.clone() });
+        // gate slot NOT freed; item still gated
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(1));
+        assert_eq!(ctx.tasks.get(&agent_bus_core::TaskId(id)).await.unwrap().state, TaskState::Gated);
+    }
+
+    #[tokio::test]
+    async fn gate_revise_routes_back_to_producer_with_bumped_attempts() {
+        let (ctx, id) = gated_item_ctx().await;
+        let outcome = apply_gate_verdict(&ctx, &id, agent_bus_core::Verdict::Revise).await.unwrap();
+        assert_eq!(outcome, StepOutcome::Revised { task_id: id.clone(), producer: "research".into() });
+        // gate slot freed; research store holds the re-queued child
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "research").await.unwrap(), Some(1));
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].current_stage, "research");
+        assert_eq!(queued[0].attempts, 2, "a revise is a re-claim: attempts bumped");
+        assert_eq!(ctx.tasks.get(&agent_bus_core::TaskId(id)).await.unwrap().state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn gate_reject_escalates_to_needs_human_and_frees_the_slot() {
+        let (ctx, id) = gated_item_ctx().await;
+        let outcome = apply_gate_verdict(&ctx, &id, agent_bus_core::Verdict::Reject).await.unwrap();
+        assert_eq!(outcome, StepOutcome::Escalated { task_id: id.clone() });
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(0));
+        let t = ctx.tasks.get(&agent_bus_core::TaskId(id)).await.unwrap();
+        assert_eq!(t.state, TaskState::NeedsHuman);
+        assert_eq!(t.current_stage, "needs-human");
     }
 
     // ---- Task 4: transformer (block-before-claim) ----
