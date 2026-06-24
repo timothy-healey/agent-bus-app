@@ -6,9 +6,68 @@
 //! extracts + parses + best-effort-applies the slice (the trust boundary). The
 //! prose is never parsed for state.
 
-use crate::draft::{apply_slice, best_effort_validate, DraftPipeline, Slice};
+use crate::draft::{apply_slice, best_effort_validate, DraftPipeline, PromptSlice, Slice, TeamsSlice, WiringSlice};
 use llm_chat::chat::{ChatRequest, ChatRunner};
 use serde::{Deserialize, Serialize};
+
+/// Compact JSON Schema for a slice type, derived from the Rust type via schemars.
+/// This is the single source of truth (the **slice schema**): the prompt and
+/// `parse_slice` are generated from the SAME types, so they can never drift.
+fn slice_schema<T: schemars::JsonSchema>() -> String {
+    serde_json::to_string(&schemars::schema_for!(T)).unwrap_or_default()
+}
+
+/// The kickoff one-shot system prompt: prose + a fenced ```json TEAMS slice whose
+/// shape is the DERIVED slice schema (one source of truth). Prose rules kept
+/// (2–5 teams, slug ids).
+pub fn kickoff_system_prompt() -> String {
+    format!(
+        "You are designing a multi-team Claude Code agent pipeline from a one-line \
+description. Reply with a short paragraph of prose, THEN a fenced ```json block \
+containing ONLY the team set. The object MUST include \"kind\":\"teams\" and match \
+this JSON Schema (the team-set payload):\n\
+```json\n{schema}\n```\n\
+Use 2 to 5 teams. ids are lowercase slugs. Emit ONLY the json in the fenced block.",
+        schema = slice_schema::<TeamsSlice>()
+    )
+}
+
+/// The per-step Design Session system prompt with the DERIVED slice schema embedded
+/// (the **slice schema** — one source of truth). The prose rules are kept; only the
+/// hand-written shape literal is replaced by the generated schema. Built at call
+/// time because the schema string is computed from the types.
+pub fn step_system_prompt(step: Step) -> String {
+    match step {
+        Step::Teams => format!(
+            "You are refining the TEAM SET of a pipeline being designed. Reply with \
+prose, THEN a fenced ```json block with the FULL updated team set (this replaces \
+the previous set). The object MUST include \"kind\":\"teams\" and match this JSON \
+Schema (the team-set payload):\n\
+```json\n{schema}\n```\n\
+Preserve existing team ids the user wants to keep. Only the json mutates state.",
+            schema = slice_schema::<TeamsSlice>()
+        ),
+        Step::Prompts => format!(
+            "You are writing ONE team's responsibility prompt. Reply with prose, THEN \
+a fenced ```json block. The object MUST include \"kind\":\"prompt\" and match this \
+JSON Schema (the prompt payload):\n\
+```json\n{schema}\n```\n\
+team_id must be one of the existing teams. Only the json mutates state.",
+            schema = slice_schema::<PromptSlice>()
+        ),
+        Step::Wiring => format!(
+            "You are wiring the pipeline's flow (routes, optional fork/join lanes, and \
+optional human-review gates). Reply with prose, THEN a fenced ```json block. The \
+object MUST include \"kind\":\"wiring\" and match this JSON Schema (the wiring \
+payload):\n\
+```json\n{schema}\n```\n\
+A gate is a human-review checkpoint: a team routes to it via on_approve, and the \
+gate forwards approved work to its downstream. A fork must have >=2 lanes; NEVER \
+place a gate inside a fork lane. routes stay single-target. Only the json mutates state.",
+            schema = slice_schema::<WiringSlice>()
+        ),
+    }
+}
 
 /// Extract the first fenced code block from the model's prose. Prefers a
 /// ```` ```json ```` fence; falls back to the first bare ```` ``` ```` fence.
@@ -64,51 +123,7 @@ impl Step {
             Step::Wiring => "wiring",
         }
     }
-
-    /// The step-specific system prompt. Each documents the fenced-json mini-schema
-    /// the model must emit (the structured-emit contract). The schemas mirror the
-    /// `Slice` variants in draft.rs — keep them in sync.
-    fn system_prompt(self) -> &'static str {
-        match self {
-            Step::Teams => TEAMS_SYSTEM_PROMPT,
-            Step::Prompts => PROMPTS_SYSTEM_PROMPT,
-            Step::Wiring => WIRING_SYSTEM_PROMPT,
-        }
-    }
 }
-
-const KICKOFF_SYSTEM_PROMPT: &str = "\
-You are designing a multi-team Claude Code agent pipeline from a one-line \
-description. Reply with a short paragraph of prose, THEN a fenced ```json block \
-containing ONLY the team set, exactly this schema:\n\
-```json\n{\"kind\":\"teams\",\"teams\":[{\"id\":\"<slug>\",\"name\":\"<Display Name>\"}]}\n```\n\
-Use 2–5 teams. ids are lowercase slugs. Do not include anything but the json in \
-the fenced block.";
-
-const TEAMS_SYSTEM_PROMPT: &str = "\
-You are refining the TEAM SET of a pipeline being designed. Reply with prose, \
-THEN a fenced ```json block with the FULL updated team set (this replaces the \
-previous set), schema:\n\
-```json\n{\"kind\":\"teams\",\"teams\":[{\"id\":\"<slug>\",\"name\":\"<Display Name>\"}]}\n```\n\
-Preserve existing team ids the user wants to keep. Only the json mutates state.";
-
-const PROMPTS_SYSTEM_PROMPT: &str = "\
-You are writing ONE team's responsibility prompt. Reply with prose, THEN a fenced \
-```json block, schema:\n\
-```json\n{\"kind\":\"prompt\",\"team_id\":\"<existing team id>\",\"prompt_body\":\"<the operating prompt>\"}\n```\n\
-team_id must be one of the existing teams. Only the json mutates state.";
-
-const WIRING_SYSTEM_PROMPT: &str = "\
-You are wiring the pipeline's flow (routes, optional fork/join lanes, and optional \
-human-review gates). Reply with prose, THEN a fenced ```json block, schema:\n\
-```json\n{\"kind\":\"wiring\",\
-\"routes\":[{\"team_id\":\"<id>\",\"on_approve\":\"<id|null>\",\"on_revise\":null,\"on_reject\":null}],\
-\"forks\":[{\"id\":\"fork-1\",\"lanes\":[\"<team id>\",\"<team id>\"]}],\
-\"joins\":[{\"id\":\"join-1\",\"waits_for\":[\"<team id>\",\"<team id>\"],\"downstream\":\"<id>\"}],\
-\"gates\":[{\"id\":\"gate-1\",\"label\":\"<human-readable>\",\"downstream\":\"<id>\"}]}\n```\n\
-A gate is a human-review checkpoint: a team routes to it via on_approve, and the \
-gate forwards approved work to its downstream. A fork must have >=2 lanes; NEVER \
-place a gate inside a fork lane. routes stay single-target. Only the json mutates state.";
 
 /// Build the user message for a turn: the user's words plus the current draft as
 /// JSON, so manual edits the user made (the other half of the two-way binding,
@@ -144,7 +159,7 @@ pub async fn kickoff_generate(
 
     let req = ChatRequest {
         dialogue_id: format!("{session_id}:kickoff"),
-        system_prompt: KICKOFF_SYSTEM_PROMPT.to_string(),
+        system_prompt: kickoff_system_prompt(),
         user_message: description.to_string(),
         model: "claude-opus-4-8".to_string(),
         thinking_budget: 8192,
@@ -173,7 +188,7 @@ pub async fn design_session_turn(
 ) -> TurnResult {
     let req = ChatRequest {
         dialogue_id: format!("{session_id}:{}", step.slug()),
-        system_prompt: step.system_prompt().to_string(),
+        system_prompt: step_system_prompt(step),
         user_message: turn_user_message(user_message, &draft),
         model: "claude-opus-4-8".to_string(),
         thinking_budget: 8192,
@@ -351,7 +366,39 @@ mod tests {
 
     #[test]
     fn wiring_system_prompt_documents_the_gates_schema() {
-        assert!(WIRING_SYSTEM_PROMPT.contains("gates"));
-        assert!(WIRING_SYSTEM_PROMPT.contains("downstream"));
+        let p = step_system_prompt(Step::Wiring);
+        assert!(p.contains("gates"));
+        assert!(p.contains("downstream"));
+    }
+
+    #[test]
+    fn step_prompt_embeds_the_derived_slice_schema() {
+        // The wiring prompt must contain the schema serialized from WiringSlice via
+        // schemars — proving it is GENERATED, not a hand-written literal.
+        let p = step_system_prompt(Step::Wiring);
+        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::WiringSlice)).unwrap();
+        assert!(p.contains(&schema), "wiring prompt must embed the derived WiringSlice schema");
+        // prose rules are kept
+        assert!(p.contains("fork") && p.contains(">=2"));
+    }
+
+    #[test]
+    fn step_prompts_no_longer_carry_a_hand_written_slice_object_literal() {
+        // The old hand-written shape used a bare {"kind":"teams","teams":[{"id":...}]}
+        // sample-instance literal. Assert the teams prompt now embeds the DERIVED
+        // schema for the teams slice (a JSON Schema, not a sample instance).
+        let p = step_system_prompt(Step::Teams);
+        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::TeamsSlice)).unwrap();
+        assert!(p.contains(&schema));
+        // a JSON Schema carries "properties"/"type" metadata; a hand-written sample would not
+        assert!(p.contains("properties") || p.contains("\"type\""));
+    }
+
+    #[test]
+    fn kickoff_prompt_embeds_the_derived_teams_schema() {
+        let p = kickoff_system_prompt();
+        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::TeamsSlice)).unwrap();
+        assert!(p.contains(&schema));
+        assert!(p.contains('2') && p.contains('5')); // 2–5 teams rule kept
     }
 }
