@@ -46,6 +46,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (7, include_str!("../migrations/007_invocation_audit.sql")),
         (8, include_str!("../migrations/008_nested_groups.sql")),
         (9, include_str!("../migrations/009_git_config.sql")),
+        (10, include_str!("../migrations/010_project_target_repo.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -857,9 +858,16 @@ pub fn run() {
             sql: include_str!("../migrations/009_git_config.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 10,
+            description: "project target repo — projects.target_repo column",
+            sql: include_str!("../migrations/010_project_target_repo.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations(DB_URL, migrations)
@@ -1445,11 +1453,19 @@ mod migration_tests {
         .unwrap();
         assert_eq!(kind_cols, 1, "migration 004 column present exactly once");
 
+        let target_repo_cols: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('projects') WHERE name='target_repo'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(target_repo_cols, 1, "migration 010 column present exactly once");
+
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 9, "all nine migrations recorded");
+        assert_eq!(version, 10, "all ten migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }

@@ -47,12 +47,18 @@ pub async fn workspace_create_project(
     state: tauri::State<'_, WorkspaceState>,
     name: String,
     root_path: String,
+    target_repo: Option<String>,
 ) -> Result<Project, String> {
     // Expand a leading ~ so a root like "~/DDD-effort" resolves to the home dir
     // instead of being stored as a literal "~" path (which scattered files under
     // the app's cwd).
-    let root = expand_tilde(&root_path, &home_dir());
-    let project = Project::new(name, PathBuf::from(root), now_unix());
+    let home = home_dir();
+    let root = expand_tilde(&root_path, &home);
+    let mut project = Project::new(name, PathBuf::from(root), now_unix());
+    // A5: the target repo is tilde-expanded with the same discipline as root.
+    project.target_repo = target_repo
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| expand_tilde(&s, &home));
     state.store.insert(&project).await.map_err(|e| e.to_string())?;
     Ok(project)
 }
@@ -86,6 +92,26 @@ pub async fn workspace_set_active_pipeline(
     state
         .store
         .set_active_pipeline(&ProjectId(id), pid.as_ref(), now_unix())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// OHS command (A5): set (or clear) a project's target repo. Tilde-expanded
+/// (same discipline as root_path). Binds `${target_repo}` for all teams' scope
+/// resolution and defaults the inject target. Empty/blank input clears it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn workspace_set_target_repo(
+    state: tauri::State<'_, WorkspaceState>,
+    id: String,
+    target_repo: Option<String>,
+) -> Result<(), String> {
+    let home = home_dir();
+    let expanded = target_repo
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| expand_tilde(&s, &home));
+    state
+        .store
+        .set_target_repo(&ProjectId(id), expanded.as_deref(), now_unix())
         .await
         .map_err(|e| e.to_string())
 }
@@ -207,9 +233,23 @@ pub fn tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "root_path": { "type": "string" }
+                    "root_path": { "type": "string" },
+                    "target_repo": { "type": ["string", "null"] }
                 },
                 "required": ["name", "root_path"]
+            }),
+            supplier_context: "workspace".into(),
+        },
+        ToolSpec {
+            name: "workspace_set_target_repo".into(),
+            description: "Set (or clear) a project's target repo (binds ${target_repo}).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "target_repo": { "type": ["string", "null"] }
+                },
+                "required": ["id"]
             }),
             supplier_context: "workspace".into(),
         },
@@ -306,6 +346,7 @@ mod tests {
     async fn state_with_project(root: &std::path::Path) -> (WorkspaceState, String) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/010_project_target_repo.sql")).execute(&pool).await.unwrap();
         let store = StdArc::new(ProjectStore::new(pool));
         let project = Project::new("Demo".into(), root.to_path_buf(), 0);
         store.insert(&project).await.unwrap();
@@ -375,6 +416,22 @@ mod tests {
     fn resolve_under_root_rejects_absolute_path() {
         let root = std::env::temp_dir();
         assert!(resolve_under_root(root.to_str().unwrap(), "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn tools_publishes_set_target_repo_under_workspace() {
+        let t = tools();
+        assert!(t.iter().any(|s| s.name == "workspace_set_target_repo" && s.supplier_context == "workspace"));
+    }
+
+    #[tokio::test]
+    async fn set_target_repo_expands_and_persists() {
+        let root = std::env::temp_dir().join(format!("abp-tr-{}", uuid::Uuid::new_v4()));
+        let (state, project_id) = state_with_project(&root).await;
+        let expanded = expand_tilde("~/repo", "/Users/tim");
+        state.store.set_target_repo(&ProjectId(project_id.clone()), Some(&expanded), 0).await.unwrap();
+        let got = state.store.get(&ProjectId(project_id)).await.unwrap();
+        assert_eq!(got.target_repo, Some("/Users/tim/repo".to_string()));
     }
 
     #[test]

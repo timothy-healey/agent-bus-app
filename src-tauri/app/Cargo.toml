@@ -21,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
 tauri-plugin-sql.workspace = true
+tauri-plugin-dialog.workspace = true
 tokio.workspace = true
 agent_bus_core = { path = "../agent_bus_core" }
 workspace = { path = "../workspace" }
