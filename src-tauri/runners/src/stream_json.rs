@@ -144,6 +144,154 @@ pub fn parse_artifact(text: &str) -> Option<String> {
     None
 }
 
+/// One item in the list-of-items output contract (Runtime redesign ④b / L1).
+///
+/// The new bounded-buffer engine asks an agent to emit a *list* of items rather
+/// than the legacy single `VERDICT:`/`ARTIFACT:` pair: a generator emits one item
+/// per NEW candidate key, a transformer emits one item per output it produced, and
+/// a reviewer adds a `VERDICT:` per item. This is the dual to `parse_verdict`/
+/// `parse_artifact` and lives beside them in the Runners ACL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputItem {
+    /// The work-item's stable candidate key (lineage + dedup identity). Empty
+    /// (`""`) for a legacy single-item response with no `KEY:` line.
+    pub key: String,
+    /// Path of the artifact the agent wrote, if any.
+    pub artifact_path: Option<String>,
+    /// The reviewer verdict for this item, if the agent emitted one. `None` for
+    /// producer/generator items (which imply forward).
+    pub verdict: Option<Verdict>,
+}
+
+/// Parse the agent's emitted item list (Runtime redesign ④b / L1 output contract).
+///
+/// CONVENTION (the dual to `output_contract`): each item is a block of marked
+/// lines — `KEY: <key>`, `ARTIFACT: <path>`, `VERDICT: <word>` — and a new
+/// `KEY:` line starts a new item. The parse is lenient and NEVER panics:
+///   * Lines are matched by prefix after trimming; unknown lines are ignored.
+///   * A `VERDICT:`/`ARTIFACT:` seen before any `KEY:` opens an implicit
+///     `key=""` item (the legacy single-item shape — one item, no key).
+///   * A blank `VERDICT:` value parses as `Verdict::Revise` (the same safe
+///     default `parse_verdict` uses), so a malformed verdict never auto-approves.
+///   * Malformed / empty input → an empty Vec (best-effort, the caller decides).
+pub fn parse_items(text: &str) -> Vec<OutputItem> {
+    let mut items: Vec<OutputItem> = Vec::new();
+    // The item currently being built (None until the first KEY/ARTIFACT/VERDICT).
+    let mut current: Option<OutputItem> = None;
+
+    fn verdict_of(rest: &str) -> Verdict {
+        match rest.trim().to_lowercase().as_str() {
+            "approve" => Verdict::Approve,
+            "reject" => Verdict::Reject,
+            _ => Verdict::Revise,
+        }
+    }
+
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("KEY:") {
+            // A new KEY always starts a fresh item; flush the previous one.
+            if let Some(item) = current.take() {
+                items.push(item);
+            }
+            current = Some(OutputItem {
+                key: rest.trim().to_string(),
+                artifact_path: None,
+                verdict: None,
+            });
+        } else if let Some(rest) = line.strip_prefix("ARTIFACT:") {
+            let p = rest.trim();
+            let item = current.get_or_insert_with(|| OutputItem {
+                key: String::new(),
+                artifact_path: None,
+                verdict: None,
+            });
+            if !p.is_empty() {
+                item.artifact_path = Some(p.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("VERDICT:") {
+            let item = current.get_or_insert_with(|| OutputItem {
+                key: String::new(),
+                artifact_path: None,
+                verdict: None,
+            });
+            item.verdict = Some(verdict_of(rest));
+        }
+    }
+    if let Some(item) = current.take() {
+        items.push(item);
+    }
+    items
+}
+
+/// The output-contract system-prompt preamble (Runtime redesign ④b / the L1 fix).
+///
+/// This is the text that finally TELLS the agent to emit the item list — the live
+/// gap L1 named (the convention lived only in the parser + tests; nothing
+/// instructed the agent). The engine composes the returned block into the system
+/// prompt, where `role`, the `artifact_dir`, and the `already_found` key set are
+/// known. Pure (no I/O); it never panics.
+///
+/// * `role` — `"generator"` (emit only NEW keys not in `already_found`),
+///   `"reviewer"` (add a `VERDICT:` per item), or any producer role (emit items
+///   with keys + artifacts, implicit forward).
+/// * `artifact_dir` — the directory the agent must write artifacts under (the
+///   worker grants write access to it, fixing the L1 write-access gap).
+/// * `already_found` — keys the generator has already produced this run; only
+///   meaningful for the generator role.
+pub fn output_contract(role: &str, artifact_dir: &str, already_found: &[String]) -> String {
+    let role_lc = role.to_lowercase();
+    let mut s = String::new();
+    s.push_str("## Output contract\n\n");
+    s.push_str(
+        "When you finish, emit a list of work-items. Write each item as a block of \
+         marked lines:\n\n",
+    );
+    s.push_str("  KEY: <a stable, unique candidate key for this item>\n");
+    s.push_str(&format!(
+        "  ARTIFACT: {artifact_dir}/<key>... (the file you wrote for this item)\n"
+    ));
+    if role_lc == "reviewer" {
+        s.push_str("  VERDICT: approve | revise | reject\n");
+    }
+    s.push('\n');
+    s.push_str(&format!(
+        "Write every artifact file under `{artifact_dir}` — you have write access \
+         there. Use the exact KEY as part of the path so items stay traceable.\n",
+    ));
+
+    match role_lc.as_str() {
+        "generator" => {
+            s.push_str(
+                "\nYou are the GENERATOR (source) stage. Scan the work and emit ONE item \
+                 per NEW candidate you find — assign each a stable KEY. Do NOT re-emit any \
+                 key that already exists. Emit nothing when you find no new candidates.\n",
+            );
+            if already_found.is_empty() {
+                s.push_str("Already-found keys: (none yet — this is the first pass).\n");
+            } else {
+                s.push_str("Already-found keys (do NOT re-emit these):\n");
+                for k in already_found {
+                    s.push_str(&format!("  - {k}\n"));
+                }
+            }
+        }
+        "reviewer" => {
+            s.push_str(
+                "\nYou are a REVIEWER. For every item you assess, emit a VERDICT \
+                 (approve / revise / reject) alongside its KEY.\n",
+            );
+        }
+        _ => {
+            s.push_str(
+                "\nYou are a PRODUCER. Transform your input into one output item, emit its \
+                 KEY and ARTIFACT; it is forwarded downstream implicitly (no verdict needed).\n",
+            );
+        }
+    }
+    s
+}
+
 /// Parse a full stream from raw text (newline-delimited JSON), feeding each
 /// non-blank line. Convenience used by ClaudeCliRunner + tests.
 pub fn parse_stream(raw: &str, model: &str) -> Result<RunnerOutput, RunnerError> {
@@ -257,6 +405,78 @@ mod tests {
         assert_eq!(acc.feed(&asst).unwrap(), "hello ");
         // the result line carries authoritative text but is NOT a streamed delta
         assert_eq!(acc.feed(&res).unwrap(), "");
+    }
+
+    #[test]
+    fn parse_items_reads_a_list_of_n_items() {
+        let text = "\
+KEY: alpha
+ARTIFACT: artifacts/specs/alpha.md
+VERDICT: approve
+KEY: beta
+ARTIFACT: artifacts/specs/beta.md
+VERDICT: revise
+KEY: gamma
+ARTIFACT: artifacts/specs/gamma.md";
+        let items = parse_items(text);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], OutputItem { key: "alpha".into(), artifact_path: Some("artifacts/specs/alpha.md".into()), verdict: Some(Verdict::Approve) });
+        assert_eq!(items[1], OutputItem { key: "beta".into(), artifact_path: Some("artifacts/specs/beta.md".into()), verdict: Some(Verdict::Revise) });
+        assert_eq!(items[2], OutputItem { key: "gamma".into(), artifact_path: Some("artifacts/specs/gamma.md".into()), verdict: None });
+    }
+
+    #[test]
+    fn parse_items_handles_legacy_single_item_with_no_key() {
+        // A legacy VERDICT:/ARTIFACT: with no KEY: => one item, key="".
+        let text = "Some prose.\nARTIFACT: artifacts/analyses/a.md\nVERDICT: approve";
+        let items = parse_items(text);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "");
+        assert_eq!(items[0].artifact_path.as_deref(), Some("artifacts/analyses/a.md"));
+        assert_eq!(items[0].verdict, Some(Verdict::Approve));
+    }
+
+    #[test]
+    fn parse_items_is_best_effort_on_malformed_and_empty() {
+        assert!(parse_items("").is_empty());
+        assert!(parse_items("just prose, no markers").is_empty());
+        // a blank verdict value defaults to the safe Revise (never auto-approve)
+        let items = parse_items("KEY: x\nVERDICT:");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].verdict, Some(Verdict::Revise));
+        // a KEY with no artifact/verdict is still an item
+        let items = parse_items("KEY: only");
+        assert_eq!(items, vec![OutputItem { key: "only".into(), artifact_path: None, verdict: None }]);
+    }
+
+    #[test]
+    fn output_contract_tells_generator_to_emit_new_keys() {
+        let found = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let c = output_contract("generator", "${project}/artifacts/research", &found);
+        assert!(c.contains("KEY:"));
+        assert!(c.contains("ARTIFACT:"));
+        assert!(c.contains("${project}/artifacts/research"));
+        assert!(c.to_lowercase().contains("generator"));
+        // the already-found set is embedded so the agent dedups
+        assert!(c.contains("src/a.rs"));
+        assert!(c.contains("src/b.rs"));
+        // a generator is not told to emit a verdict
+        assert!(!c.contains("VERDICT:"));
+    }
+
+    #[test]
+    fn output_contract_tells_reviewer_to_emit_a_verdict() {
+        let c = output_contract("reviewer", "${project}/artifacts/specs", &[]);
+        assert!(c.contains("VERDICT:"));
+        assert!(c.to_lowercase().contains("reviewer"));
+    }
+
+    #[test]
+    fn output_contract_producer_has_no_verdict_and_grants_write_access() {
+        let c = output_contract("producer", "${project}/artifacts/plans", &[]);
+        assert!(!c.contains("VERDICT:"));
+        assert!(c.contains("${project}/artifacts/plans"));
+        assert!(c.to_lowercase().contains("write access"));
     }
 
     #[test]
