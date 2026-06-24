@@ -16,6 +16,36 @@ use async_trait::async_trait;
 /// parser can't produce).
 pub type SpawnFn = Box<dyn Fn(&[String]) -> Result<String, ChatError> + Send + Sync>;
 
+/// Map a finished subprocess's (stdout, stderr, success) into the spawn result.
+/// Pure so it is unit-tested without a live `claude`. On success the stdout is
+/// returned verbatim for the parser. On a non-zero exit the stderr is inspected:
+/// rate-limit-looking stderr maps to `RateLimited`, anything else to `Other`
+/// (NOT `Spawn` — `Spawn` is reserved for the `.output()` io-error of a missing
+/// binary). `Other` keeps the D6 lost-session retry alive: `chat_with_retry`
+/// treats `NoResult | Other` as the recoverable set, so a lost `--resume`
+/// session that now errors non-zero still triggers the fresh retry, while a
+/// real first-turn error surfaces the actual stderr to the user.
+pub fn interpret_chat_output(
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    success: bool,
+) -> Result<String, ChatError> {
+    if success {
+        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+    }
+    let err = String::from_utf8_lossy(&stderr).into_owned();
+    let lower = err.to_lowercase();
+    if lower.contains("rate") || lower.contains("429") || lower.contains("quota") {
+        Err(ChatError::RateLimited(err))
+    } else if err.trim().is_empty() {
+        Err(ChatError::Other(
+            "claude exited non-zero with no stderr".into(),
+        ))
+    } else {
+        Err(ChatError::Other(err))
+    }
+}
+
 pub struct ClaudeChatRunner {
     spawn: SpawnFn,
     sessions: SessionMap,
@@ -30,7 +60,11 @@ impl ClaudeChatRunner {
                     .args(args)
                     .output()
                     .map_err(|e| ChatError::Spawn(e.to_string()))?;
-                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+                interpret_chat_output(
+                    output.stdout,
+                    output.stderr,
+                    output.status.success(),
+                )
             }),
             sessions: SessionMap::new(),
         }
@@ -242,5 +276,46 @@ mod tests {
         }));
         let err = runner.chat(&req("x")).await.unwrap_err();
         assert!(err.is_rate_limited());
+    }
+
+    #[test]
+    fn interpret_chat_output_success_returns_stdout() {
+        let out = interpret_chat_output(b"hello stdout".to_vec(), b"ignored".to_vec(), true).unwrap();
+        assert_eq!(out, "hello stdout");
+    }
+
+    #[test]
+    fn interpret_chat_output_rate_limit_stderr_maps_to_rate_limited() {
+        let err = interpret_chat_output(
+            Vec::new(),
+            b"Error: 429 rate limit exceeded".to_vec(),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ChatError::RateLimited(_)));
+        assert!(err.is_rate_limited());
+    }
+
+    #[test]
+    fn interpret_chat_output_other_stderr_maps_to_other_with_text() {
+        let err = interpret_chat_output(
+            Vec::new(),
+            b"Error: When using --print, --output-format=stream-json requires --verbose".to_vec(),
+            false,
+        )
+        .unwrap_err();
+        match err {
+            ChatError::Other(m) => assert!(m.contains("requires --verbose")),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interpret_chat_output_empty_stderr_uses_fallback_message() {
+        let err = interpret_chat_output(Vec::new(), Vec::new(), false).unwrap_err();
+        match err {
+            ChatError::Other(m) => assert_eq!(m, "claude exited non-zero with no stderr"),
+            other => panic!("expected Other, got {other:?}"),
+        }
     }
 }
