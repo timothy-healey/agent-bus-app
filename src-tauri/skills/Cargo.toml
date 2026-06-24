@@ -1,0 +1,15 @@
+[package]
+name = "skills"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tauri.workspace = true
+agent_bus_core = { path = "../agent_bus_core" }
+
+[dev-dependencies]
+uuid.workspace = true
