@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPipelineGraph, nodeBorderColor } from "./pipelineGraph";
+import { buildPipelineGraph, nodeBorderColor, inferTeamRole } from "./pipelineGraph";
 import type { Pipeline } from "../ipc/pipeline";
 
 function pipe(over: Partial<Pipeline> = {}): Pipeline {
@@ -38,23 +38,46 @@ describe("buildPipelineGraph", () => {
     expect(col("gate-1")).toBe(1);
   });
 
-  it("classifies revise as a back-edge and reject as escalate", () => {
-    const team = (id: string, name: string, outputs: Record<string, string> = {}) => ({
-      id, name, prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs, workers: { min: 1, max: 1 }, role: "producer" as const, store: { capacity: 8 },
+  it("a reviewer source emits the approve · revise · reject verdict triple", () => {
+    const team = (id: string, name: string, role: "producer" | "reviewer", outputs: Record<string, string> = {}) => ({
+      id, name, prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs, workers: { min: 1, max: 1 }, role, store: { capacity: 8 },
     });
     const g = buildPipelineGraph(
       pipe({
         teams: [
-          team("writer", "Writer"),
-          team("next", "Next"),
-          team("rev", "Reviewer", { on_approve: "next", on_revise: "writer", on_reject: "needs-human" }),
+          team("writer", "Writer", "producer"),
+          team("next", "Next", "producer"),
+          team("rev", "Reviewer", "reviewer", { on_approve: "next", on_revise: "writer", on_reject: "needs-human" }),
         ],
         escalations: [{ id: "needs-human", triggers: [] }],
       }),
     );
     const kinds = g.edges.filter((e) => e.from === "rev").map((e) => `${e.kind}->${e.to}`).sort();
+    expect(kinds).toContain("approve->next");
     expect(kinds).toContain("revise->writer");
-    expect(kinds).toContain("escalate->needs-human");
+    expect(kinds).toContain("reject->needs-human");
+  });
+
+  it("a producer source's on_approve is a hand-off, not a verdict (vet F3)", () => {
+    const g = buildPipelineGraph(
+      pipe({
+        teams: [
+          { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "next" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "next", name: "Next", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+        ],
+      }),
+    );
+    const e = g.edges.find((e) => e.from === "writer" && e.to === "next");
+    expect(e?.kind).toBe("hand-off");
+  });
+
+  it("inferTeamRole reads the explicit role first, then falls back to the name regex", () => {
+    // explicit field wins even against a reviewer-shaped name
+    expect(inferTeamRole({ id: "spec-review", name: "Spec Review", role: "producer" })).toBe("producer");
+    // fallback: no role field, reviewer-shaped name → reviewer
+    expect(inferTeamRole({ id: "spec-review", name: "Spec Review" })).toBe("reviewer");
+    // fallback: producer-shaped name → producer
+    expect(inferTeamRole({ id: "plan", name: "Planner" })).toBe("producer");
   });
 
   it("infers reviewer/impl/writer roles from team naming", () => {

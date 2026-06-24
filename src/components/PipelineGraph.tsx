@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import type { Pipeline } from "../ipc/pipeline";
-import { buildPipelineGraph, nodeBorderColor, type EdgeKind } from "../lib/pipelineGraph";
+import { buildPipelineGraph, nodeBorderColor, type RouteKind } from "../lib/pipelineGraph";
 
 /// Read-only static graph render of the pipeline (audit Decision 2). Nodes +
 /// edges laid out left-to-right, honouring fork/join/gate and revise/escalate
@@ -12,13 +12,14 @@ const COL_GAP = 70;
 const ROW_GAP = 22;
 const PAD = 16;
 
-function edgeStroke(kind: EdgeKind): CSSProperties {
+function edgeStroke(kind: RouteKind): CSSProperties {
   switch (kind) {
-    case "forward":
+    case "hand-off":
+    case "approve":
       return { stroke: "oklch(40% 0.008 60)", strokeWidth: 1.5 };
     case "revise":
       return { stroke: "var(--revise)", strokeWidth: 1.5, strokeDasharray: "4 3" };
-    case "escalate":
+    case "reject":
       return { stroke: "var(--danger)", strokeWidth: 1.5, strokeDasharray: "4 3" };
   }
 }
@@ -66,9 +67,9 @@ export function PipelineGraph({ pipeline }: { pipeline: Pipeline }) {
           const x2 = b.x;
           const y2 = b.y + NODE_H / 2;
           const stroke = edgeStroke(e.kind);
-          // Back-edges (revise/escalate, or any right-to-left link) bow with a
+          // Back-edges (revise/reject, or any right-to-left link) bow with a
           // Bezier so they read as returns, not forward flow.
-          const backward = e.kind !== "forward" || b.x <= a.x;
+          const backward = e.kind === "revise" || e.kind === "reject" || b.x <= a.x;
           const d = backward
             ? `M ${x1} ${y1} C ${x1 + 40} ${y1 - 36}, ${x2 - 40} ${y2 - 36}, ${x2} ${y2}`
             : `M ${x1} ${y1} C ${x1 + COL_GAP / 2} ${y1}, ${x2 - COL_GAP / 2} ${y2}, ${x2} ${y2}`;

@@ -2,12 +2,20 @@ import type { Pipeline } from "../ipc/pipeline";
 
 /// Static read-only graph model for the pipeline (audit Decision 2). Pure layout:
 /// no drag, no editing. Computes role-typed nodes placed in columns by a simple
-/// longest-path-from-source ranking, plus forward / revise / escalate edges that
-/// honour fork/join/gate wiring. The SVG renderer (PipelineGraph) is dumb; all
-/// the graph reasoning lives here so it can be unit-tested.
+/// longest-path-from-source ranking, plus the route edges that honour
+/// fork/join/gate wiring. The SVG renderer (PipelineGraph) is dumb; all the graph
+/// reasoning lives here so it can be unit-tested.
 
 export type NodeRole = "writer" | "reviewer" | "impl" | "gate" | "fork" | "join" | "escalation";
-export type EdgeKind = "forward" | "revise" | "escalate";
+
+/// Route vocabulary (vet F3). A producer source emits a single **hand-off**; a
+/// reviewer/gate source emits the verdict triple **approve · revise · reject**.
+/// The off-language "forward"/"escalate" edge words are retired.
+export type RouteKind = "hand-off" | "approve" | "revise" | "reject";
+
+/// Back-compat alias: prefer `RouteKind`. (Kept so older imports still type-check
+/// during the transition; the values now match RouteKind.)
+export type EdgeKind = RouteKind;
 
 export interface GraphNode {
   id: string;
@@ -20,7 +28,7 @@ export interface GraphNode {
 export interface GraphEdge {
   from: string;
   to: string;
-  kind: EdgeKind;
+  kind: RouteKind;
 }
 
 export interface PipelineGraph {
@@ -30,14 +38,24 @@ export interface PipelineGraph {
   rows: number;
 }
 
-/// Infer a team's visual role from its id/name (teams carry no explicit role in
-/// the schema). Reviewer/gate-feeders -> reviewer (purple); impl/build/code ->
-/// impl (orange); everything else is a writer (blue). DESIGN.md §Pipeline editor.
+/// Infer a team's *visual* role from its id/name (a display concern, vet F8).
+/// Reviewer/gate-feeders -> reviewer (purple); impl/build/code -> impl (orange);
+/// everything else is a writer (blue). DESIGN.md §Pipeline editor.
 function teamRole(idOrName: string): NodeRole {
   const s = idOrName.toLowerCase();
   if (/review|critic|qa|verify|check/.test(s)) return "reviewer";
   if (/impl|build|code|dev|engineer|write-code|exec/.test(s)) return "impl";
   return "writer";
+}
+
+/// Shared producer-vs-reviewer inference (vet F8). The verdict-vs-hand-off edge
+/// distinction depends on this *behavioural* role (distinct from the visual
+/// `NodeRole`). Reads the explicit `role` field when present (chunk ①), and falls
+/// back to the name regex only when it is absent — so a mid-build draft that has
+/// not set the field still routes sensibly.
+export function inferTeamRole(team: { role?: "producer" | "reviewer"; id: string; name?: string }): "producer" | "reviewer" {
+  if (team.role) return team.role;
+  return teamRole(team.name || team.id) === "reviewer" ? "reviewer" : "producer";
 }
 
 export function buildPipelineGraph(pipeline: Pipeline): PipelineGraph {
@@ -54,30 +72,35 @@ export function buildPipelineGraph(pipeline: Pipeline): PipelineGraph {
 
   const edges: GraphEdge[] = [];
   const adj = new Map<string, string[]>(); // forward adjacency for ranking
-  const pushEdge = (from: string, to: string, kind: EdgeKind) => {
+  // hand-off + approve advance the flow (used for column ranking); revise/reject
+  // are returns/sinks and never rank forward.
+  const pushEdge = (from: string, to: string, kind: RouteKind) => {
     if (!nodes.has(from) || !nodes.has(to)) return;
     edges.push({ from, to, kind });
-    if (kind === "forward") {
+    if (kind === "hand-off" || kind === "approve") {
       adj.set(from, [...(adj.get(from) ?? []), to]);
     }
   };
 
   for (const t of pipeline.teams) {
     const o = t.outputs ?? {};
-    if (o.on_approve) pushEdge(t.id, o.on_approve, "forward");
-    // Revise routes back upstream (a back-edge); escalate goes to a sink.
+    // Role-aware (vet F3): a producer's on_approve is a hand-off, not a verdict;
+    // a reviewer's is the approve leg of the verdict triple.
+    const handoff = inferTeamRole(t) === "producer";
+    if (o.on_approve) pushEdge(t.id, o.on_approve, handoff ? "hand-off" : "approve");
     if (o.on_revise) pushEdge(t.id, o.on_revise, "revise");
-    if (o.on_reject) pushEdge(t.id, o.on_reject, "escalate");
+    if (o.on_reject) pushEdge(t.id, o.on_reject, "reject");
   }
   for (const g of pipeline.gates) {
-    if (g.downstream) pushEdge(g.id, g.downstream, "forward");
+    // A gate is a reviewer-shaped node; its single downstream is the approve leg.
+    if (g.downstream) pushEdge(g.id, g.downstream, "approve");
   }
   for (const f of pipeline.forks) {
-    for (const lane of f.lanes) pushEdge(f.id, lane, "forward");
+    for (const lane of f.lanes) pushEdge(f.id, lane, "hand-off");
   }
   for (const j of pipeline.joins) {
-    for (const w of j.waits_for) pushEdge(w, j.id, "forward");
-    if (j.downstream) pushEdge(j.id, j.downstream, "forward");
+    for (const w of j.waits_for) pushEdge(w, j.id, "hand-off");
+    if (j.downstream) pushEdge(j.id, j.downstream, "hand-off");
   }
 
   // Column = longest forward path from any source (nodes with no forward
