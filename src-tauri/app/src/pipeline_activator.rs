@@ -23,7 +23,7 @@ use runtime::brake::Brake;
 use runtime::engine::{self, EngineContext, StepOutcome};
 use runtime::fanout_store::FanOutStore;
 use runtime::generator_ledger::GeneratorLedger;
-use runtime::pool::LogSinkFactory;
+use runtime::log_sink::LogSinkFactory;
 use runtime::run_store::RunStore;
 use runtime::store::StoreRepo;
 use runtime::task_store::TaskStore;

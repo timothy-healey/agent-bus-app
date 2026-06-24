@@ -200,7 +200,7 @@ impl TaskLogBuffer {
 /// events `{ task_id, delta }`. Display-only: the payload is the task id + a
 /// prose fragment; no stream-json idiom crosses here. Each task gets its own
 /// coalescing buffer so concurrent workers' logs never interleave within a flush.
-fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::pool::LogSinkFactory> {
+fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::log_sink::LogSinkFactory> {
     Arc::new(move |task_id: &str| -> runners::output::LogSink {
         use std::sync::Mutex;
         let buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));

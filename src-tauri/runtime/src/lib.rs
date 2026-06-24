@@ -1,6 +1,6 @@
 //! runtime — the Runtime context. Owns the Task lifecycle state machine
-//! (Task aggregate), the WorkerPool (per-team tokio workers; second aggregate,
-//! joined to Task by reference), the Pipeline router, and the system brake.
+//! (Task aggregate), the bounded-buffer execution `engine` (per-run worker
+//! loops, joined to Task by reference), and the system brake.
 
 pub mod task;
 
@@ -14,15 +14,13 @@ pub mod worker;
 
 pub use worker::*;
 
-pub mod router;
 pub mod brake;
 
-pub use router::*;
 pub use brake::*;
 
-pub mod pool;
+pub mod log_sink;
 
-pub use pool::*;
+pub use log_sink::*;
 
 pub mod fanout_group;
 pub use fanout_group::*;
