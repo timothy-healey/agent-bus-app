@@ -1,37 +1,19 @@
-import { useState } from "react";
-import { createProjectFromDraft, type DraftPipeline } from "../ipc/pipeline";
-import type { Project } from "../ipc/workspace";
+import type { DraftPipeline } from "../ipc/pipeline";
 import { PipelineView } from "../components/PipelineView";
 import { draftToPipeline } from "./WiringStep";
-import { Button } from "../components/ui/Button";
 
 interface ReviewStepProps {
   basics: { name: string; root: string; description: string };
   draft: DraftPipeline;
-  onCreated: (p: Project) => void;
+  error?: string | null;
 }
 
-/// Step 5: review the assembled pipeline + every prompt file, then Create.
-/// Create calls create_project_from_draft (hard-validate → write → activate);
-/// a hard-validation failure comes back as an error and nothing is written.
-export function ReviewStep({ basics, draft, onCreated }: ReviewStepProps) {
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
+/// Step 5: review the assembled pipeline + every prompt file. Presentational —
+/// the Create action lives in the wizard footer (NewProjectWizard), which calls
+/// create_project_from_draft (hard-validate → write → activate) and surfaces any
+/// hard-validation failure back here as `error` (nothing is written on failure).
+export function ReviewStep({ basics, draft, error }: ReviewStepProps) {
   const named = { ...draft, name: basics.name, description: basics.description };
-
-  async function create() {
-    setBusy(true);
-    setError(null);
-    try {
-      const project = await createProjectFromDraft(basics.name, basics.root, named);
-      onCreated(project as Project);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div>
@@ -46,9 +28,6 @@ export function ReviewStep({ basics, draft, onCreated }: ReviewStepProps) {
       {error && (
         <div role="alert" style={{ color: "var(--danger)", fontSize: "var(--ts-base)", border: "1px solid var(--danger)", background: "var(--danger-2)", borderRadius: "var(--r-sm)", padding: "var(--sp-2)", marginBottom: "var(--sp-2)" }}>{error}</div>
       )}
-      <Button variant="primary" onClick={create} disabled={busy}>
-        {busy ? "Creating…" : "Create project"}
-      </Button>
     </div>
   );
 }
