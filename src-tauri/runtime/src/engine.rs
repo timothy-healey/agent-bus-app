@@ -21,11 +21,13 @@
 //! into the system prompt (the L1 fix).
 
 use crate::brake::Brake;
+use crate::fanout_store::FanOutStore;
 use crate::generator_ledger::GeneratorLedger;
+use crate::revision::RevisionBundleReader;
 use crate::run_store::RunStore;
 use crate::store::StoreRepo;
 use crate::task_store::TaskStore;
-use pipeline::model::{Pipeline, Team};
+use pipeline::model::{Escalation, Fork, Gate, Join, Pipeline, Team};
 use runners::output::Runner;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,9 +44,13 @@ pub enum EngineError {
     #[error(transparent)]
     Ledger(#[from] crate::generator_ledger::GeneratorLedgerError),
     #[error(transparent)]
+    FanOut(#[from] crate::fanout_store::FanOutStoreError),
+    #[error(transparent)]
     Scope(#[from] runners::scope::ScopeError),
     #[error("runner invocation failed: {0}")]
     Invoke(String),
+    #[error("pipeline routing target not found: {0}")]
+    NoRoute(String),
 }
 
 /// What one engine step did — surfaced so the driver + tests can assert behaviour.
@@ -95,6 +101,9 @@ pub struct EngineContext {
     pub ledger: Arc<GeneratorLedger>,
     /// The Task (work-item) store.
     pub tasks: Arc<TaskStore>,
+    /// The fork/join barrier aggregate store (FanOutGroup; P1–P3). REUSED
+    /// unchanged for within-item parallelism (④c).
+    pub fanout: Arc<FanOutStore>,
     pub brake: Arc<Brake>,
     /// The ACL seam — the engine calls invoke/invoke_stream and parses items.
     pub runner: Arc<dyn Runner>,
@@ -103,6 +112,9 @@ pub struct EngineContext {
     pub target_repo: Option<PathBuf>,
     /// Reads a team's prompt file content (injected so tests don't touch disk).
     pub read_prompt: Arc<dyn Fn(&Team) -> String + Send + Sync>,
+    /// Reads a task's persisted revise bundle (revise-once feedback; ④c gate
+    /// revise + join revise-once). `None` = no bundle composed (fresh-run text).
+    pub revision_reader: Option<Arc<dyn RevisionBundleReader>>,
 }
 
 impl EngineContext {
@@ -118,6 +130,50 @@ impl EngineContext {
     pub fn is_terminal(&self, team: &Team) -> bool {
         team.outputs.on_approve.is_none()
     }
+}
+
+/// The kind of pipeline node a route target id resolves to (④c). An approved
+/// item's `on_approve` target may be another team (1→1, ④b), a **gate** (park in
+/// the gate store, await the human verdict), a **fork** (expand into lane
+/// work-items + a `FanOutGroup`), a **join** (settle a lane at the barrier), or
+/// an **escalation** (terminal needs-human sink). `None` = the id matches no
+/// node (a terminal `"done"`-style sink or an unknown target). The router stays
+/// pure: this only classifies a single-valued target — multiplicity lives in the
+/// pool/store fork/join operations (spec DDD note).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteTarget {
+    /// Boxed because `Team` is markedly larger than the other variants
+    /// (clippy::large_enum_variant) — keeps `RouteTarget` cheap to move.
+    Team(Box<Team>),
+    Gate(Gate),
+    Fork(Fork),
+    Join(Join),
+    Escalation(Escalation),
+    None,
+}
+
+/// Classify a route-target stage id against the pipeline's node sets (④c).
+/// Teams, gates, forks, joins, and escalations have disjoint id spaces; the
+/// first matching set wins. An id matching nothing (e.g. a literal `"done"`
+/// sink, or `None` on_approve already filtered upstream) is `RouteTarget::None`.
+/// PURE.
+pub fn resolve_target(pipeline: &Pipeline, stage_id: &str) -> RouteTarget {
+    if let Some(t) = pipeline.teams.iter().find(|t| t.id == stage_id) {
+        return RouteTarget::Team(Box::new(t.clone()));
+    }
+    if let Some(g) = pipeline.gates.iter().find(|g| g.id == stage_id) {
+        return RouteTarget::Gate(g.clone());
+    }
+    if let Some(f) = pipeline.forks.iter().find(|f| f.id == stage_id) {
+        return RouteTarget::Fork(f.clone());
+    }
+    if let Some(j) = pipeline.joins.iter().find(|j| j.id == stage_id) {
+        return RouteTarget::Join(j.clone());
+    }
+    if let Some(e) = pipeline.escalations.iter().find(|e| e.id == stage_id) {
+        return RouteTarget::Escalation(e.clone());
+    }
+    RouteTarget::None
 }
 
 use crate::task::{Task, TaskState, MAX_ATTEMPTS};
@@ -583,6 +639,7 @@ pub(crate) mod test_support {
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/008_nested_groups.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         pool
     }
@@ -615,6 +672,21 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A pipeline carrying gates/forks/joins in addition to teams (④c tests).
+    pub fn pipeline_full(
+        teams: Vec<Team>,
+        gates: Vec<pipeline::model::Gate>,
+        forks: Vec<pipeline::model::Fork>,
+        joins: Vec<pipeline::model::Join>,
+    ) -> Pipeline {
+        Pipeline {
+            id: "p".into(), name: "P".into(), description: String::new(), schema_version: 3,
+            defaults: None, teams, gates,
+            escalations: vec![pipeline::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
+            forks, joins,
+        }
+    }
+
     pub fn temp_root() -> PathBuf {
         let d = std::env::temp_dir().join(format!("abp-engine-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
@@ -633,13 +705,22 @@ pub(crate) mod test_support {
             stores: Arc::new(StoreRepo::new(pool.clone())),
             runs,
             ledger: Arc::new(GeneratorLedger::new(pool.clone())),
-            tasks: Arc::new(TaskStore::new(pool)),
+            tasks: Arc::new(TaskStore::new(pool.clone())),
+            fanout: Arc::new(FanOutStore::new(pool)),
             brake: Arc::new(Brake::new()),
             runner,
             project_root: temp_root(),
             target_repo: None,
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
+            revision_reader: None,
         }
+    }
+
+    /// Build a Gate node (id + downstream). Gates have no capacity field in the
+    /// model; the engine uses `DEFAULT_STORE_CAPACITY` unless a test ensures the
+    /// gate store with another capacity first.
+    pub fn gate(id: &str, downstream: &str) -> pipeline::model::Gate {
+        pipeline::model::Gate { id: id.into(), label: id.into(), downstream: downstream.into() }
     }
 }
 
@@ -675,6 +756,26 @@ mod tests {
             final_text: items.to_string(),
             usage: RunnerUsage::default(),
         }
+    }
+
+    // ---- Task 1: route-target resolution ----
+
+    #[test]
+    fn resolve_target_classifies_each_node_kind() {
+        use pipeline::model::{Fork, Join};
+        let p = pipeline_full(
+            vec![team("research", Some("spec"), Role::Producer, 8), team("spec", None, Role::Producer, 8)],
+            vec![gate("human-gate", "spec")],
+            vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
+            vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "spec".into(), cancel_on_reject: false, quorum: None }],
+        );
+        assert!(matches!(resolve_target(&p, "research"), RouteTarget::Team(t) if t.id == "research"));
+        assert!(matches!(resolve_target(&p, "human-gate"), RouteTarget::Gate(g) if g.id == "human-gate"));
+        assert!(matches!(resolve_target(&p, "fan"), RouteTarget::Fork(f) if f.id == "fan"));
+        assert!(matches!(resolve_target(&p, "rejoin"), RouteTarget::Join(j) if j.id == "rejoin"));
+        assert!(matches!(resolve_target(&p, "needs-human"), RouteTarget::Escalation(e) if e.id == "needs-human"));
+        assert_eq!(resolve_target(&p, "done"), RouteTarget::None);
+        assert_eq!(resolve_target(&p, "unknown-id"), RouteTarget::None);
     }
 
     // ---- Task 4: transformer (block-before-claim) ----
