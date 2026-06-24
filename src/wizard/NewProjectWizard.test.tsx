@@ -22,12 +22,15 @@ function draftWithTeam() {
 }
 
 // Open the wizard, fill basics, generate, and advance through to the review step.
-async function openToReview() {
+async function openToReview(targetRepo?: string) {
   kickoffMock.mockResolvedValueOnce(draftWithTeam());
   const onCreated = vi.fn();
   render(<NewProjectWizard open={true} onClose={() => {}} onCreated={onCreated} />);
   fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "Demo" } });
-  fireEvent.change(screen.getByLabelText(/root path/i), { target: { value: "/p" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "Root path" }), { target: { value: "/p" } });
+  if (targetRepo !== undefined) {
+    fireEvent.change(screen.getByRole("textbox", { name: /target repo/i }), { target: { value: targetRepo } });
+  }
   fireEvent.change(screen.getByLabelText(/describe/i), { target: { value: "a research flow" } });
   fireEvent.click(screen.getByRole("button", { name: /generate/i }));
   await screen.findByRole("heading", { name: /teams/i });
@@ -57,7 +60,7 @@ describe("NewProjectWizard", () => {
     kickoffMock.mockResolvedValueOnce(draft);
     render(<NewProjectWizard open={true} onClose={() => {}} onCreated={() => {}} />);
     fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "Demo" } });
-    fireEvent.change(screen.getByLabelText(/root path/i), { target: { value: "/p" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Root path" }), { target: { value: "/p" } });
     fireEvent.change(screen.getByLabelText(/describe/i), { target: { value: "a research flow" } });
     fireEvent.click(screen.getByRole("button", { name: /generate/i }));
     await waitFor(() => expect(kickoffMock).toHaveBeenCalled());
@@ -75,7 +78,7 @@ describe("NewProjectWizard", () => {
     seedTemplateMock.mockResolvedValueOnce(seeded);
     render(<NewProjectWizard open={true} onClose={() => {}} onCreated={() => {}} />);
     fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "Demo" } });
-    fireEvent.change(screen.getByLabelText(/root path/i), { target: { value: "/p" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Root path" }), { target: { value: "/p" } });
     // the picker button appears once templates load
     const btn = await screen.findByRole("button", { name: /DDD Spec/ });
     fireEvent.click(btn);
@@ -105,8 +108,16 @@ describe("NewProjectWizard", () => {
     createMock.mockResolvedValueOnce(created);
     const { onCreated } = await openToReview();
     fireEvent.click(screen.getByRole("button", { name: /create project/i }));
-    await waitFor(() => expect(createMock).toHaveBeenCalledWith("Demo", "/p", expect.objectContaining({ name: "Demo" })));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith("Demo", "/p", expect.objectContaining({ name: "Demo" }), null));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(created));
+  });
+
+  it("footer Create passes the typed Target repo through (A5)", async () => {
+    const created = { id: "proj-x", name: "Demo", root_path: "/p", target_repo: "~/repo", active_pipeline_id: "demo", created_at: 0, updated_at: 0 };
+    createMock.mockResolvedValueOnce(created);
+    await openToReview("~/repo");
+    fireEvent.click(screen.getByRole("button", { name: /create project/i }));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith("Demo", "/p", expect.objectContaining({ name: "Demo" }), "~/repo"));
   });
 
   it("footer Create surfaces the backend error when create fails (writes nothing)", async () => {

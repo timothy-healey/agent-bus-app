@@ -22,12 +22,13 @@ impl ProjectStore {
 
     pub async fn insert(&self, project: &Project) -> Result<(), ProjectStoreError> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root_path, active_pipeline_id, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, root_path, target_repo, active_pipeline_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&project.id.0)
         .bind(&project.name)
         .bind(project.root_path.to_string_lossy().to_string())
+        .bind(project.target_repo.as_ref())
         .bind(project.active_pipeline_id.as_ref().map(|p| &p.0))
         .bind(project.created_at)
         .bind(project.updated_at)
@@ -37,17 +38,18 @@ impl ProjectStore {
     }
 
     pub async fn list(&self) -> Result<Vec<Project>, ProjectStoreError> {
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64, i64)>(
-            "SELECT id, name, root_path, active_pipeline_id, created_at, updated_at
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64)>(
+            "SELECT id, name, root_path, target_repo, active_pipeline_id, created_at, updated_at
              FROM projects ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|(id, name, root_path, active, created, updated)| Project {
+        Ok(rows.into_iter().map(|(id, name, root_path, target_repo, active, created, updated)| Project {
             id: ProjectId(id),
             name,
             root_path: root_path.into(),
+            target_repo,
             active_pipeline_id: active.map(PipelineId),
             created_at: created,
             updated_at: updated,
@@ -55,8 +57,8 @@ impl ProjectStore {
     }
 
     pub async fn get(&self, id: &ProjectId) -> Result<Project, ProjectStoreError> {
-        let row = sqlx::query_as::<_, (String, String, String, Option<String>, i64, i64)>(
-            "SELECT id, name, root_path, active_pipeline_id, created_at, updated_at
+        let row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64)>(
+            "SELECT id, name, root_path, target_repo, active_pipeline_id, created_at, updated_at
              FROM projects WHERE id = ?",
         )
         .bind(&id.0)
@@ -64,10 +66,11 @@ impl ProjectStore {
         .await?;
 
         match row {
-            Some((id, name, root_path, active, created, updated)) => Ok(Project {
+            Some((id, name, root_path, target_repo, active, created, updated)) => Ok(Project {
                 id: ProjectId(id),
                 name,
                 root_path: root_path.into(),
+                target_repo,
                 active_pipeline_id: active.map(PipelineId),
                 created_at: created,
                 updated_at: updated,
@@ -91,6 +94,28 @@ impl ProjectStore {
         .execute(&self.pool)
         .await?;
 
+        if result.rows_affected() == 0 {
+            return Err(ProjectStoreError::NotFound(id.clone()));
+        }
+        Ok(())
+    }
+
+    /// Set (or clear) a project's target repo (A5). `None` clears it. Returns
+    /// NotFound when the id does not exist.
+    pub async fn set_target_repo(
+        &self,
+        id: &ProjectId,
+        target_repo: Option<&str>,
+        now_unix: i64,
+    ) -> Result<(), ProjectStoreError> {
+        let result = sqlx::query(
+            "UPDATE projects SET target_repo = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(target_repo)
+        .bind(now_unix)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
             return Err(ProjectStoreError::NotFound(id.clone()));
         }
@@ -123,6 +148,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(include_str!("../../app/migrations/001_initial.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(include_str!("../../app/migrations/010_project_target_repo.sql"))
             .execute(&pool)
             .await
             .unwrap();
@@ -186,6 +215,26 @@ mod tests {
             Some(PipelineId("ddd-spec-plan-impl".into()))
         );
         assert_eq!(reloaded.updated_at, 200);
+    }
+
+    #[tokio::test]
+    async fn set_target_repo_updates_the_column() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
+        store.insert(&p).await.unwrap();
+        store.set_target_repo(&p.id, Some("/repo"), 200).await.unwrap();
+        let reloaded = store.get(&p.id).await.unwrap();
+        assert_eq!(reloaded.target_repo, Some("/repo".to_string()));
+        assert_eq!(reloaded.updated_at, 200);
+    }
+
+    #[tokio::test]
+    async fn set_target_repo_on_missing_project_is_not_found() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let result = store.set_target_repo(&ProjectId("nope".into()), Some("/r"), 1).await;
+        assert!(matches!(result, Err(ProjectStoreError::NotFound(_))));
     }
 
     #[tokio::test]

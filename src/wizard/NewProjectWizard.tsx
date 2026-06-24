@@ -9,6 +9,7 @@ import { PromptsStep } from "./PromptsStep";
 import { WiringStep } from "./WiringStep";
 import { ReviewStep } from "./ReviewStep";
 import { Button } from "../components/ui/Button";
+import { FolderPickerField } from "../components/FolderPickerField";
 import { useModalA11y } from "../hooks/useModalA11y";
 
 interface NewProjectWizardProps {
@@ -30,6 +31,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
   const [step, setStep] = useState<WizardStep>("basics");
   const [name, setName] = useState("");
   const [root, setRoot] = useState("");
+  const [targetRepo, setTargetRepo] = useState("");
   const [description, setDescription] = useState("");
   const [draft, setDraft] = useState<DraftPipeline>(emptyDraft());
   const [busy, setBusy] = useState(false);
@@ -96,7 +98,7 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
     setBusy(true);
     setError(null);
     try {
-      const project = await createProjectFromDraft(name, root, { ...draft, name, description });
+      const project = await createProjectFromDraft(name, root, { ...draft, name, description }, targetRepo.trim() || null);
       onCreated(project as Project);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -125,7 +127,8 @@ export function NewProjectWizard({ open, onClose, onCreated }: NewProjectWizardP
         {step === "basics" && (
           <div>
             <label style={lbl}>Project name<input aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} style={inp} /></label>
-            <label style={lbl}>Root path<input aria-label="Root path" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="~/projects/example" style={inp} /></label>
+            <div style={lbl}><FolderPickerField label="Root path" value={root} onChange={setRoot} placeholder="~/projects/example" /></div>
+            <div style={lbl}><FolderPickerField label="Target repo (optional)" value={targetRepo} onChange={setTargetRepo} placeholder="~/projects/your-repo" /></div>
             <label style={lbl}>Describe what you're building<textarea aria-label="Describe what you're building" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} style={inp} /></label>
             <Button variant="primary" onClick={generate} disabled={busy || !name.trim() || !root.trim() || !description.trim()}>
               {busy ? "Generating…" : "Generate"}

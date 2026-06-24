@@ -66,6 +66,11 @@ pub struct PoolContext {
     pub fanout: Arc<FanOutStore>,
     pub brake: Arc<Brake>,
     pub project_root: PathBuf,
+    /// Project-level `${target_repo}` default (A5). A task's own `target_repo`
+    /// overrides it; this is the fallback so `${target_repo}` resolves even when
+    /// a task didn't carry one. Already tilde-expanded (Workspace). The pool
+    /// consumes a resolved path — it never sees the Project type.
+    pub project_target_repo: Option<PathBuf>,
     /// Reads the team's prompt file content. Injected so tests don't touch disk
     /// for prompts. Production passes a closure that reads <root>/<team.prompt>.
     pub read_prompt: Arc<dyn Fn(&Team) -> String + Send + Sync>,
@@ -96,6 +101,20 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+/// Resolve the effective `${target_repo}` for a task: the task's own value
+/// overrides the project-level default (A5). The SINGLE precedence fn — both the
+/// worker PathVars build (above) and `inject_topic_inner`'s stored-task default
+/// call it, so the rule lives in one place (vet F2). Pure.
+pub fn effective_target_repo(
+    task_target: Option<&str>,
+    project_default: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    task_target
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| project_default.map(|p| p.to_path_buf()))
+}
+
 /// Run at most one claim→settle→route iteration for a team stage.
 pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOutcome, PoolError> {
     if ctx.brake.is_on() {
@@ -120,9 +139,14 @@ pub async fn process_one_claim(ctx: &PoolContext, team: &Team) -> Result<ClaimOu
         None => None,
     };
 
-    // 2. PREPARE scope
+    // 2. PREPARE scope. `${target_repo}` binds to the task's own value, else the
+    // project-level default (A5) — task overrides project, the same precedence
+    // `inject_topic_inner` applies to the stored task field.
     let mut vars = PathVars::new(&ctx.project_root).with_task_id(&task.id.0);
-    if let Some(repo) = &task.target_repo {
+    if let Some(repo) = effective_target_repo(
+        task.target_repo.as_deref(),
+        ctx.project_target_repo.as_deref(),
+    ) {
         vars = vars.with_target_repo(repo);
     }
     let scope_settings = prepare(&ctx.project_root, &team.id, &task.id.0, now, &team.scope, &vars)?;
@@ -604,6 +628,28 @@ mod tests {
             forks: vec![], joins: vec![] }
     }
 
+    #[test]
+    fn task_target_repo_overrides_project_default() {
+        use std::path::Path;
+        // task value wins
+        assert_eq!(
+            super::effective_target_repo(Some("/task-repo"), Some(Path::new("/proj-repo"))),
+            Some(PathBuf::from("/task-repo"))
+        );
+        // no task value → project default
+        assert_eq!(
+            super::effective_target_repo(None, Some(Path::new("/proj-repo"))),
+            Some(PathBuf::from("/proj-repo"))
+        );
+        // blank task value → project default (not an empty repo)
+        assert_eq!(
+            super::effective_target_repo(Some("  "), Some(Path::new("/proj-repo"))),
+            Some(PathBuf::from("/proj-repo"))
+        );
+        // neither → None
+        assert_eq!(super::effective_target_repo(None, None), None);
+    }
+
     fn ctx_with(pool: SqlitePool, pipeline: Pipeline, runner: Arc<dyn Runner>, root: PathBuf) -> PoolContext {
         PoolContext {
             pipeline: Arc::new(pipeline),
@@ -612,6 +658,7 @@ mod tests {
             fanout: Arc::new(FanOutStore::new(pool)),
             brake: Arc::new(Brake::new()),
             project_root: root,
+            project_target_repo: None,
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
             usage_sink: None,
             revision_reader: None,
