@@ -44,7 +44,7 @@ fn full_team() -> Team {
             on_revise: Some("research".into()),
             on_reject: Some("needs-human".into()),
         },
-        workers: Workers { default: 1, max: 3 },
+        workers: Workers { min: 1, max: 3 },
         role: Role::default(),
     }
 }
@@ -82,7 +82,7 @@ fn pipeline_key_set_matches_ts() {
 #[test]
 fn team_key_set_matches_ts() {
     let v = serde_json::to_value(full_team()).unwrap();
-    assert_eq!(keys(&v), set(&["id", "name", "prompt", "runner", "scope", "outputs", "workers"]));
+    assert_eq!(keys(&v), set(&["id", "name", "prompt", "runner", "scope", "outputs", "workers", "role"]));
 }
 
 /// Locks `src/ipc/pipeline.ts:12-17` `interface RunnerConfig`:
@@ -139,11 +139,11 @@ fn routes_omits_none_edges() {
     assert!(v.as_object().unwrap().is_empty());
 }
 
-/// Locks `src/ipc/pipeline.ts:31-34` `interface Workers { default; max }`.
+/// Locks `src/ipc/pipeline.ts:31-34` `interface Workers { min; max }`.
 #[test]
 fn workers_key_set_matches_ts() {
-    let v = serde_json::to_value(Workers { default: 1, max: 4 }).unwrap();
-    assert_eq!(keys(&v), set(&["default", "max"]));
+    let v = serde_json::to_value(Workers { min: 1, max: 4 }).unwrap();
+    assert_eq!(keys(&v), set(&["min", "max"]));
 }
 
 /// Locks `src/ipc/pipeline.ts:46-50` `interface Gate { id; label; downstream }`.

@@ -45,7 +45,7 @@ export interface Routes {
 }
 
 export interface Workers {
-  default: number;
+  min: number;
   max: number;
 }
 
@@ -60,6 +60,7 @@ export interface Team {
   scope: Scope;
   outputs: Routes;
   workers: Workers;
+  role: "producer" | "reviewer";
 }
 
 export interface Gate {
