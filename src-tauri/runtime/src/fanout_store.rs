@@ -56,6 +56,29 @@ impl FanOutStore {
         Self { pool }
     }
 
+    /// Whether `run_id` has any OPEN (incomplete) fan-out group — a fork that
+    /// has been expanded but whose join barrier has not yet fired (④c run
+    /// completion). `fanout_groups` carries no `run_id`; a group is scoped to a
+    /// run via the lane tasks it spawned (`tasks.group_id` + `tasks.run_id`). So
+    /// a group is "this run's" iff some task of this run references it. Additive
+    /// read-only query — the completes-once guard + aggregation rules are
+    /// untouched.
+    pub async fn has_open_group(&self, run_id: &str) -> Result<bool, FanOutStoreError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM fanout_groups g
+             WHERE g.completed = 0
+               AND EXISTS (
+                 SELECT 1 FROM tasks t
+                 WHERE t.group_id = g.id AND t.run_id = ?
+               )
+             LIMIT 1",
+        )
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// Persist a new fan-out group (one row per fork expansion).
     pub async fn create(&self, g: &FanOutGroup) -> Result<(), FanOutStoreError> {
         sqlx::query(

@@ -212,8 +212,28 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     // 2. Determine the downstream store + RESERVE a slot there (block-before-claim).
     //    A terminal team (no on_approve) has no downstream store: items simply
     //    leave the pipeline; no reservation is needed.
+    //
+    //    Node-kind awareness (④c): the on_approve target may be a TEAM (the ④b
+    //    1→1 case) or a GATE (a bounded store whose consumer is the human — the
+    //    item is parked there in state `gated`). For a gate target we ensure the
+    //    gate's store (it is not a team, so nothing else ensures it) with the
+    //    default capacity before reserving — capacity = the human-backlog bound.
+    //    Forks/joins/escalations are NOT a transformer's on_approve target in the
+    //    assembly-line model (a fork is reached via a dedicated fork step; a join
+    //    via a lane's terminal approve) — they fall through to the generic store
+    //    path here, harmless if a store was ensured.
     let downstream = ctx.downstream_stage(team);
+    let downstream_is_gate = downstream
+        .as_deref()
+        .map(|ds| matches!(resolve_target(&ctx.pipeline, ds), RouteTarget::Gate(_)))
+        .unwrap_or(false);
     if let Some(ds) = &downstream {
+        if downstream_is_gate {
+            // The gate store is not a team store; ensure it before reserving.
+            ctx.stores
+                .ensure(&ctx.run_id, ds, pipeline::model::DEFAULT_STORE_CAPACITY)
+                .await?;
+        }
         let reserved = ctx.stores.reserve(&ctx.run_id, ds).await?;
         if !reserved {
             // Full → backpressure. No claim, no run.
@@ -274,7 +294,7 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     if let Some(ds) = &downstream {
         // The slot is already reserved (step 2); committing = inserting the child
         // work-item linked to that store (occupancy already reflects the reserve).
-        let child = Task::work_item(
+        let mut child = Task::work_item(
             task.project_id.clone(),
             task.pipeline.clone(),
             ctx.run_id.clone(),
@@ -284,6 +304,12 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
             task.target_repo.clone(),
             now_unix(),
         );
+        if downstream_is_gate {
+            // A gated item waits in the gate store for the human verdict — the
+            // human is the consumer (Gates-as-stores). It is NOT queued for a
+            // worker; `apply_gate_verdict` later moves it on/back/out.
+            child.state = TaskState::Gated;
+        }
         ctx.tasks.insert(&child).await?;
     }
 
@@ -497,16 +523,32 @@ pub async fn try_finish_run(ctx: &EngineContext, run_id: &str) -> Result<bool, E
     if !ctx.runs.get(run_id).await?.generator_dry {
         return Ok(false);
     }
-    // 2. Every stage store must be empty. The stage stores are the pipeline
-    //    teams' input stores.
+    // 2. Every stage store must be empty — both the teams' input stores AND the
+    //    gate stores (Gates-as-stores: a gated item occupies a gate slot, so a
+    //    non-empty gate store means the run is not done; ④c).
     for team in &ctx.pipeline.teams {
         if ctx.stores.occupancy(run_id, &team.id).await?.unwrap_or(0) > 0 {
             return Ok(false);
         }
     }
-    // 3. No running work-item belongs to this run.
+    for gate in &ctx.pipeline.gates {
+        if ctx.stores.occupancy(run_id, &gate.id).await?.unwrap_or(0) > 0 {
+            return Ok(false);
+        }
+    }
+    // 3. No open FanOutGroup (a fork awaiting its join barrier) belongs to this
+    //    run — its lanes are still in flight (④c).
+    if ctx.fanout.has_open_group(run_id).await? {
+        return Ok(false);
+    }
+    // 4. No running or gated work-item belongs to this run. A gated item is
+    //    waiting on the human; the run is not complete while one exists.
     let running = ctx.tasks.list_by_state(TaskState::Running).await?;
     if running.iter().any(|t| t.run_id.as_deref() == Some(run_id)) {
+        return Ok(false);
+    }
+    let gated = ctx.tasks.list_by_state(TaskState::Gated).await?;
+    if gated.iter().any(|t| t.run_id.as_deref() == Some(run_id)) {
         return Ok(false);
     }
     // Precondition holds → complete exactly once.
@@ -776,6 +818,83 @@ mod tests {
         assert!(matches!(resolve_target(&p, "needs-human"), RouteTarget::Escalation(e) if e.id == "needs-human"));
         assert_eq!(resolve_target(&p, "done"), RouteTarget::None);
         assert_eq!(resolve_target(&p, "unknown-id"), RouteTarget::None);
+    }
+
+    // ---- Task 2: gate-as-store routing ----
+
+    #[tokio::test]
+    async fn transform_to_a_gate_parks_the_item_gated_in_the_gate_store() {
+        // research --on_approve--> human-gate (a gate, downstream spec).
+        let p = pipeline_full(
+            vec![team("research", Some("human-gate"), Role::Producer, 8), team("spec", None, Role::Producer, 8)],
+            vec![gate("human-gate", "spec")],
+            vec![], vec![],
+        );
+        let out = items_out("KEY: alpha\nARTIFACT: artifacts/research/alpha.md");
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        // gate store NOT pre-ensured — transform_once must ensure it.
+
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        let outcome = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(matches!(outcome, StepOutcome::Advanced { downstream, .. } if downstream == "human-gate"));
+        // research input slot freed; the gate store now holds one gated item
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "research").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(1));
+        // the parked item is in state Gated at the gate stage (NOT queued)
+        let gated = ctx.tasks.list_by_state(TaskState::Gated).await.unwrap();
+        assert_eq!(gated.len(), 1);
+        assert_eq!(gated[0].current_stage, "human-gate");
+        assert_eq!(gated[0].item_key.as_deref(), Some("alpha"));
+        assert_eq!(ctx.tasks.list_by_state(TaskState::Queued).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_full_gate_store_backpressures_the_upstream() {
+        let p = pipeline_full(
+            vec![team("research", Some("human-gate"), Role::Producer, 8), team("spec", None, Role::Producer, 8)],
+            vec![gate("human-gate", "spec")],
+            vec![], vec![],
+        );
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: x")));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        // gate store ensured at capacity 1 and already full
+        ctx.stores.ensure(&ctx.run_id, "human-gate", 1).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "human-gate").await.unwrap();
+
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "y".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        let outcome = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert_eq!(outcome, StepOutcome::Backpressure);
+        // no claim, no run
+        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Queued);
+        assert!(recorder.received.lock().unwrap().is_empty());
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn try_finish_does_not_complete_while_a_gated_item_exists() {
+        let p = pipeline_full(
+            vec![team("research", Some("human-gate"), Role::Producer, 8)],
+            vec![gate("human-gate", "spec")],
+            vec![], vec![],
+        );
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        ctx.runs.set_generator_dry(&ctx.run_id).await.unwrap();
+        // a gated item occupying the gate store
+        ctx.stores.ensure(&ctx.run_id, "human-gate", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "human-gate").await.unwrap();
+        let mut gated = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "g".into(), "human-gate".into(), None, None, 100);
+        gated.state = TaskState::Gated;
+        ctx.tasks.insert(&gated).await.unwrap();
+        // dry, but the gate store is non-empty AND a gated item exists
+        assert!(!try_finish_run(&ctx, &ctx.run_id).await.unwrap());
     }
 
     // ---- Task 4: transformer (block-before-claim) ----
