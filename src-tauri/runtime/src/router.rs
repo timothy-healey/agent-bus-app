@@ -1,6 +1,13 @@
 //! Pipeline router — the pure transition function. Reads the Pipeline model
 //! (Authoring<->Runtime shared kernel) to decide where a settled task goes.
 //! No I/O: the worker loop calls this then persists the result.
+//!
+//! DEAD: superseded by engine.rs (cleanup item). The bounded-buffer engine (④b/④c)
+//! routes via `engine::resolve_target` + the Store aggregate; the single-task
+//! linear flow this `route()` drove is retired at the ④d cutover. Kept
+//! compiled-but-unwired (it still backs `pool.rs`'s likewise-dead single-task
+//! fns) because deleting it cascades through `pool.rs` beyond this plan's risk
+//! budget. NOTHING in production calls `route()` — see the ④d cleanup list.
 
 use crate::task::{TaskState, MAX_ATTEMPTS};
 use agent_bus_core::Verdict;

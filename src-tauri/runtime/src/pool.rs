@@ -2,6 +2,19 @@
 //! core (process_one_claim) is fully unit-tested with FakeRunner + an in-memory
 //! pool, with zero subprocesses. The continuous tokio loop (started at the
 //! composition root) just calls process_one_claim repeatedly per team.
+//!
+//! DEAD: the single-task production flow here (`process_one_claim`,
+//! `settle_and_route`, `expand_fork`, `resolve_barrier`, `finish_group`,
+//! `settle_parent_lane`, `spawn_continuation`) is superseded by engine.rs
+//! (cleanup item). At the ④d cutover the activator stopped calling
+//! `process_one_claim`; the live runtime now drives the bounded-buffer engine
+//! (`engine::generate_once`/`transform_once`/`fork_once`/`apply_gate_verdict`/
+//! `resolve_join_barrier`). These fns + their tests are kept compiled-but-unwired
+//! because deleting them (and `router.rs`, which they depend on) cascades beyond
+//! this plan's risk budget. STILL LIVE from this module: `LogSinkFactory` (the
+//! per-task live-log sink type, consumed by the composition root) and
+//! `effective_target_repo` (the `${target_repo}` precedence rule). See the ④d
+//! cleanup list to excise the dead single-task flow + `router.rs` in a follow-up.
 
 use crate::brake::Brake;
 use crate::fanout_group::{Continuation, FanOutGroup};
