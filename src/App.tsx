@@ -12,7 +12,7 @@ import { ListView } from "./components/ListView";
 import { SettingsView } from "./components/SettingsView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
-import { readArtifact, removeProject, workspaceSetTargetRepo, listWorktrees, removeWorktree, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
+import { activateProject, readArtifact, removeProject, workspaceSetTargetRepo, listWorktrees, removeWorktree, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
 import { setRunnerApiKey, clearRunnerApiKey, getRunnerApiKeyStatus, ANTHROPIC_API_KEY_ID } from "./ipc/secrets";
 import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
@@ -162,9 +162,12 @@ export default function App() {
   }
 
   const onCreated = useCallback(
-    (_p: Project) => {
+    (p: Project) => {
       setWizardOpen(false);
-      reload();
+      // Trigger RUNTIME activation for the new project so `/inject` targets it
+      // (runtime re-activation fix — activation is no longer boot-only). Reload
+      // the project list regardless of the activation result.
+      void activateProject(p.id).finally(() => reload());
     },
     [reload],
   );
