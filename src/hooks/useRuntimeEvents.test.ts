@@ -20,7 +20,7 @@ describe("useRuntimeEvents", () => {
     renderHook(() => useRuntimeEvents({ onTaskChanged }));
     // let the async listen() resolve
     await act(async () => { await Promise.resolve(); });
-    act(() => listeners["task.changed"]?.({ payload: "T-42" }));
+    act(() => listeners["task-changed"]?.({ payload: "T-42" }));
     expect(onTaskChanged).toHaveBeenCalledWith("T-42");
   });
 });

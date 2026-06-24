@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { EVENTS } from "./events";
 
 export type TaskState =
   | "queued"
@@ -77,5 +78,5 @@ export interface TaskLog {
 
 /// Subscribe to backend display-only worker log fragments (R4).
 export async function onTaskLog(cb: (log: TaskLog) => void): Promise<UnlistenFn> {
-  return await listen<TaskLog>("task.log", (e) => cb(e.payload));
+  return await listen<TaskLog>(EVENTS.taskLog, (e) => cb(e.payload));
 }

@@ -209,15 +209,15 @@ impl PipelineActivator {
                 }
                 match process_one_claim(&ctx, &team).await {
                     Ok(ClaimOutcome::Settled { task_id, .. }) => {
-                        let _ = handle.emit("task.changed", task_id);
+                        let _ = handle.emit(crate::events::TASK_CHANGED, task_id);
                         // A settle recorded worker usage; tell the meter to refresh.
-                        let _ = handle.emit("usage.changed", ());
+                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
                     }
                     Ok(ClaimOutcome::RateLimited { .. }) => {
                         // Reactive brake (spec) — reason surfaces on the meter.
                         ctx.brake.set_on("rate-limit");
-                        let _ = handle.emit("task.changed", "rate-limited");
-                        let _ = handle.emit("usage.changed", ());
+                        let _ = handle.emit(crate::events::TASK_CHANGED, "rate-limited");
+                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
                     }
                     _ => {}
                 }

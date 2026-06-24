@@ -1,3 +1,4 @@
+mod events;
 mod pipeline_activator;
 
 use std::sync::Arc;
@@ -135,7 +136,7 @@ fn make_conversation_delta_sink(handle: tauri::AppHandle) -> ConversationDeltaEm
         b.text.push_str(frag);
         let due = b.last.elapsed() >= Duration::from_millis(50) || b.text.len() >= 80;
         if due {
-            let _ = sink_handle.emit("conversation.delta", serde_json::json!({ "text": b.text, "reset": false }));
+            let _ = sink_handle.emit(crate::events::CONVERSATION_DELTA, serde_json::json!({ "text": b.text, "reset": false }));
             b.text.clear();
             b.last = Instant::now();
         }
@@ -144,10 +145,10 @@ fn make_conversation_delta_sink(handle: tauri::AppHandle) -> ConversationDeltaEm
     let reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
         let mut b = state.lock().unwrap();
         if !b.text.is_empty() {
-            let _ = handle.emit("conversation.delta", serde_json::json!({ "text": b.text, "reset": false }));
+            let _ = handle.emit(crate::events::CONVERSATION_DELTA, serde_json::json!({ "text": b.text, "reset": false }));
             b.text.clear();
         }
-        let _ = handle.emit("conversation.delta", serde_json::json!({ "text": "", "reset": true }));
+        let _ = handle.emit(crate::events::CONVERSATION_DELTA, serde_json::json!({ "text": "", "reset": true }));
         b.last = Instant::now();
     });
 
@@ -207,7 +208,7 @@ fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::pool::LogSinkFac
             b.push(frag);
             b.flush_if_due(&mut |tid: &str, delta: &str| {
                 let _ = handle.emit(
-                    "task.log",
+                    crate::events::TASK_LOG,
                     serde_json::json!({ "task_id": tid, "delta": delta }),
                 );
             });
@@ -749,7 +750,7 @@ impl ToolDispatcher for RootDispatcher {
                 match runtime::api::inject_topic_inner(
                     &self.runtime, str_arg("topic").unwrap_or_default(), str_arg("target_repo"),
                 ).await {
-                    Ok(task) => { let _ = self.app.emit("task.changed", &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
+                    Ok(task) => { let _ = self.app.emit(crate::events::TASK_CHANGED, &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
                     Err(e) => err(e),
                 }
             }
@@ -761,12 +762,12 @@ impl ToolDispatcher for RootDispatcher {
                     _ => agent_bus_core::Verdict::Revise,
                 };
                 match runtime::api::apply_gate_verdict_inner(&self.runtime, &task_id, verdict).await {
-                    Ok(task) => { let _ = self.app.emit("task.changed", &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
+                    Ok(task) => { let _ = self.app.emit(crate::events::TASK_CHANGED, &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
                     Err(e) => err(e),
                 }
             }
-            "brake_on" => { let s = self.runtime.brake.clone(); s.set_on(str_arg("reason").unwrap_or_else(|| "manual".into())); let _ = self.app.emit("usage.changed", ()); ok(serde_json::to_value(s.state()).unwrap()) }
-            "brake_off" => { self.runtime.brake.set_off(); let _ = self.app.emit("usage.changed", ()); ok(serde_json::to_value(self.runtime.brake.state()).unwrap()) }
+            "brake_on" => { let s = self.runtime.brake.clone(); s.set_on(str_arg("reason").unwrap_or_else(|| "manual".into())); let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::to_value(s.state()).unwrap()) }
+            "brake_off" => { self.runtime.brake.set_off(); let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::to_value(self.runtime.brake.state()).unwrap()) }
             "scale_team" => {
                 match runtime::api::scale_team_inner(&self.runtime, str_arg("team_id").unwrap_or_default()) {
                     Ok(maxn) => ok(serde_json::json!({ "max": maxn })),
@@ -784,7 +785,7 @@ impl ToolDispatcher for RootDispatcher {
             "usage_set_auto_meter" => {
                 let enabled = a.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
                 match usage_telemetry::api::set_auto_meter_inner(&self.usage.pool, enabled).await {
-                    Ok(()) => { let _ = self.app.emit("usage.changed", ()); ok(serde_json::json!({ "auto_meter_enabled": enabled })) }
+                    Ok(()) => { let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::json!({ "auto_meter_enabled": enabled })) }
                     Err(e) => err(e),
                 }
             }
@@ -1118,8 +1119,8 @@ pub fn run() {
                             let now = now_unix();
                             if let Ok(snap) = compute_snapshot(&cc, &worker, &cfg, brake.is_on(), now).await {
                                 match auto_brake_decision(&snap, &cfg, auto_on) {
-                                    BrakeDecision::SetOn(reason) => { brake.set_on(reason); let _ = handle.emit("usage.changed", ()); }
-                                    BrakeDecision::Release => { brake.set_off(); let _ = handle.emit("usage.changed", ()); }
+                                    BrakeDecision::SetOn(reason) => { brake.set_on(reason); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
+                                    BrakeDecision::Release => { brake.set_off(); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
                                     BrakeDecision::NoChange => {}
                                 }
                             }
