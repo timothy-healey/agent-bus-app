@@ -46,6 +46,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (8, include_str!("../migrations/008_nested_groups.sql")),
         (9, include_str!("../migrations/009_git_config.sql")),
         (10, include_str!("../migrations/010_project_target_repo.sql")),
+        (11, include_str!("../migrations/011_skill_sources.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -682,6 +683,120 @@ pub async fn pipeline_to_draft_inner(
     Ok(DraftPipeline::from_pipeline(pipeline, &bodies))
 }
 
+/// State holding the skill catalog seam (A4). Real impl = FsSkillScanner; tests
+/// inject a FakeSkillCatalog. The composition root is the ONLY place that knows
+/// both the Project type and the skills crate — it resolves a project's
+/// `skill_sources` to plain `ClaudeRoot`s; the skills crate never learns Project.
+pub struct SkillCatalogState {
+    pub catalog: Arc<dyn skills::SkillCatalog>,
+}
+
+/// Resolve a project's skill roots: the always-on global `~/.claude` first, then
+/// each configured project source (treated as a `.claude` root). Pure (home +
+/// sources injected) so it is unit-testable. Skips an empty home for the global
+/// root (no silent scan of a wrong dir).
+pub fn resolve_skill_roots(home: &str, sources: &[String]) -> Vec<skills::ClaudeRoot> {
+    let mut roots = Vec::new();
+    if !home.is_empty() {
+        roots.push(skills::ClaudeRoot {
+            path: std::path::PathBuf::from(home).join(".claude"),
+            source: skills::SkillSource::Global,
+        });
+    }
+    for s in sources {
+        roots.push(skills::ClaudeRoot {
+            path: std::path::PathBuf::from(s),
+            source: skills::SkillSource::Project,
+        });
+    }
+    roots
+}
+
+/// Inner logic (testable without Tauri State): scan each root via the catalog,
+/// tag by source, and merge with project-wins precedence. The catalog's `list`
+/// is called per-root so each root's entries can be tagged + merged correctly.
+pub fn list_skills_inner(
+    catalog: &dyn skills::SkillCatalog,
+    roots: &[skills::ClaudeRoot],
+) -> Vec<skills::SkillEntry> {
+    let per_root: Vec<(skills::SkillSource, Vec<skills::SkillEntry>)> = roots
+        .iter()
+        .map(|r| (r.source, catalog.list(std::slice::from_ref(r))))
+        .collect();
+    skills::merge_with_precedence(per_root)
+}
+
+/// OHS command (A4): list the skills + slash commands available to the project's
+/// worker, for authoring-time autocomplete. Resolves roots = global `~/.claude`
+/// + the project's configured `skill_sources`, scans, merges (project wins).
+#[tauri::command(rename_all = "snake_case")]
+async fn list_skills(
+    ws: tauri::State<'_, WorkspaceState>,
+    catalog: tauri::State<'_, SkillCatalogState>,
+    project_id: String,
+) -> Result<Vec<skills::SkillEntry>, String> {
+    use agent_bus_core::ProjectId;
+    let project = ws
+        .store
+        .get(&ProjectId(project_id))
+        .await
+        .map_err(|e| e.to_string())?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let roots = resolve_skill_roots(&home, &project.skill_sources);
+    Ok(list_skills_inner(catalog.catalog.as_ref(), &roots))
+}
+
+#[cfg(test)]
+mod list_skills_tests {
+    use super::{list_skills_inner, resolve_skill_roots};
+    use skills::{FakeSkillCatalog, SkillEntry, SkillKind, SkillSource};
+
+    fn entry(name: &str, ns: Option<&str>) -> SkillEntry {
+        SkillEntry {
+            name: name.into(),
+            kind: SkillKind::Skill,
+            namespace: ns.map(|s| s.into()),
+            description: String::new(),
+            verbs: vec![],
+            source: SkillSource::Global,
+            qualified: false,
+        }
+    }
+
+    #[test]
+    fn resolve_roots_puts_global_first_then_project_sources() {
+        let roots = resolve_skill_roots("/home/tim", &["/proj/.claude".to_string()]);
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].source, SkillSource::Global);
+        assert_eq!(roots[0].path, std::path::PathBuf::from("/home/tim/.claude"));
+        assert_eq!(roots[1].source, SkillSource::Project);
+        assert_eq!(roots[1].path, std::path::PathBuf::from("/proj/.claude"));
+    }
+
+    #[test]
+    fn resolve_roots_skips_global_when_home_empty() {
+        let roots = resolve_skill_roots("", &["/proj/.claude".to_string()]);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].source, SkillSource::Project);
+    }
+
+    #[test]
+    fn list_skills_inner_tags_by_source_and_applies_precedence() {
+        // The Fake returns the same canned entry for every root; per-root scan +
+        // merge stamps the right source and resolves the cross-source collision.
+        let fake = FakeSkillCatalog::new(vec![entry("dup", Some("plug"))]);
+        let roots = resolve_skill_roots("/home/tim", &["/proj/.claude".to_string()]);
+        let merged = list_skills_inner(&fake, &roots);
+        // Two "dup" entries: one global (qualified loser), one project (bare winner).
+        let project = merged.iter().find(|e| e.source == SkillSource::Project).unwrap();
+        let global = merged.iter().find(|e| e.source == SkillSource::Global).unwrap();
+        assert!(!project.qualified, "project wins the bare name");
+        assert!(global.qualified, "global loser offered qualified");
+    }
+}
+
 /// OHS: load the project's pipeline (resolved) into an editable DraftPipeline,
 /// reading each team's prompt body back from disk. Seeds the in-app editor (A1).
 #[tauri::command(rename_all = "snake_case")]
@@ -893,6 +1008,12 @@ pub fn run() {
             sql: include_str!("../migrations/010_project_target_repo.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 11,
+            description: "project skill sources — projects.skill_sources JSON column (A4)",
+            sql: include_str!("../migrations/011_skill_sources.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -945,6 +1066,14 @@ pub fn run() {
                 let keychain: Arc<dyn secrets::KeychainStore> =
                     Arc::new(secrets::FakeKeychain::new());
                 handle.manage(secrets::api::KeychainState { store: keychain.clone() });
+
+                // Skill catalog (A4): the real filesystem scanner behind the
+                // SkillCatalog seam. list_skills resolves a project's sources to
+                // roots at this composition root (the skills crate never learns
+                // Project).
+                handle.manage(SkillCatalogState {
+                    catalog: Arc::new(skills::FsSkillScanner::new()),
+                });
 
                 // Git author config (S1).
                 handle.manage(workspace::git_config::GitConfigState { pool: pool.clone() });
@@ -1008,6 +1137,7 @@ pub fn run() {
                 specs.extend(runners::api::tools());
                 specs.extend(workspace::api::tools());
                 specs.extend(secrets::api::tools());
+                specs.extend(skills::tools());
                 specs.extend(conversational_control::api::tools());
                 let catalog = Arc::new(ToolCatalog::new(specs));
                 debug_assert!(catalog.duplicate_names().is_empty(), "tool name collision in catalog");
@@ -1136,7 +1266,9 @@ pub fn run() {
             workspace::api::workspace_get_project,
             workspace::api::workspace_set_active_pipeline,
             workspace::api::workspace_set_target_repo,
+            workspace::api::workspace_set_skill_sources,
             workspace::api::workspace_remove_project,
+            list_skills,
             workspace::worktree::list_worktrees,
             workspace::worktree::remove_worktree,
             workspace::api::read_artifact,
@@ -1327,11 +1459,19 @@ mod migration_tests {
         .unwrap();
         assert_eq!(target_repo_cols, 1, "migration 010 column present exactly once");
 
+        let skill_sources_cols: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('projects') WHERE name='skill_sources'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(skill_sources_cols, 1, "migration 011 column present exactly once");
+
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 10, "all ten migrations recorded");
+        assert_eq!(version, 11, "all eleven migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
@@ -1462,6 +1602,7 @@ mod design_session_tests {
     async fn workspace_state(pool: sqlx::SqlitePool) -> WorkspaceState {
         sqlx::query(include_str!("../migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../migrations/010_project_target_repo.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../migrations/011_skill_sources.sql")).execute(&pool).await.unwrap();
         WorkspaceState { store: StdArc::new(ProjectStore::new(pool)) }
     }
 

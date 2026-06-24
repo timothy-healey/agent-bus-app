@@ -28,12 +28,14 @@ fn project_key_set_and_string_ids_match_ts() {
     let mut p = Project::new("My Project".into(), PathBuf::from("/repos/app"), 1_700_000_000);
     p.active_pipeline_id = Some(PipelineId("pipe-1".into()));
     p.target_repo = Some("/repos/target".into());
+    p.skill_sources = vec!["/repos/app/.claude".into()];
 
     let v = serde_json::to_value(&p).unwrap();
     assert_eq!(
         keys(&v),
-        set(&["id", "name", "root_path", "target_repo", "active_pipeline_id", "created_at", "updated_at"]),
+        set(&["id", "name", "root_path", "target_repo", "skill_sources", "active_pipeline_id", "created_at", "updated_at"]),
     );
+    assert!(v["skill_sources"].is_array());
 
     // Newtype id + PathBuf serialise as bare strings (TS `string`).
     assert!(v["id"].is_string());

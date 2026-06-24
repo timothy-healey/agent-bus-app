@@ -22,13 +22,14 @@ impl ProjectStore {
 
     pub async fn insert(&self, project: &Project) -> Result<(), ProjectStoreError> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root_path, target_repo, active_pipeline_id, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, root_path, target_repo, skill_sources, active_pipeline_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&project.id.0)
         .bind(&project.name)
         .bind(project.root_path.to_string_lossy().to_string())
         .bind(project.target_repo.as_ref())
+        .bind(encode_skill_sources(&project.skill_sources))
         .bind(project.active_pipeline_id.as_ref().map(|p| &p.0))
         .bind(project.created_at)
         .bind(project.updated_at)
@@ -38,18 +39,19 @@ impl ProjectStore {
     }
 
     pub async fn list(&self) -> Result<Vec<Project>, ProjectStoreError> {
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64)>(
-            "SELECT id, name, root_path, target_repo, active_pipeline_id, created_at, updated_at
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, Option<String>, i64, i64)>(
+            "SELECT id, name, root_path, target_repo, skill_sources, active_pipeline_id, created_at, updated_at
              FROM projects ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|(id, name, root_path, target_repo, active, created, updated)| Project {
+        Ok(rows.into_iter().map(|(id, name, root_path, target_repo, skill_sources, active, created, updated)| Project {
             id: ProjectId(id),
             name,
             root_path: root_path.into(),
             target_repo,
+            skill_sources: decode_skill_sources(skill_sources.as_deref()),
             active_pipeline_id: active.map(PipelineId),
             created_at: created,
             updated_at: updated,
@@ -57,8 +59,8 @@ impl ProjectStore {
     }
 
     pub async fn get(&self, id: &ProjectId) -> Result<Project, ProjectStoreError> {
-        let row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64)>(
-            "SELECT id, name, root_path, target_repo, active_pipeline_id, created_at, updated_at
+        let row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, Option<String>, i64, i64)>(
+            "SELECT id, name, root_path, target_repo, skill_sources, active_pipeline_id, created_at, updated_at
              FROM projects WHERE id = ?",
         )
         .bind(&id.0)
@@ -66,11 +68,12 @@ impl ProjectStore {
         .await?;
 
         match row {
-            Some((id, name, root_path, target_repo, active, created, updated)) => Ok(Project {
+            Some((id, name, root_path, target_repo, skill_sources, active, created, updated)) => Ok(Project {
                 id: ProjectId(id),
                 name,
                 root_path: root_path.into(),
                 target_repo,
+                skill_sources: decode_skill_sources(skill_sources.as_deref()),
                 active_pipeline_id: active.map(PipelineId),
                 created_at: created,
                 updated_at: updated,
@@ -122,6 +125,28 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Set a project's skill sources (A4). Stored JSON-encoded; an empty list is
+    /// stored as `null` (= global only). Returns NotFound when the id is unknown.
+    pub async fn set_skill_sources(
+        &self,
+        id: &ProjectId,
+        sources: &[String],
+        now_unix: i64,
+    ) -> Result<(), ProjectStoreError> {
+        let result = sqlx::query(
+            "UPDATE projects SET skill_sources = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(encode_skill_sources(sources))
+        .bind(now_unix)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(ProjectStoreError::NotFound(id.clone()));
+        }
+        Ok(())
+    }
+
     /// Remove a project row. Returns NotFound when the id does not exist.
     /// Deletes only the row — on-disk artifacts under the project root are NOT
     /// touched (Workspace owns the registry, not a destructive filesystem wipe).
@@ -135,6 +160,23 @@ impl ProjectStore {
         }
         Ok(())
     }
+}
+
+/// Encode a skill-sources list for the TEXT column: an empty list → `None`
+/// (stored as SQL NULL = global only); otherwise a JSON array string.
+fn encode_skill_sources(sources: &[String]) -> Option<String> {
+    if sources.is_empty() {
+        None
+    } else {
+        serde_json::to_string(sources).ok()
+    }
+}
+
+/// Decode the TEXT column back to a list. NULL / unparseable → empty (lenient:
+/// a corrupt cell degrades to "global only", never an error).
+fn decode_skill_sources(raw: Option<&str>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -152,6 +194,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(include_str!("../../app/migrations/010_project_target_repo.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(include_str!("../../app/migrations/011_skill_sources.sql"))
             .execute(&pool)
             .await
             .unwrap();
@@ -227,6 +273,59 @@ mod tests {
         let reloaded = store.get(&p.id).await.unwrap();
         assert_eq!(reloaded.target_repo, Some("/repo".to_string()));
         assert_eq!(reloaded.updated_at, 200);
+    }
+
+    #[tokio::test]
+    async fn skill_sources_round_trip_through_insert_and_get() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let mut p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
+        p.skill_sources = vec!["/a/.claude".into(), "/b/.claude".into()];
+        store.insert(&p).await.unwrap();
+        let reloaded = store.get(&p.id).await.unwrap();
+        assert_eq!(reloaded.skill_sources, vec!["/a/.claude".to_string(), "/b/.claude".into()]);
+    }
+
+    #[tokio::test]
+    async fn empty_skill_sources_default_when_unset() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
+        store.insert(&p).await.unwrap();
+        let reloaded = store.get(&p.id).await.unwrap();
+        assert!(reloaded.skill_sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_skill_sources_updates_the_column() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
+        store.insert(&p).await.unwrap();
+        store.set_skill_sources(&p.id, &["/x/.claude".into()], 200).await.unwrap();
+        let reloaded = store.get(&p.id).await.unwrap();
+        assert_eq!(reloaded.skill_sources, vec!["/x/.claude".to_string()]);
+        assert_eq!(reloaded.updated_at, 200);
+        // Clearing back to empty stores NULL and decodes to empty.
+        store.set_skill_sources(&p.id, &[], 300).await.unwrap();
+        assert!(store.get(&p.id).await.unwrap().skill_sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_skill_sources_on_missing_project_is_not_found() {
+        let pool = fresh_pool().await;
+        let store = ProjectStore::new(pool);
+        let result = store.set_skill_sources(&ProjectId("nope".into()), &["/r".into()], 1).await;
+        assert!(matches!(result, Err(ProjectStoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn encode_empty_is_none_decode_null_is_empty() {
+        assert_eq!(encode_skill_sources(&[]), None);
+        assert!(decode_skill_sources(None).is_empty());
+        assert!(decode_skill_sources(Some("not json")).is_empty());
+        let enc = encode_skill_sources(&["/p".to_string()]).unwrap();
+        assert_eq!(decode_skill_sources(Some(&enc)), vec!["/p".to_string()]);
     }
 
     #[tokio::test]

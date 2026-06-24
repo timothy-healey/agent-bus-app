@@ -116,6 +116,30 @@ pub async fn workspace_set_target_repo(
         .map_err(|e| e.to_string())
 }
 
+/// OHS command (A4): set a project's extra skill sources (`.claude` roots beyond
+/// the always-on global ~/.claude). Each path is tilde-expanded with the same
+/// discipline as root_path; blank entries are dropped. An empty list clears the
+/// config (= global only). The skills crate never learns the Project type — these
+/// roots are resolved at the composition root before the scanner sees them.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn workspace_set_skill_sources(
+    state: tauri::State<'_, WorkspaceState>,
+    id: String,
+    sources: Vec<String>,
+) -> Result<(), String> {
+    let home = home_dir();
+    let expanded: Vec<String> = sources
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| expand_tilde(&s, &home))
+        .collect();
+    state
+        .store
+        .set_skill_sources(&ProjectId(id), &expanded, now_unix())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_remove_project(
     state: tauri::State<'_, WorkspaceState>,
@@ -254,6 +278,19 @@ pub fn tools() -> Vec<ToolSpec> {
             supplier_context: "workspace".into(),
         },
         ToolSpec {
+            name: "workspace_set_skill_sources".into(),
+            description: "Set a project's extra skill sources (.claude roots beyond global).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "sources": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["id", "sources"]
+            }),
+            supplier_context: "workspace".into(),
+        },
+        ToolSpec {
             name: "workspace_list_projects".into(),
             description: "List all known projects, newest first.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
@@ -347,6 +384,7 @@ mod tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/010_project_target_repo.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/011_skill_sources.sql")).execute(&pool).await.unwrap();
         let store = StdArc::new(ProjectStore::new(pool));
         let project = Project::new("Demo".into(), root.to_path_buf(), 0);
         store.insert(&project).await.unwrap();
@@ -432,6 +470,27 @@ mod tests {
         state.store.set_target_repo(&ProjectId(project_id.clone()), Some(&expanded), 0).await.unwrap();
         let got = state.store.get(&ProjectId(project_id)).await.unwrap();
         assert_eq!(got.target_repo, Some("/Users/tim/repo".to_string()));
+    }
+
+    #[test]
+    fn tools_publishes_set_skill_sources_under_workspace() {
+        let t = tools();
+        assert!(t.iter().any(|s| s.name == "workspace_set_skill_sources" && s.supplier_context == "workspace"));
+    }
+
+    #[tokio::test]
+    async fn set_skill_sources_expands_and_persists() {
+        let root = std::env::temp_dir().join(format!("abp-ss-{}", uuid::Uuid::new_v4()));
+        let (state, project_id) = state_with_project(&root).await;
+        let home = "/Users/tim";
+        let expanded: Vec<String> = ["~/a/.claude", "  ", "/abs/.claude"]
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| expand_tilde(s, home))
+            .collect();
+        state.store.set_skill_sources(&ProjectId(project_id.clone()), &expanded, 0).await.unwrap();
+        let got = state.store.get(&ProjectId(project_id)).await.unwrap();
+        assert_eq!(got.skill_sources, vec!["/Users/tim/a/.claude".to_string(), "/abs/.claude".into()]);
     }
 
     #[test]

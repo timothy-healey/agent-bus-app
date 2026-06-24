@@ -17,7 +17,25 @@ pub use scanner::FsSkillScanner;
 #[cfg(test)]
 mod contract_tests;
 
+use agent_bus_core::ToolSpec;
+use serde_json::json;
 use std::collections::HashMap;
+
+/// OHS contract for the skills generic subdomain. `list_skills` is wired at the
+/// composition root (it needs the Project type to resolve sources), but the tool
+/// description is owned here.
+pub fn tools() -> Vec<ToolSpec> {
+    vec![ToolSpec {
+        name: "list_skills".into(),
+        description: "List the skills + slash commands available to a project's worker (authoring-time autocomplete).".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": { "project_id": { "type": "string" } },
+            "required": ["project_id"]
+        }),
+        supplier_context: "skills".into(),
+    }]
+}
 
 /// In-memory `SkillCatalog` for tests / downstream root tests. Returns the same
 /// canned entries regardless of `roots` (the seam, not the filesystem, is what
@@ -89,6 +107,17 @@ pub fn merge_with_precedence(per_root: Vec<(SkillSource, Vec<SkillEntry>)>) -> V
     }
 
     all
+}
+
+#[cfg(test)]
+mod tools_tests {
+    use super::*;
+
+    #[test]
+    fn tools_publishes_list_skills_under_skills_context() {
+        let t = tools();
+        assert!(t.iter().any(|s| s.name == "list_skills" && s.supplier_context == "skills"));
+    }
 }
 
 #[cfg(test)]
