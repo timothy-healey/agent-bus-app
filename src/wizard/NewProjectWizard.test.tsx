@@ -12,8 +12,9 @@ vi.mock("../ipc/pipeline", () => ({
   listSeedTemplates: (...a: unknown[]) => listSeedTemplatesMock(...a),
   seedTemplate: (...a: unknown[]) => seedTemplateMock(...a),
   createProjectFromDraft: (...a: unknown[]) => createMock(...a),
-  // ChatDraftPanel imports this too; stub it so the shell test is isolated.
-  designSessionTurn: vi.fn(),
+  // PipelineCanvas runs live best-effort validation; stub it so the shell test
+  // is isolated.
+  bestEffortValidate: vi.fn().mockResolvedValue([]),
 }));
 
 // A draft with one team, enough to reach + render the review step.
@@ -33,10 +34,9 @@ async function openToReview(targetRepo?: string) {
   }
   fireEvent.change(screen.getByLabelText(/describe/i), { target: { value: "a research flow" } });
   fireEvent.click(screen.getByRole("button", { name: /generate/i }));
-  await screen.findByRole("heading", { name: /teams/i });
-  fireEvent.click(screen.getByRole("button", { name: /next/i })); // teams -> prompts
-  fireEvent.click(screen.getByRole("button", { name: /next/i })); // prompts -> wiring
-  fireEvent.click(screen.getByRole("button", { name: /next/i })); // wiring -> review
+  // generate advances to the Canvas step (its palette is the tell)
+  await screen.findByRole("button", { name: /add team/i });
+  fireEvent.click(screen.getByRole("button", { name: /next/i })); // canvas -> review
   return { onCreated };
 }
 
@@ -64,8 +64,8 @@ describe("NewProjectWizard", () => {
     fireEvent.change(screen.getByLabelText(/describe/i), { target: { value: "a research flow" } });
     fireEvent.click(screen.getByRole("button", { name: /generate/i }));
     await waitFor(() => expect(kickoffMock).toHaveBeenCalled());
-    // advanced to the Teams step (step heading visible)
-    expect(await screen.findByRole("heading", { name: /teams/i })).toBeInTheDocument();
+    // advanced to the Canvas step (its palette is visible)
+    expect(await screen.findByRole("button", { name: /add team/i })).toBeInTheDocument();
   });
 
   it("starting from a template seeds the draft and advances to Teams", async () => {
@@ -83,8 +83,8 @@ describe("NewProjectWizard", () => {
     const btn = await screen.findByRole("button", { name: /DDD Spec/ });
     fireEvent.click(btn);
     await waitFor(() => expect(seedTemplateMock).toHaveBeenCalledWith("ddd-spec-plan-impl"));
-    // advanced to the Teams step
-    expect(await screen.findByRole("heading", { name: /teams/i })).toBeInTheDocument();
+    // advanced to the Canvas step (its palette is visible)
+    expect(await screen.findByRole("button", { name: /add team/i })).toBeInTheDocument();
   });
 
   it("Cancel calls onClose", () => {

@@ -4,7 +4,10 @@ import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join, Workers } 
  *  default authored in WiringStep.draftToPipeline before this chunk). */
 const DEFAULT_STORE_CAPACITY = 8;
 
-export const WIZARD_STEPS = ["basics", "teams", "prompts", "wiring", "review"] as const;
+/// The new-project wizard steps. The Teams/Prompts/Wiring form trio collapsed
+/// into one interactive Canvas step (graph-builder chunk ②); Basics (incl.
+/// Generate) and Review/Create remain.
+export const WIZARD_STEPS = ["basics", "canvas", "review"] as const;
 export type WizardStep = (typeof WIZARD_STEPS)[number];
 
 const SCHEMA_VERSION = 3;

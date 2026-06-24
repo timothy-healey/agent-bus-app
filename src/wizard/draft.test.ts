@@ -16,8 +16,8 @@ describe("wizard draft helpers", () => {
     expect(emptyDraft().gates).toEqual([]);
   });
 
-  it("WIZARD_STEPS lists the five steps in order", () => {
-    expect(WIZARD_STEPS).toEqual(["basics", "teams", "prompts", "wiring", "review"]);
+  it("WIZARD_STEPS lists basics → canvas → review in order", () => {
+    expect(WIZARD_STEPS).toEqual(["basics", "canvas", "review"]);
   });
 
   it("addTeam appends a defaulted team", () => {
