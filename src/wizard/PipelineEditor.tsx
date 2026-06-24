@@ -4,6 +4,7 @@ import { savePipelineEdits, type DraftPipeline } from "../ipc/pipeline";
 import { PipelineCanvas } from "./PipelineCanvas";
 import { Button } from "../components/ui/Button";
 import { useModalA11y } from "../hooks/useModalA11y";
+import { useSkillCatalog } from "../hooks/useSkillCatalog";
 
 interface PipelineEditorProps {
   projectId: string;
@@ -22,6 +23,10 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
   const [draft, setDraft] = useState<DraftPipeline>(seed);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // A4: the skill catalog for this project, feeding NodeDrawer's prompt
+  // autocomplete. Loaded at open + manually refreshable.
+  const { entries: skills, refresh: refreshSkills } = useSkillCatalog(projectId);
 
   // Focus trap + Escape-to-close + restore-focus (audit A2).
   const dialogRef = useModalA11y<HTMLDivElement>(true, onClose);
@@ -52,7 +57,7 @@ export function PipelineEditor({ projectId, seed, onClose, onSaved }: PipelineEd
         <h2 style={{ fontSize: "var(--ts-lg)", color: "var(--text)", margin: "0 0 var(--sp-3)" }}>Edit pipeline</h2>
 
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <PipelineCanvas draft={draft} onChange={setDraft} />
+          <PipelineCanvas draft={draft} onChange={setDraft} skills={skills} onRefreshSkills={refreshSkills} />
         </div>
 
         {error && (

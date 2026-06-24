@@ -1,7 +1,9 @@
 import type React from "react";
 import type { CSSProperties } from "react";
 import type { DraftPipeline, DraftTeam, EffortMode } from "../../ipc/pipeline";
+import type { SkillEntry } from "../../ipc/skills";
 import { Drawer } from "../../components/ui/Drawer";
+import { SkillAutocomplete } from "./SkillAutocomplete";
 import {
   renameTeam,
   setPromptBody,
@@ -33,6 +35,8 @@ interface NodeDrawerProps {
   selectedId: string | null;
   onChange: (d: DraftPipeline) => void;
   onClose: () => void;
+  /// A4 — discovered skills for the Team prompt's `/`-autocomplete. Default empty.
+  skills?: SkillEntry[];
 }
 
 type Kind = "team" | "gate" | "fork" | "join" | "escalation" | "unknown";
@@ -46,7 +50,7 @@ function kindOf(draft: DraftPipeline, id: string): Kind {
   return "unknown";
 }
 
-export function NodeDrawer({ draft, selectedId, onChange, onClose }: NodeDrawerProps) {
+export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [] }: NodeDrawerProps) {
   const open = selectedId != null;
   const kind = selectedId ? kindOf(draft, selectedId) : "unknown";
 
@@ -59,7 +63,7 @@ export function NodeDrawer({ draft, selectedId, onChange, onClose }: NodeDrawerP
               {kind} · <span style={{ color: "var(--text-2)" }}>{selectedId}</span>
             </div>
           </header>
-          {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} />}
+          {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} skills={skills} />}
           {kind === "gate" && <GateEditor draft={draft} id={selectedId} onChange={onChange} />}
           {kind === "join" && <JoinEditor draft={draft} id={selectedId} onChange={onChange} />}
           {kind === "fork" && <ForkEditor draft={draft} id={selectedId} />}
@@ -83,7 +87,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function TeamEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void }) {
+function TeamEditor({ draft, id, onChange, skills }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void; skills: SkillEntry[] }) {
   const t = draft.teams.find((x) => x.id === id) as DraftTeam;
   if (!t) return null;
   const effort = t.runner.effort;
@@ -96,7 +100,16 @@ function TeamEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string;
       </Field>
 
       <Field label="Prompt">
-        <textarea aria-label={`prompt for ${id}`} value={t.prompt_body} rows={6} onChange={(e) => onChange(setPromptBody(draft, id, e.target.value))} style={{ ...inp, resize: "vertical" }} />
+        <SkillAutocomplete
+          aria-label={`prompt for ${id}`}
+          value={t.prompt_body}
+          onChange={(v) => onChange(setPromptBody(draft, id, v))}
+          skills={skills}
+          rows={6}
+        />
+        <div style={{ marginTop: "var(--sp-1)", fontSize: "var(--ts-xs)", color: "var(--text-3)" }}>
+          Type <code style={{ fontFamily: "var(--font-mono)" }}>/</code> to insert an installed skill or command.
+        </div>
       </Field>
 
       <fieldset style={group}>
