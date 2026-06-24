@@ -47,6 +47,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (9, include_str!("../migrations/009_git_config.sql")),
         (10, include_str!("../migrations/010_project_target_repo.sql")),
         (11, include_str!("../migrations/011_skill_sources.sql")),
+        (12, include_str!("../migrations/012_runtime_stores.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -1014,6 +1015,12 @@ pub fn run() {
             sql: include_str!("../migrations/011_skill_sources.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 12,
+            description: "runtime stores — runs/stores/generator_ledger tables + tasks.run_id/item_key (④a)",
+            sql: include_str!("../migrations/012_runtime_stores.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -1467,11 +1474,38 @@ mod migration_tests {
         .unwrap();
         assert_eq!(skill_sources_cols, 1, "migration 011 column present exactly once");
 
+        // Migration 012 (④a): the new bounded-buffer tables + the work-item
+        // identity columns on tasks.
+        let new_tables: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' \
+             AND name IN ('runs','stores','generator_ledger')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(new_tables, 3, "migration 012 created runs/stores/generator_ledger");
+
+        let run_id_cols: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('tasks') WHERE name='run_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(run_id_cols, 1, "migration 012 tasks.run_id present exactly once");
+
+        let item_key_cols: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('tasks') WHERE name='item_key'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(item_key_cols, 1, "migration 012 tasks.item_key present exactly once");
+
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 11, "all eleven migrations recorded");
+        assert_eq!(version, 12, "all twelve migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
