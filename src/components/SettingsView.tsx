@@ -23,6 +23,8 @@ export interface SettingsViewProps {
   onRemoveProject: (id: string) => Promise<void>;
   // Target repo (A5) — binds ${target_repo} for all teams' scope resolution.
   onSetTargetRepo: (projectId: string, targetRepo: string | null) => Promise<void>;
+  // Skill sources (A4) — extra .claude roots scanned for prompt autocomplete.
+  onSetSkillSources: (projectId: string, sources: string[]) => Promise<void>;
   // Worktree cleanup (S2)
   onListWorktrees: (projectId: string) => Promise<WorktreeEntry[]>;
   onRemoveWorktree: (projectId: string, path: string) => Promise<void>;
@@ -60,6 +62,64 @@ function ProjectTargetRepo(props: {
       >
         {busy ? "saving…" : "save"}
       </Button>
+    </div>
+  );
+}
+
+/** Per-project Skill sources editor (A4). The global `~/.claude` row is shown
+ *  locked/always-on; the operator may add one or more project `.claude` roots
+ *  (via the native folder picker) or remove them. Each change persists the whole
+ *  list through workspace_set_skill_sources. */
+function ProjectSkillSources(props: {
+  project: Project;
+  onSave: (sources: string[]) => Promise<void>;
+}) {
+  const { project, onSave } = props;
+  const [sources, setSources] = useState<string[]>(project.skill_sources ?? []);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function persist(next: string[]) {
+    setSources(next);
+    setBusy(true);
+    try {
+      await onSave(next);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function add() {
+    const path = draft.trim();
+    if (!path || sources.includes(path)) {
+      setDraft("");
+      return;
+    }
+    setDraft("");
+    await persist([...sources, path]);
+  }
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      <span style={{ fontSize: 12, color: "var(--text-2)", display: "block", marginBottom: 4 }}>Skill sources</span>
+      <ul aria-label={`skill sources for ${project.id}`} style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 4 }}>
+        <li style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-3)" }}>
+          <span style={{ flex: 1, fontFamily: "var(--font-mono)" }}>~/.claude</span>
+          <span aria-label="global source is always on" title="Always scanned" style={{ fontSize: 10, color: "var(--text-3)" }}>global · locked</span>
+        </li>
+        {sources.map((s) => (
+          <li key={s} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-2)" }}>
+            <span style={{ flex: 1, fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s}</span>
+            <Button size="sm" variant="ghost" disabled={busy} aria-label={`remove skill source ${s}`} onClick={() => persist(sources.filter((x) => x !== s))}>remove</Button>
+          </li>
+        ))}
+      </ul>
+      <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <div style={{ flex: 1 }}>
+          <FolderPickerField label="Add a project .claude root" value={draft} onChange={setDraft} placeholder="~/project/.claude" disabled={busy} />
+        </div>
+        <Button disabled={busy || draft.trim() === ""} aria-label="add skill source" onClick={add}>add</Button>
+      </div>
     </div>
   );
 }
@@ -155,7 +215,7 @@ export function SettingsView(props: SettingsViewProps) {
     usage, onSetBudget, onSetAutoMeter,
     apiKeyPresent, onSetApiKey, onClearApiKey,
     gitConfig, onSaveGitConfig,
-    projects, activeProjectId, onRemoveProject, onSetTargetRepo,
+    projects, activeProjectId, onRemoveProject, onSetTargetRepo, onSetSkillSources,
     onListWorktrees, onRemoveWorktree,
   } = props;
 
@@ -316,6 +376,7 @@ export function SettingsView(props: SettingsViewProps) {
               <Button onClick={() => onRemoveProject(p.id)}>remove</Button>
             </div>
             <ProjectTargetRepo project={p} onSave={(path) => onSetTargetRepo(p.id, path)} />
+            <ProjectSkillSources project={p} onSave={(sources) => onSetSkillSources(p.id, sources)} />
             <ProjectWorktrees project={p} onList={onListWorktrees} onRemove={onRemoveWorktree} />
           </div>
         ))}

@@ -12,7 +12,7 @@ import { ListView } from "./components/ListView";
 import { SettingsView } from "./components/SettingsView";
 import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
-import { activateProject, readArtifact, removeProject, workspaceSetTargetRepo, listWorktrees, removeWorktree, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
+import { activateProject, readArtifact, removeProject, workspaceSetTargetRepo, workspaceSetSkillSources, listWorktrees, removeWorktree, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
 import { setRunnerApiKey, clearRunnerApiKey, getRunnerApiKeyStatus, ANTHROPIC_API_KEY_ID } from "./ipc/secrets";
 import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, type Task } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
@@ -236,6 +236,7 @@ export default function App() {
             activeProjectId={activeProject?.id ?? null}
             onRemoveProject={async (id) => { await removeProject(id); await reload(); }}
             onSetTargetRepo={async (id, targetRepo) => { await workspaceSetTargetRepo(id, targetRepo); await reload(); }}
+            onSetSkillSources={async (id, sources) => { await workspaceSetSkillSources(id, sources); await reload(); }}
             onListWorktrees={(id) => listWorktrees(id)}
             onRemoveWorktree={async (id, path) => { await removeWorktree(id, path); }}
           />
