@@ -98,7 +98,7 @@ impl DraftPipeline {
 
 /// One team in a teams slice (id + display name only; technical config keeps its
 /// existing/default values across a merge).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SliceTeam {
     pub id: String,
     pub name: String,
@@ -106,20 +106,20 @@ pub struct SliceTeam {
 
 /// Step 2 slice: the full team set (add/remove/rename). Known teams keep their
 /// prompt body + runner/scope; new teams get defaults; dropped teams are removed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TeamsSlice {
     pub teams: Vec<SliceTeam>,
 }
 
 /// Step 3 slice: one team's responsibility prompt text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PromptSlice {
     pub team_id: String,
     pub prompt_body: String,
 }
 
 /// One team's routing edges in a wiring slice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RouteEdge {
     pub team_id: String,
     #[serde(default)]
@@ -131,7 +131,7 @@ pub struct RouteEdge {
 }
 
 /// Step 4 slice: the fork/join wiring + per-team routes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WiringSlice {
     #[serde(default)]
     pub routes: Vec<RouteEdge>,
@@ -146,7 +146,7 @@ pub struct WiringSlice {
 /// A structured slice the model emits (one per wizard step). Internally tagged on
 /// `kind` so a single fenced ```json block round-trips. The backend is the trust
 /// boundary: only this typed slice mutates the draft, never the model's prose.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Slice {
     Teams(TeamsSlice),
@@ -369,6 +369,28 @@ pub fn prepare_pipeline_write(draft: &DraftPipeline) -> Result<PipelineWrite, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slice_types_derive_json_schema_with_kind_discriminator() {
+        // The whole Slice enum is internally tagged on `kind`; the derived schema
+        // must reflect that discriminator and the per-variant payloads.
+        let s = serde_json::to_string(&schemars::schema_for!(Slice)).unwrap();
+        assert!(s.contains("kind"), "Slice schema must expose the kind tag: {s}");
+
+        let teams = serde_json::to_string(&schemars::schema_for!(TeamsSlice)).unwrap();
+        assert!(teams.contains("teams"));
+
+        let prompt = serde_json::to_string(&schemars::schema_for!(PromptSlice)).unwrap();
+        assert!(prompt.contains("team_id") && prompt.contains("prompt_body"));
+
+        let wiring = serde_json::to_string(&schemars::schema_for!(WiringSlice)).unwrap();
+        assert!(
+            wiring.contains("routes")
+                && wiring.contains("forks")
+                && wiring.contains("joins")
+                && wiring.contains("gates")
+        );
+    }
 
     #[test]
     fn empty_draft_has_no_teams_and_default_schema_version() {
