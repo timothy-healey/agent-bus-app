@@ -33,6 +33,12 @@ pub enum PipelineValidationError {
     UnresolvedGateDownstream { gate: String, target: String },
     #[error("team '{0}' is unreachable (no route or gate-downstream points at it)")]
     UnreachableTeam(String),
+    #[error("pipeline has no source team (every team has an inbound route; exactly one entry/source is required)")]
+    NoSource,
+    #[error("pipeline has multiple source teams {0:?} (exactly one entry/source is required)")]
+    MultipleSources(Vec<String>),
+    #[error("team '{0}' is not reachable from the source via routes")]
+    StoreUnreachable(String),
     #[error("pipeline has no teams")]
     NoTeams,
     #[error("team '{0}' has no resolvable runner (no model from the team or pipeline defaults)")]
@@ -276,7 +282,125 @@ pub fn validate(p: &Pipeline) -> Result<(), PipelineValidationError> {
         }
     }
 
+    // Assembly-line designation (④a, deferred from chunk ①): exactly one team
+    // has no *forward* inbound edge — that team is the source/generator stage (no
+    // input store; it produces work-items by scanning, loop-until-dry). Forward
+    // edges are the assembly-line flow: team on_approve, gate downstream, fork
+    // lane, join downstream. on_revise/on_reject are FEEDBACK/escalation edges
+    // (a reviewer sending an item *back* to its writer), not upstream supply —
+    // they must not disqualify a team from being the source (the writer a
+    // reviewer revises-back-to is still the entry). Zero forward-sources means a
+    // forward cycle with no entry (NoSource); more than one means ambiguous entry
+    // (MultipleSources). v1 supports a single source; mid-pipeline generators are
+    // a future extension.
+    let forward_inbound = forward_inbound_teams(p);
+    let sources: Vec<String> = p
+        .teams
+        .iter()
+        .filter(|t| !forward_inbound.contains(t.id.as_str()))
+        .map(|t| t.id.clone())
+        .collect();
+    match sources.len() {
+        0 => return Err(PipelineValidationError::NoSource),
+        1 => {}
+        _ => return Err(PipelineValidationError::MultipleSources(sources)),
+    }
+    let source = &sources[0];
+
+    // Store reachability: every non-source team's input store must be fed — i.e.
+    // every team is reachable from the source by following forward edges. This is
+    // stronger than the per-edge inbound check above: it rejects a team fed only
+    // by an island disconnected from the source. Walk the forward graph from the
+    // source and assert every team is visited.
+    let reachable = forward_reachable_from(p, &kinds, source);
+    for team in &p.teams {
+        if !reachable.contains(team.id.as_str()) {
+            return Err(PipelineValidationError::StoreUnreachable(team.id.clone()));
+        }
+    }
+
     Ok(())
+}
+
+/// The set of team ids that receive a *forward* (assembly-line) inbound edge:
+/// a team on_approve, a gate downstream, a fork lane, or a join downstream. The
+/// source/generator stage is the team with NO forward inbound. on_revise and
+/// on_reject are deliberately excluded — they are feedback/escalation edges, not
+/// upstream supply (a reviewer revising back to its writer must not make the
+/// writer look downstream-fed).
+fn forward_inbound_teams(p: &Pipeline) -> HashSet<String> {
+    let mut inbound: HashSet<String> = HashSet::new();
+    for team in &p.teams {
+        if let Some(next) = team.outputs.on_approve.as_deref() {
+            inbound.insert(next.to_string());
+        }
+    }
+    for gate in &p.gates {
+        inbound.insert(gate.downstream.clone());
+    }
+    for fork in &p.forks {
+        for lane in &fork.lanes {
+            inbound.insert(lane.clone());
+        }
+    }
+    for join in &p.joins {
+        inbound.insert(join.downstream.clone());
+    }
+    inbound
+}
+
+/// The set of node ids reachable from `start` by following forward (assembly-
+/// line) edges: team on_approve, gate downstreams, fork lanes, and join
+/// downstreams. on_revise/on_reject are excluded (feedback/escalation, not
+/// supply). Used for store reachability — a team in the result has its input
+/// store fed from the source. Bounded BFS over the node set.
+fn forward_reachable_from<'a>(
+    p: &'a Pipeline,
+    kinds: &HashMap<&'a str, NodeKind>,
+    start: &str,
+) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![start.to_string()];
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node.clone()) {
+            continue;
+        }
+        let mut push = |target: &str| {
+            if !seen.contains(target) {
+                stack.push(target.to_string());
+            }
+        };
+        match kinds.get(node.as_str()) {
+            Some(NodeKind::Team) => {
+                if let Some(t) = p.teams.iter().find(|t| t.id == node) {
+                    // Forward flow only — on_approve. revise/reject are feedback.
+                    if let Some(next) = t.outputs.on_approve.as_deref() {
+                        push(next);
+                    }
+                }
+            }
+            Some(NodeKind::Gate) => {
+                if let Some(g) = p.gates.iter().find(|g| g.id == node) {
+                    push(&g.downstream);
+                }
+            }
+            Some(NodeKind::Fork) => {
+                if let Some(f) = p.forks.iter().find(|f| f.id == node) {
+                    for lane in &f.lanes {
+                        push(lane);
+                    }
+                }
+            }
+            Some(NodeKind::Join) => {
+                if let Some(j) = p.joins.iter().find(|j| j.id == node) {
+                    push(&j.downstream);
+                }
+            }
+            // Escalations are terminal; unknown nodes are caught upstream.
+            _ => {}
+        }
+    }
+    seen
 }
 
 #[cfg(test)]
@@ -385,6 +509,61 @@ mod tests {
         // but research already routes to gate-1, and writers -> needs-human;
         // writers receives nothing inbound now.
         assert_eq!(validate(&p), Err(PipelineValidationError::UnreachableTeam("writers".into())));
+    }
+
+    #[test]
+    fn the_bundled_shape_has_exactly_one_source_and_validates() {
+        // The valid v1 + v2 shapes each have a single source (research / entry)
+        // and every team reachable from it.
+        assert_eq!(validate(&valid_pipeline()), Ok(()));
+        assert_eq!(validate(&valid_v2_pipeline()), Ok(()));
+    }
+
+    #[test]
+    fn two_source_pipeline_is_rejected() {
+        // Two teams with no FORWARD inbound: 'research' (entry) and a second
+        // generator 'gen2'. gen2 is given a revise-back inbound so it still passes
+        // the per-edge UnreachableTeam check, but it has no on_approve/gate/fork/
+        // join feeding it -> it is a second source -> MultipleSources.
+        let mut p = valid_pipeline();
+        // gen2 flows forward into writers (so writers stays reachable from a
+        // source); research also flows into gate-1 -> writers.
+        let mut gen2 = team("gen2", Some("writers"));
+        gen2.outputs.on_reject = Some("needs-human".into());
+        p.teams.push(gen2);
+        // someone revises back to gen2, giving it a (feedback) inbound edge.
+        p.teams[1].outputs.on_revise = Some("gen2".into()); // writers.on_revise -> gen2
+        let err = validate(&p).unwrap_err();
+        assert!(
+            matches!(err, PipelineValidationError::MultipleSources(_)),
+            "expected MultipleSources, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn no_source_pipeline_is_rejected() {
+        // Every team has a FORWARD inbound edge (a 2-team forward cycle): no
+        // entry/source.
+        let mut p = valid_pipeline();
+        p.gates.clear();
+        p.teams = vec![team("a", Some("b")), team("b", Some("a"))];
+        assert_eq!(validate(&p), Err(PipelineValidationError::NoSource));
+    }
+
+    #[test]
+    fn a_team_unreachable_from_the_source_is_rejected() {
+        // research (source) -> gate-1 -> writers. Add an island pair that flows
+        // forward into each other (so each has a forward inbound -> neither is a
+        // second source, and each has a per-edge inbound -> passes UnreachableTeam)
+        // but is NOT reachable from the source.
+        let mut p = valid_pipeline();
+        p.teams.push(team("island-a", Some("island-b")));
+        p.teams.push(team("island-b", Some("island-a")));
+        let err = validate(&p).unwrap_err();
+        assert!(
+            matches!(err, PipelineValidationError::StoreUnreachable(_)),
+            "expected StoreUnreachable, got {err:?}"
+        );
     }
 
     #[test]
