@@ -247,6 +247,130 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     })
 }
 
+/// Run at most one generator (source) pass for `source_team`, loop-until-dry +
+/// capacity-bounded (the spec's source loop). The source has no input store; it
+/// produces NEW items by scanning, deduped against the per-run found-key ledger.
+///
+/// 1. Brake check; if the run is already `generator_dry` → `Retired`.
+/// 2. Compute free downstream slots K = capacity − occupancy; K==0 → `Backpressure`.
+/// 3. Run the generator with `output_contract("generator", dir, &found)`.
+/// 4. Filter the emitted items to keys NOT already found, cap at K, record them
+///    in the ledger, and for each reserve a downstream slot + commit a work-item.
+/// 5. A pass that yields 0 new keys marks the generator dry → `Retired`.
+pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<StepOutcome, EngineError> {
+    // 1. BRAKE / already-dry
+    if ctx.brake.is_on() {
+        return Ok(StepOutcome::Braked);
+    }
+    if ctx.runs.get(&ctx.run_id).await?.generator_dry {
+        return Ok(StepOutcome::Retired);
+    }
+
+    // The source pushes into its on_approve target's input store.
+    let Some(downstream) = ctx.downstream_stage(source_team) else {
+        // A source with no downstream can't place items; treat as dry.
+        ctx.runs.set_generator_dry(&ctx.run_id).await?;
+        return Ok(StepOutcome::Retired);
+    };
+
+    // 2. Free downstream slots K.
+    let cap = source_team_downstream_capacity(ctx, &downstream);
+    let occ = ctx.stores.occupancy(&ctx.run_id, &downstream).await?.unwrap_or(0);
+    let k = cap.saturating_sub(occ);
+    if k == 0 {
+        return Ok(StepOutcome::Backpressure);
+    }
+
+    // 3. RUN the generator, handing it the already-found set.
+    let found = ctx.ledger.found_keys(&ctx.run_id, &source_team.id).await?;
+    let mut found_vec: Vec<String> = found.iter().cloned().collect();
+    found_vec.sort();
+    let dir = artifact_dir(&source_team.id);
+    let system_prompt = format!(
+        "{}\n\n{}",
+        (ctx.read_prompt)(source_team),
+        output_contract("generator", &dir, &found_vec)
+    );
+    // The generator pass uses a transient source task purely to drive one invoke.
+    let pass_task = Task::work_item(
+        "proj-pass".into(),
+        ctx.pipeline.id.clone(),
+        ctx.run_id.clone(),
+        String::new(),
+        source_team.id.clone(),
+        None,
+        ctx.target_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        now_unix(),
+    );
+    let items = invoke(ctx, source_team, &pass_task, system_prompt).await?;
+
+    // 4. Filter to NEW keys (not already found), de-duplicate within the batch,
+    //    and cap at K (capacity-bounded pass).
+    let mut new_keys: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = found.clone();
+    for item in &items {
+        if item.key.is_empty() || seen.contains(&item.key) {
+            continue;
+        }
+        seen.insert(item.key.clone());
+        new_keys.push(item.key.clone());
+        if new_keys.len() as u32 >= k {
+            break;
+        }
+    }
+
+    // 5. No new keys → the generator is dry; retire the source.
+    if new_keys.is_empty() {
+        ctx.runs.set_generator_dry(&ctx.run_id).await?;
+        return Ok(StepOutcome::Retired);
+    }
+
+    // Record the new keys in the ledger (dedup source of truth), then reserve +
+    // commit each into the downstream store as a work-item.
+    ctx.ledger.record_keys(&ctx.run_id, &source_team.id, &new_keys).await?;
+    let mut committed: Vec<String> = Vec::new();
+    for key in &new_keys {
+        // Reserve the slot (block-before-commit). If a racing consumer filled the
+        // store between the K computation and now, stop — backpressure for the
+        // rest. The recorded ledger key stays (it is genuinely a found candidate);
+        // a future pass will see it in `found` and skip re-emitting it.
+        if !ctx.stores.reserve(&ctx.run_id, &downstream).await? {
+            break;
+        }
+        let artifact = items
+            .iter()
+            .find(|i| &i.key == key)
+            .and_then(|i| i.artifact_path.clone())
+            .or_else(|| Some(artifact_path(&source_team.id, key, 1)));
+        let child = Task::work_item(
+            "proj".into(),
+            ctx.pipeline.id.clone(),
+            ctx.run_id.clone(),
+            key.clone(),
+            downstream.clone(),
+            artifact,
+            ctx.target_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            now_unix(),
+        );
+        ctx.tasks.insert(&child).await?;
+        committed.push(key.clone());
+    }
+
+    Ok(StepOutcome::Generated { keys: committed })
+}
+
+/// The capacity of the source's downstream store. Read from the (already-ensured)
+/// store row when present; otherwise fall back to the authored capacity of the
+/// downstream team (so a not-yet-ensured store still bounds the pass).
+fn source_team_downstream_capacity(ctx: &EngineContext, downstream: &str) -> u32 {
+    ctx.pipeline
+        .teams
+        .iter()
+        .find(|t| t.id == downstream)
+        .map(|t| t.store.capacity)
+        .unwrap_or(pipeline::model::DEFAULT_STORE_CAPACITY)
+}
+
 /// Invoke the runner for a work-item and parse its emitted item list. Builds the
 /// scope (granting the artifact-dir write access), streams nothing (engine tests
 /// use non-streaming invoke), cleans up the scope file, and returns the parsed
@@ -589,6 +713,95 @@ mod tests {
         assert_eq!(transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap(), StepOutcome::Braked);
         // no reservation taken
         assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(0));
+    }
+
+    // ---- Task 5: generator (loop-until-dry) ----
+
+    #[tokio::test]
+    async fn generate_emits_bounded_by_free_slots_then_dedups_then_retires() {
+        // source -> spec(capacity 3). Scripted: batch1 [a,b,c,d] (K caps to 3),
+        // batch2 [c,d,e] (c,d already found -> only e new), then empty -> dry.
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", None, Role::Producer, 3),
+        ]);
+        let runner = Arc::new(FakeRunner::new(vec![
+            Ok(items_out("KEY: a\nKEY: b\nKEY: c\nKEY: d")),
+            Ok(items_out("KEY: c\nKEY: d\nKEY: e")),
+            Ok(items_out("(nothing new)")),
+        ]));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 3).await.unwrap();
+        let source = &ctx.pipeline.teams[0];
+
+        // pass 1: K = 3 (capacity 3 - occ 0) -> commits a,b,c (capped at K)
+        let o1 = generate_once(&ctx, source).await.unwrap();
+        match o1 {
+            StepOutcome::Generated { keys } => assert_eq!(keys, vec!["a", "b", "c"]),
+            other => panic!("expected Generated, got {other:?}"),
+        }
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(3));
+
+        // drain spec so there's room again (simulate a consumer)
+        ctx.stores.release(&ctx.run_id, "spec").await.unwrap();
+        ctx.stores.release(&ctx.run_id, "spec").await.unwrap();
+        ctx.stores.release(&ctx.run_id, "spec").await.unwrap();
+
+        // pass 2: found {a,b,c} (recorded in pass1, capped at K); batch [c,d,e]
+        // -> c is deduped against the ledger, only d,e are new.
+        let o2 = generate_once(&ctx, source).await.unwrap();
+        match o2 {
+            StepOutcome::Generated { keys } => assert_eq!(keys, vec!["d", "e"]),
+            other => panic!("expected Generated, got {other:?}"),
+        }
+
+        // drain again
+        for _ in 0..3 { let _ = ctx.stores.release(&ctx.run_id, "spec").await.unwrap(); }
+
+        // pass 3: nothing new -> dry / Retired
+        let o3 = generate_once(&ctx, source).await.unwrap();
+        assert_eq!(o3, StepOutcome::Retired);
+        assert!(ctx.runs.get(&ctx.run_id).await.unwrap().generator_dry);
+
+        // a further pass after dry short-circuits to Retired
+        assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Retired);
+    }
+
+    #[tokio::test]
+    async fn generate_backpressures_when_downstream_full() {
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", None, Role::Producer, 1),
+        ]);
+        let runner = Arc::new(FakeRunner::always(items_out("KEY: a")));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), runner.clone()).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 1).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "spec").await.unwrap(); // full
+
+        let outcome = generate_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert_eq!(outcome, StepOutcome::Backpressure);
+        // no run when fully backpressured (K==0 short-circuits before invoke)
+        assert!(runner.received.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn generate_dedups_against_the_ledger_across_passes() {
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", None, Role::Producer, 8),
+        ]);
+        // both passes emit the same key; the second must record 0 new -> dry
+        let runner = Arc::new(FakeRunner::new(vec![
+            Ok(items_out("KEY: only")),
+            Ok(items_out("KEY: only")),
+        ]));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+        let source = &ctx.pipeline.teams[0];
+
+        assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Generated { keys: vec!["only".into()] });
+        assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Retired);
+        assert_eq!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().len(), 1);
     }
 
     #[test]
