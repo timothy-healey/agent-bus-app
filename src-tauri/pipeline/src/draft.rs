@@ -6,7 +6,7 @@
 //! its to_pipeline()) becomes a `Pipeline`. Prompt text is held inline as
 //! `prompt_body`; to_pipeline() converts it to a `prompts/<id>.md` path.
 
-use crate::model::{Escalation, Fork, Gate, Join, Pipeline, Routes, RunnerConfig, Scope, Team, Workers, SCHEMA_VERSION};
+use crate::model::{Escalation, Fork, Gate, Join, Pipeline, Role, Routes, RunnerConfig, Scope, Store, Team, Workers, SCHEMA_VERSION};
 use agent_bus_core::{EffortMode, RunnerKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +27,14 @@ pub struct DraftTeam {
     pub outputs: Routes,
     #[serde(default)]
     pub workers: Workers,
+    /// Producer vs reviewer (vet F8). Authored in the canvas node drawer (chunk ②).
+    /// `#[serde(default)]` (Producer) so existing drafts/JSON load unchanged.
+    #[serde(default)]
+    pub role: Role,
+    /// The team's bounded input store (chunk ①). Authored in the node drawer.
+    /// `#[serde(default)]` (capacity 8) so existing drafts/JSON load unchanged.
+    #[serde(default)]
+    pub store: Store,
 }
 
 impl DraftTeam {
@@ -46,6 +54,8 @@ impl DraftTeam {
             scope: Scope::default(),
             outputs: Routes::default(),
             workers: Workers::default(),
+            role: Role::default(),
+            store: Store::default(),
         }
     }
 }
@@ -287,6 +297,8 @@ impl DraftPipeline {
                     scope: t.scope.clone(),
                     outputs: t.outputs.clone(),
                     workers: t.workers.clone(),
+                    role: t.role,
+                    store: t.store.clone(),
                 })
                 .collect(),
             forks: pipeline.forks.clone(),
@@ -320,8 +332,8 @@ impl DraftPipeline {
                     scope: t.scope.clone(),
                     outputs: t.outputs.clone(),
                     workers: t.workers.clone(),
-                    role: crate::model::Role::default(),
-                    store: crate::model::Store::default(),
+                    role: t.role,
+                    store: t.store.clone(),
                 })
                 .collect(),
             gates: self.gates.clone(),
@@ -632,6 +644,9 @@ mod tests {
         a.outputs.on_approve = Some("writers".into());
         let mut b = DraftTeam::new("writers", "Writers");
         b.prompt_body = "You write the spec.".into();
+        // Non-default role/store so the round-trip test would catch a drop of either.
+        b.role = crate::model::Role::Reviewer;
+        b.store = crate::model::Store { capacity: 3 };
         d.teams.push(a);
         d.teams.push(b);
         d
@@ -708,6 +723,14 @@ mod tests {
         assert_eq!(back_draft.to_pipeline(), pipeline);
         let research = back_draft.teams.iter().find(|t| t.id == "research").unwrap();
         assert_eq!(research.prompt_body, "You investigate the repo.");
+        // The non-default role/store authored on `writers` round-trips faithfully
+        // (would fail if to_pipeline/from_pipeline dropped either field).
+        let writers = back_draft.teams.iter().find(|t| t.id == "writers").unwrap();
+        assert_eq!(writers.role, crate::model::Role::Reviewer);
+        assert_eq!(writers.store.capacity, 3);
+        // and the producer default is preserved too
+        assert_eq!(research.role, crate::model::Role::Producer);
+        assert_eq!(research.store.capacity, crate::model::DEFAULT_STORE_CAPACITY);
     }
 
     #[test]

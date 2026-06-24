@@ -13,7 +13,7 @@ export function draftToPipeline(d: DraftPipeline): Pipeline {
     name: d.name || "(unnamed)",
     description: d.description,
     schema_version: d.schema_version,
-    teams: d.teams.map((t) => ({ ...t, prompt: `prompts/${t.id}.md`, role: t.role ?? "producer", store: t.store ?? { capacity: 8 } })),
+    teams: d.teams.map((t) => ({ ...t, prompt: `prompts/${t.id}.md`, role: t.role, store: t.store })),
     gates: d.gates,
     escalations: d.escalations,
     forks: d.forks,

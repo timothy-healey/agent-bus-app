@@ -132,14 +132,15 @@ export interface DraftTeam {
   scope: Scope;
   outputs: Routes;
   workers: Workers;
-  /** Authoring-only role (vet F8). Producer emits a single hand-off edge;
-   *  reviewer emits the approve·revise·reject verdict triple. Optional because
-   *  the backend `DraftTeam` does not yet carry it — until that lands, the
-   *  builder reads it locally and falls back to the `teamRole` name regex. */
-  role?: "producer" | "reviewer";
-  /** Authoring-only bounded-input store (chunk ①). `capacity` is the WIP limit.
-   *  Optional for the same backend-round-trip reason as `role`. */
-  store?: Store;
+  /** Role (vet F8). Producer emits a single hand-off edge; reviewer emits the
+   *  approve·revise·reject verdict triple. The backend `DraftTeam` now carries
+   *  this and always serializes it (serde default Producer), so it is required
+   *  on the wire and round-trips through to_pipeline/from_pipeline. */
+  role: "producer" | "reviewer";
+  /** Bounded-input store (chunk ①). `capacity` is the WIP limit. The backend
+   *  `DraftTeam` now carries this and always serializes it (serde default
+   *  capacity 8), so it is required on the wire and round-trips. */
+  store: Store;
 }
 
 export interface DraftPipeline {

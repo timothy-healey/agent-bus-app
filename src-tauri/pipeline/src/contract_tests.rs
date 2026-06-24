@@ -229,7 +229,7 @@ fn turn_result_key_set_matches_ts() {
 #[test]
 fn draft_team_key_set_matches_ts() {
     let v = serde_json::to_value(DraftTeam::new("research", "Research")).unwrap();
-    assert_eq!(keys(&v), set(&["id", "name", "prompt_body", "runner", "scope", "outputs", "workers"]));
+    assert_eq!(keys(&v), set(&["id", "name", "prompt_body", "runner", "scope", "outputs", "workers", "role", "store"]));
 }
 
 /// Locks the internally-tagged Slice wire shape (kind discriminator).
