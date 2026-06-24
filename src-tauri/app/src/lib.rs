@@ -594,14 +594,20 @@ pub async fn create_project_from_draft_inner(
     name: String,
     root: String,
     draft: DraftPipeline,
+    target_repo: Option<String>,
 ) -> Result<Project, String> {
     // 1. HARD validate + serialize (shared gate; nothing is written when invalid).
     let (yaml_rel, yaml, prompts) = pipeline::draft::prepare_pipeline_write(&draft)?;
     let pipeline = draft.to_pipeline();
 
     // 2. Create the project row (Workspace; ~ already expanded inside).
-    let expanded = workspace::api::expand_tilde(&root, &std::env::var("HOME").unwrap_or_default());
-    let project = Project::new(name, std::path::PathBuf::from(expanded), now_unix());
+    let home = std::env::var("HOME").unwrap_or_default();
+    let expanded = workspace::api::expand_tilde(&root, &home);
+    let mut project = Project::new(name, std::path::PathBuf::from(expanded), now_unix());
+    // A5: target_repo carried through create, tilde-expanded like root.
+    project.target_repo = target_repo
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| workspace::api::expand_tilde(&s, &home));
     ws.store.insert(&project).await.map_err(|e| e.to_string())?;
 
     // 3. Write the YAML + prompt files (Workspace owns the bytes-to-disk).
@@ -627,8 +633,9 @@ async fn create_project_from_draft(
     name: String,
     root: String,
     draft: DraftPipeline,
+    target_repo: Option<String>,
 ) -> Result<Project, String> {
-    create_project_from_draft_inner(&state, name, root, draft).await
+    create_project_from_draft_inner(&state, name, root, draft, target_repo).await
 }
 
 /// Read every team's prompt file body via Workspace's escape-guarded path
@@ -780,7 +787,7 @@ fn now_unix() -> i64 {
 /// an empty placeholder pipeline when none exists so the app still boots.
 async fn load_active(
     project_store: &ProjectStore,
-) -> (String, String, Pipeline) {
+) -> (String, String, Option<String>, Pipeline) {
     let empty = Pipeline {
         id: String::new(), name: String::new(), description: String::new(),
         schema_version: pipeline::model::SCHEMA_VERSION,
@@ -788,9 +795,13 @@ async fn load_active(
         teams: vec![], gates: vec![], escalations: vec![],
         forks: vec![], joins: vec![],
     };
-    let Ok(projects) = project_store.list().await else { return (String::new(), String::new(), empty); };
-    let Some(project) = projects.into_iter().next() else { return (String::new(), String::new(), empty); };
+    let Ok(projects) = project_store.list().await else { return (String::new(), String::new(), None, empty); };
+    let Some(project) = projects.into_iter().next() else { return (String::new(), String::new(), None, empty); };
     let root = project.root_path.to_string_lossy().into_owned();
+    // A5: the project's target_repo is the ${target_repo} default for the worker
+    // loop + inject. Read here at the composition root and handed in as a plain
+    // string (Runtime/pool never see the Project type).
+    let target_repo = project.target_repo.clone();
     let store = pipeline::store::PipelineStore::new(&root);
     let pipe = store
         .list_ids()
@@ -798,7 +809,7 @@ async fn load_active(
         .and_then(|ids| ids.into_iter().next())
         .and_then(|id| store.load(&id).ok())
         .unwrap_or(empty);
-    (project.id.0, root, pipe)
+    (project.id.0, root, target_repo, pipe)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -921,7 +932,7 @@ pub fn run() {
                 handle.manage(workspace::git_config::GitConfigState { pool: pool.clone() });
 
                 // Runtime state (Plan 3).
-                let (project_id, project_root, pipe) = load_active(&project_store).await;
+                let (project_id, project_root, project_target_repo, pipe) = load_active(&project_store).await;
                 let pipe = Arc::new(pipe);
                 let tasks = Arc::new(TaskStore::new(pool.clone()));
                 let invocation_audit = Arc::new(runtime::invocation_audit::InvocationAuditStore::new(pool.clone()));
@@ -934,6 +945,7 @@ pub fn run() {
                 let runtime_state_arc = Arc::new(RuntimeState {
                     tasks: tasks.clone(), brake: brake.clone(), pipeline: pipe.clone(),
                     project_id: project_id.clone(), project_root: project_root.clone(),
+                    project_target_repo: project_target_repo.clone(),
                 });
                 handle.manage(RuntimeState {
                     tasks: tasks.clone(),
@@ -941,6 +953,7 @@ pub fn run() {
                     pipeline: pipe.clone(),
                     project_id: project_id.clone(),
                     project_root: project_root.clone(),
+                    project_target_repo: project_target_repo.clone(),
                 });
 
                 // Review state (Plan 4).
@@ -1044,7 +1057,7 @@ pub fn run() {
                 if !pipe.teams.is_empty() {
                     let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                         Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
-                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())), Some(invocation_audit.clone()), Some(keychain.clone()));
+                    spawn_worker_loops(handle.clone(), pipe.clone(), tasks.clone(), brake.clone(), project_root, project_target_repo.clone(), Some(usage_sink.clone()), revision_reader, pool.clone(), Some(make_task_log_sink(handle.clone())), Some(invocation_audit.clone()), Some(keychain.clone()));
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
@@ -1084,6 +1097,7 @@ pub fn run() {
             workspace::api::workspace_list_projects,
             workspace::api::workspace_get_project,
             workspace::api::workspace_set_active_pipeline,
+            workspace::api::workspace_set_target_repo,
             workspace::api::workspace_remove_project,
             workspace::worktree::list_worktrees,
             workspace::worktree::remove_worktree,
@@ -1167,6 +1181,7 @@ fn spawn_worker_loops(
     tasks: Arc<TaskStore>,
     brake: Arc<Brake>,
     project_root: String,
+    project_target_repo: Option<String>,
     usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
     revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
     pool: sqlx::SqlitePool,
@@ -1175,6 +1190,10 @@ fn spawn_worker_loops(
     keychain: Option<Arc<dyn secrets::KeychainStore>>,
 ) {
     let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool));
+    // A5: convert the project target_repo to a PathBuf once (already tilde-
+    // expanded at create); the pool binds it as the ${target_repo} default.
+    let project_target_repo: Option<std::path::PathBuf> =
+        project_target_repo.map(std::path::PathBuf::from);
     for team in pipeline.teams.clone() {
         // Select the runner kind per team at the composition root. If a team
         // requests anthropic-api but its key can't be resolved, keep the worker
@@ -1211,6 +1230,7 @@ fn spawn_worker_loops(
             fanout: fanout.clone(),
             brake: brake.clone(),
             project_root: std::path::PathBuf::from(&project_root),
+            project_target_repo: project_target_repo.clone(),
             read_prompt: Arc::new({
                 let root = project_root.clone();
                 move |t: &Team| {
@@ -1595,6 +1615,7 @@ mod design_session_tests {
 
     async fn workspace_state(pool: sqlx::SqlitePool) -> WorkspaceState {
         sqlx::query(include_str!("../migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../migrations/010_project_target_repo.sql")).execute(&pool).await.unwrap();
         WorkspaceState { store: StdArc::new(ProjectStore::new(pool)) }
     }
 
@@ -1620,7 +1641,7 @@ mod design_session_tests {
         // an invalid draft: a team routes to a non-existent node -> hard validate fails
         let mut d = complete_draft("bad");
         d.teams[0].outputs.on_approve = Some("ghost".into());
-        let err = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), d)
+        let err = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), d, None)
             .await
             .unwrap_err();
         assert!(!err.is_empty());
@@ -1634,7 +1655,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-cpfd-ok-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
             .await
             .unwrap();
         // files written
@@ -1651,7 +1672,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-save-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
             .await.unwrap();
 
         // edit: change a team prompt body, then save
@@ -1671,7 +1692,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-save-bad-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
             .await.unwrap();
         let before = std::fs::read_to_string(root.join("prompts/research.md")).unwrap();
 
@@ -1689,7 +1710,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-todraft-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"))
+        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
             .await.unwrap();
         let loaded = pipeline::store::PipelineStore::new(root.to_string_lossy().into_owned()).load("demo").unwrap();
 
