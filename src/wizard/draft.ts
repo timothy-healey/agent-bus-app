@@ -3,7 +3,7 @@ import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join } from "../
 export const WIZARD_STEPS = ["basics", "teams", "prompts", "wiring", "review"] as const;
 export type WizardStep = (typeof WIZARD_STEPS)[number];
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export function emptyDraft(): DraftPipeline {
   return {
