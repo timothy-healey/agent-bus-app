@@ -23,4 +23,12 @@ describe("useRuntimeEvents", () => {
     act(() => listeners["task-changed"]?.({ payload: "T-42" }));
     expect(onTaskChanged).toHaveBeenCalledWith("T-42");
   });
+
+  it("calls onRunChanged when a run-changed event fires", async () => {
+    const onRunChanged = vi.fn();
+    renderHook(() => useRuntimeEvents({ onRunChanged }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => listeners["run-changed"]?.({ payload: "R-7" }));
+    expect(onRunChanged).toHaveBeenCalledWith("R-7");
+  });
 });
