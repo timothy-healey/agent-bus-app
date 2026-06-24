@@ -8,6 +8,8 @@
 
 /// A task aggregate changed (created/claimed/settled/routed). Board + list refetch.
 pub const TASK_CHANGED: &str = "task-changed";
+/// A run aggregate changed (started/completed). Board + run selector refetch (④e).
+pub const RUN_CHANGED: &str = "run-changed";
 /// Usage/brake state changed. Meter refetches.
 pub const USAGE_CHANGED: &str = "usage-changed";
 /// Display-only live-log fragment for one running task (R4).
@@ -24,7 +26,7 @@ mod tests {
     /// breaks every frontend subscription.
     #[test]
     fn all_event_names_are_tauri_legal() {
-        for name in [TASK_CHANGED, USAGE_CHANGED, TASK_LOG, CONVERSATION_DELTA] {
+        for name in [TASK_CHANGED, RUN_CHANGED, USAGE_CHANGED, TASK_LOG, CONVERSATION_DELTA] {
             assert!(!name.is_empty(), "event name must be non-empty");
             assert!(
                 name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '/' | ':' | '_')),

@@ -11,28 +11,59 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
 use pipeline::model::{Pipeline, Team};
 use runners::claude_cli::ClaudeCliRunner;
 use runners::output::Runner;
-use runtime::api::{ActivePipeline, RuntimeState};
+use runtime::api::{source_team, ActivePipeline, RuntimeState};
 use runtime::brake::Brake;
-use runtime::pool::{process_one_claim, ClaimOutcome, LogSinkFactory, PoolContext};
+use runtime::engine::{self, EngineContext, StepOutcome};
+use runtime::fanout_store::FanOutStore;
+use runtime::generator_ledger::GeneratorLedger;
+use runtime::pool::LogSinkFactory;
+use runtime::run_store::RunStore;
+use runtime::store::StoreRepo;
 use runtime::task_store::TaskStore;
 use workspace::store::ProjectStore;
 
+/// How long an idle / backpressured / retired worker loop sleeps before its next
+/// poll (the bounded-buffer idle backoff). Short enough to keep latency low, long
+/// enough that an idle pool doesn't spin.
+const LOOP_IDLE_SLEEP: Duration = Duration::from_millis(350);
+
 /// Collaborators a worker loop needs that are built ONCE at boot and reused
-/// across activations. Cheap to clone (Arcs / Options of Arcs).
+/// across activations. Cheap to clone (Arcs / Options of Arcs). ④d adds the
+/// bounded-buffer engine aggregates (Store / Run / GeneratorLedger / FanOutGroup)
+/// so each loop can build an `EngineContext` for the active run.
 #[derive(Clone)]
 pub struct WorkerDeps {
+    // NOTE (④d gap): the bounded-buffer `engine::invoke` seam does not yet thread
+    // the usage-sink / live-log / per-invocation-audit side channels the old
+    // single-task pool wired (the engine focuses on the store/backpressure model).
+    // These deps are kept on the bundle (still built at boot) so re-wiring them
+    // into the engine's invoke is a localized change; they are unused by the
+    // engine loops today. `usage-changed` is still emitted on each settling step.
+    #[allow(dead_code)]
     pub usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
     pub revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
+    #[allow(dead_code)]
     pub pool: sqlx::SqlitePool,
+    #[allow(dead_code)]
     pub log_sink: Option<Arc<LogSinkFactory>>,
+    #[allow(dead_code)]
     pub audit: Option<Arc<runtime::invocation_audit::InvocationAuditStore>>,
     pub keychain: Option<Arc<dyn secrets::KeychainStore>>,
+    /// The Store aggregate (occupancy<=capacity; reserve/release/commit/take).
+    pub stores: Arc<StoreRepo>,
+    /// The Run aggregate (generator-dry flag + completes-once guard).
+    pub runs: Arc<RunStore>,
+    /// The generator found-key ledger (dedup + dry detection).
+    pub ledger: Arc<GeneratorLedger>,
+    /// The fork/join barrier aggregate store (FanOutGroup; P1–P3).
+    pub fanout: Arc<FanOutStore>,
 }
 
 /// Owns the runtime-activation lifecycle: swap the active pipeline + (re)spawn
@@ -78,12 +109,26 @@ impl PipelineActivator {
     /// project's loops stop even when switching to "nothing").
     pub async fn activate(&self, project_id: &str) -> Result<(), String> {
         let (active, teams) = self.resolve(project_id).await?;
-        // Swap FIRST so any reader (inject) or loop that observes the new
+        // Swap FIRST so any reader (start_run) or loop that observes the new
         // generation also observes the new active state (swap happens-before bump).
         self.runtime.activate_into(active.clone());
         let my_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // ④d: spawn the bounded-buffer engine loops for the NEW pipeline. The
+        // SOURCE (generator) team gets ONE generator loop (`generate_once`);
+        // every other (transformer) team gets `workers.max` worker loops
+        // (`transform_once`, which routes to gate/fork/join/team). Each loop is
+        // generation-guarded (retires on a newer activation) and drives the
+        // project's latest active run — created by `start_run`.
+        let source = source_team(&active.pipeline).map(|t| t.id.clone());
         for team in teams {
-            self.spawn_team_loop(active.clone(), team, my_gen);
+            if Some(&team.id) == source.as_ref() {
+                self.spawn_generator_loop(active.clone(), team, my_gen);
+            } else {
+                let workers = team.workers.max.max(1);
+                for _ in 0..workers {
+                    self.spawn_transformer_loop(active.clone(), team.clone(), my_gen);
+                }
+            }
         }
         Ok(())
     }
@@ -140,16 +185,10 @@ impl PipelineActivator {
         ))
     }
 
-    fn spawn_team_loop(&self, active: ActivePipeline, team: Team, my_gen: u64) {
-        let pipeline = active.pipeline.clone();
-        let project_root = active.project_root.clone();
-        let project_target_repo: Option<std::path::PathBuf> =
-            active.project_target_repo.as_deref().map(std::path::PathBuf::from);
-        let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(self.deps.pool.clone()));
-
-        // Per-team runner selection (keychain-first, then api_key_env). On failure
-        // keep the loop alive on claude-cli rather than panicking — we never crash
-        // the whole pool over one team's runner config.
+    /// Per-team runner selection (keychain-first, then api_key_env). On failure
+    /// keep the loop alive on claude-cli rather than panicking — we never crash
+    /// the whole pool over one team's runner config.
+    fn runner_for_team(&self, team: &Team) -> Arc<dyn Runner> {
         let effective = team.effective_runner();
         let keychain = self.deps.keychain.clone();
         let resolve_key = |c: &pipeline::model::RunnerConfig| -> Option<String> {
@@ -163,7 +202,7 @@ impl PipelineActivator {
             }
             c.api_key_env.as_ref().and_then(|n| std::env::var(n).ok())
         };
-        let runner: Arc<dyn Runner> = match runner_for(&effective, &resolve_key) {
+        match runner_for(&effective, &resolve_key) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
@@ -172,59 +211,179 @@ impl PipelineActivator {
                 );
                 Arc::new(ClaudeCliRunner::new())
             }
-        };
+        }
+    }
 
-        let ctx = PoolContext {
-            pipeline,
-            runner,
-            tasks: self.tasks.clone(),
-            fanout,
-            brake: self.brake.clone(),
-            project_root: std::path::PathBuf::from(&project_root),
-            project_target_repo,
-            read_prompt: Arc::new({
-                let root = project_root.clone();
-                move |t: &Team| {
-                    std::fs::read_to_string(std::path::Path::new(&root).join(&t.prompt))
-                        .unwrap_or_default()
-                }
-            }),
-            usage_sink: self.deps.usage_sink.clone(),
-            revision_reader: self.deps.revision_reader.clone(),
-            log_sink: self.deps.log_sink.clone(),
-            audit: self.deps.audit.clone(),
-            // S3: OS sandbox confinement is EXPERIMENTAL, macOS-only, Apple-
-            // deprecated, and OFF by default.
-            sandbox: false,
-        };
+    /// Spawn the SOURCE team's generator loop: poll `engine::generate_once` for the
+    /// project's latest active run, loop-until-dry, with the backpressure/idle
+    /// backoff. Generation-guarded.
+    fn spawn_generator_loop(&self, active: ActivePipeline, team: Team, my_gen: u64) {
+        let runner = self.runner_for_team(&team);
         let handle = self.handle.clone();
         let generation = self.generation.clone();
+        let runs = self.deps.runs.clone();
+        let project_id = active.project_id.clone();
+        let ctx_builder = self.ctx_builder(active, runner);
         tauri::async_runtime::spawn(async move {
             loop {
-                // GENERATION GUARD: retire when a newer activation has happened.
-                // Checked at the TOP of the iteration so a retired loop never
-                // issues a fresh claim against the old pipeline.
                 if generation.load(Ordering::SeqCst) != my_gen {
                     break;
                 }
-                match process_one_claim(&ctx, &team).await {
-                    Ok(ClaimOutcome::Settled { task_id, .. }) => {
-                        let _ = handle.emit(crate::events::TASK_CHANGED, task_id);
-                        // A settle recorded worker usage; tell the meter to refresh.
-                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                let Some(run) = active_run(&runs, &project_id).await else {
+                    tokio::time::sleep(LOOP_IDLE_SLEEP).await;
+                    continue;
+                };
+                let ctx = ctx_builder(run.id.clone());
+                match engine::generate_once(&ctx, &team).await {
+                    Ok(StepOutcome::Generated { keys }) if !keys.is_empty() => {
+                        let _ = handle.emit(crate::events::TASK_CHANGED, "generated");
+                        // No sleep: keep filling downstream until backpressure/dry.
                     }
-                    Ok(ClaimOutcome::RateLimited { .. }) => {
-                        // Reactive brake (spec) — reason surfaces on the meter.
-                        ctx.brake.set_on("rate-limit");
-                        let _ = handle.emit(crate::events::TASK_CHANGED, "rate-limited");
-                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                    Ok(_) => {
+                        // Idle / Backpressure / Retired / Braked: try to finish the
+                        // run, then back off. (A generator that just went dry may be
+                        // the last thing the run was waiting on.)
+                        finish_and_emit(&ctx, &handle).await;
+                        tokio::time::sleep(LOOP_IDLE_SLEEP).await;
                     }
-                    _ => {}
+                    Err(e) => {
+                        eprintln!("app: generator loop step failed for `{}`: {e}", team.id);
+                        tokio::time::sleep(LOOP_IDLE_SLEEP).await;
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         });
     }
+
+    /// Spawn one transformer worker loop for `team`: poll `engine::transform_once`
+    /// (which routes to gate/fork/join/team) for the project's latest active run,
+    /// with the backpressure/idle backoff. Generation-guarded. `workers.max` of
+    /// these run per non-source team (the pool).
+    fn spawn_transformer_loop(&self, active: ActivePipeline, team: Team, my_gen: u64) {
+        let runner = self.runner_for_team(&team);
+        let handle = self.handle.clone();
+        let generation = self.generation.clone();
+        let runs = self.deps.runs.clone();
+        let pipeline = active.pipeline.clone();
+        let project_id = active.project_id.clone();
+        let ctx_builder = self.ctx_builder(active, runner);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                if generation.load(Ordering::SeqCst) != my_gen {
+                    break;
+                }
+                let Some(run) = active_run(&runs, &project_id).await else {
+                    tokio::time::sleep(LOOP_IDLE_SLEEP).await;
+                    continue;
+                };
+                let ctx = ctx_builder(run.id.clone());
+                // A transformer step. If this team feeds a fork, also expand one
+                // fork item (the fork store is fed by this team's on_approve) so a
+                // single pool loop keeps within-item lanes flowing.
+                let progressed = match engine::transform_once(&ctx, &team).await {
+                    Ok(outcome) => {
+                        let settled = matches!(
+                            outcome,
+                            StepOutcome::Advanced { .. }
+                                | StepOutcome::Failed { .. }
+                                | StepOutcome::Revised { .. }
+                                | StepOutcome::Escalated { .. }
+                        );
+                        if settled {
+                            let _ = handle.emit(crate::events::TASK_CHANGED, "settled");
+                            let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                        }
+                        settled
+                    }
+                    Err(e) => {
+                        eprintln!("app: transformer loop step failed for `{}`: {e}", team.id);
+                        false
+                    }
+                };
+                // Expand any fork this team feeds (one item per poll), so lanes
+                // flow without a dedicated fork loop.
+                let mut forked = false;
+                for fork in pipeline.forks.iter().filter(|f| feeds_fork(&pipeline, &team.id, &f.id)) {
+                    if let Ok(StepOutcome::Advanced { .. }) = engine::fork_once(&ctx, fork).await {
+                        let _ = handle.emit(crate::events::TASK_CHANGED, "forked");
+                        forked = true;
+                    }
+                }
+                if !progressed && !forked {
+                    finish_and_emit(&ctx, &handle).await;
+                    tokio::time::sleep(LOOP_IDLE_SLEEP).await;
+                }
+            }
+        });
+    }
+
+    /// A cheap per-poll `EngineContext` builder closure: captures the resolved
+    /// active pipeline + this loop's runner; takes the current `run_id`. Only Arc
+    /// clones per poll. `self`-free so it moves into the spawned task.
+    fn ctx_builder(
+        &self,
+        active: ActivePipeline,
+        runner: Arc<dyn Runner>,
+    ) -> impl Fn(String) -> EngineContext + Send + Sync + 'static {
+        let stores = self.deps.stores.clone();
+        let runs = self.deps.runs.clone();
+        let ledger = self.deps.ledger.clone();
+        let fanout = self.deps.fanout.clone();
+        let tasks = self.tasks.clone();
+        let brake = self.brake.clone();
+        let revision_reader = self.deps.revision_reader.clone();
+        let project_root = active.project_root.clone();
+        let pipeline = active.pipeline.clone();
+        let target_repo: Option<std::path::PathBuf> =
+            active.project_target_repo.as_deref().map(std::path::PathBuf::from);
+        let read_root = project_root.clone();
+        let read_prompt: Arc<dyn Fn(&Team) -> String + Send + Sync> = Arc::new(move |t: &Team| {
+            std::fs::read_to_string(std::path::Path::new(&read_root).join(&t.prompt)).unwrap_or_default()
+        });
+        move |run_id: String| EngineContext {
+            run_id,
+            pipeline: pipeline.clone(),
+            stores: stores.clone(),
+            runs: runs.clone(),
+            ledger: ledger.clone(),
+            tasks: tasks.clone(),
+            fanout: fanout.clone(),
+            brake: brake.clone(),
+            runner: runner.clone(),
+            project_root: std::path::PathBuf::from(&project_root),
+            target_repo: target_repo.clone(),
+            read_prompt: read_prompt.clone(),
+            revision_reader: revision_reader.clone(),
+        }
+    }
+}
+
+/// The project's latest active (incomplete) run, or `None` (no run started yet).
+async fn active_run(runs: &RunStore, project_id: &str) -> Option<runtime::run_store::Run> {
+    runs.latest_active_for_project(project_id).await.ok().flatten()
+}
+
+/// Try to complete the run; on completion emit `run-changed` + `usage-changed`.
+async fn finish_and_emit(ctx: &EngineContext, handle: &AppHandle) {
+    match engine::try_finish_run(ctx, &ctx.run_id).await {
+        Ok(true) => {
+            let _ = handle.emit(crate::events::RUN_CHANGED, ctx.run_id.clone());
+            let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!("app: try_finish_run failed: {e}"),
+    }
+}
+
+/// Whether `team_id` feeds `fork_id` (its on_approve targets the fork). The
+/// transformer loop of that team also expands the fork it feeds.
+fn feeds_fork(pipeline: &Pipeline, team_id: &str, fork_id: &str) -> bool {
+    pipeline
+        .teams
+        .iter()
+        .find(|t| t.id == team_id)
+        .and_then(|t| t.outputs.on_approve.as_deref())
+        == Some(fork_id)
 }
 
 /// Composition-root factory: map a team's resolved RunnerConfig to a concrete

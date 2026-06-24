@@ -863,10 +863,16 @@ impl ToolDispatcher for RootDispatcher {
         let str_arg = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
         let result = match req.tool_name.as_str() {
             "inject_topic" => {
+                // ④d: inject is now Start-a-run. It returns the created Run; emit
+                // run-changed (a run started) + task-changed (the board refetches).
                 match runtime::api::inject_topic_inner(
                     &self.runtime, str_arg("topic").unwrap_or_default(), str_arg("target_repo"),
                 ).await {
-                    Ok(task) => { let _ = self.app.emit(crate::events::TASK_CHANGED, &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
+                    Ok(run) => {
+                        let _ = self.app.emit(crate::events::RUN_CHANGED, &run.id);
+                        let _ = self.app.emit(crate::events::TASK_CHANGED, &run.id);
+                        serde_json::to_value(run).map(ok).unwrap_or_else(err)
+                    }
                     Err(e) => err(e),
                 }
             }
@@ -1098,9 +1104,24 @@ pub fn run() {
                 // F4 crash recovery: release any tasks stuck in `running`.
                 let _ = tasks.release_orphaned_running(now_unix()).await;
 
+                // Bounded-buffer engine aggregates (④a/④d). ONE instance each,
+                // shared by RuntimeState (start_run + gate verdicts) and the
+                // activator's worker loops — a single source of truth per aggregate.
+                let stores = Arc::new(runtime::store::StoreRepo::new(pool.clone()));
+                let runs = Arc::new(runtime::run_store::RunStore::new(pool.clone()));
+                let ledger = Arc::new(runtime::generator_ledger::GeneratorLedger::new(pool.clone()));
+                let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool.clone()));
+                let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
+                    Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
+
                 let runtime_state_arc = Arc::new(RuntimeState::new(
                     tasks.clone(),
                     brake.clone(),
+                    stores.clone(),
+                    runs.clone(),
+                    ledger.clone(),
+                    fanout.clone(),
+                    revision_reader.clone(),
                     runtime::api::ActivePipeline {
                         pipeline: Arc::new(pipe),
                         project_id: project_id.clone(),
@@ -1212,8 +1233,6 @@ pub fn run() {
                 // generation). Built ONCE here at boot with all the loop
                 // collaborators; held in Tauri state so the create/select paths
                 // can re-activate. Boot activation goes through the SAME path.
-                let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
-                    Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
                 let activator = Arc::new(pipeline_activator::PipelineActivator::new(
                     handle.clone(),
                     runtime_state_arc.clone(),
@@ -1222,11 +1241,15 @@ pub fn run() {
                     brake.clone(),
                     pipeline_activator::WorkerDeps {
                         usage_sink: Some(usage_sink.clone()),
-                        revision_reader,
+                        revision_reader: revision_reader.clone(),
                         pool: pool.clone(),
                         log_sink: Some(make_task_log_sink(handle.clone())),
                         audit: Some(invocation_audit.clone()),
                         keychain: Some(keychain.clone()),
+                        stores: stores.clone(),
+                        runs: runs.clone(),
+                        ledger: ledger.clone(),
+                        fanout: fanout.clone(),
                     },
                 ));
                 handle.manage(activator.clone());
@@ -1296,6 +1319,7 @@ pub fn run() {
             pipeline_to_draft_cmd,
             save_pipeline_edits,
             runtime::api::inject_topic,
+            runtime::api::start_run,
             runtime::api::approve_gate,
             runtime::api::reject_gate,
             runtime::api::revise_gate,

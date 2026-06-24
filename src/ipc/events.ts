@@ -9,6 +9,8 @@
 export const EVENTS = {
   /// A task aggregate changed (created/claimed/settled/routed). Board + list refetch.
   taskChanged: "task-changed",
+  /// A run aggregate changed (started/completed). Board + run selector refetch (④e).
+  runChanged: "run-changed",
   /// Usage/brake state changed. Meter refetches.
   usageChanged: "usage-changed",
   /// Display-only live-log fragment for one running task (R4).
