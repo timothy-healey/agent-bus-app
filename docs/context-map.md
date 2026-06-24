@@ -73,7 +73,7 @@ flowchart TB
 | From → To | Pattern | Surface / contract |
 |---|---|---|
 | Workspace → all six others | **Shared Kernel** | Path-resolution variables: `${project}`, `${target_repo}`, `${task_id}`, `${agent_bus}` |
-| Pipeline Authoring ↔ Runtime | **Shared Kernel** (`schema_version: 3`) | The live pipeline graph (now incl. fork/join parallel lanes, per-team `role` + bounded input `store`); hot-reload supported with save-validation preventing orphan in-flight tasks |
+| Pipeline Authoring ↔ Runtime | **Shared Kernel** (`schema_version: 3`) | The live pipeline graph (now incl. fork/join parallel lanes, per-team `role` + bounded input `store`); validation designates the single **source** team (no forward inbound) and asserts **store reachability** from it (④a); hot-reload supported with save-validation preventing orphan in-flight tasks |
 | Runtime → Review | **Customer-Supplier** | Runtime publishes "task reached a gate" events; Review consumes |
 | Review → Runtime | **Conformist** | Review emits verdicts in Runtime's vocabulary (`approve` / `revise` / `reject`); Runtime owns the state machine |
 | Runtime → Runners | **Anti-Corruption Layer** | Runners insulates Runtime from Claude's idiom (CLI flags, API params, stream-json shape) |
@@ -117,6 +117,28 @@ flowchart TB
 | **Domain events** | `WorkerSpawned` · `WorkerCrashed` · `WorkerKilled` · `BrakeSet` · `BrakeReleased` |
 
 > **Cross-reference, not composition.** Each Worker holds a `task_id`; each Task holds an optional `claim` referring to a worker. Two aggregates, joined by reference. One transaction can mutate one Task without locking the pool, and vice-versa.
+
+#### Aggregate: `Run` (bounded-buffer assembly line — ④a foundation, migration 012)
+
+| | |
+|---|---|
+| **Root identity** | `run_id` (one execution of a pipeline — the tree of work-items from a single Start) |
+| **Composition** | `pipeline`, `project_id`, `generator_dry`, `completed`, `created_at` |
+| **Invariants** | • **Completes exactly once** — `UPDATE runs SET completed=1 WHERE id=? AND completed=0` (single-writer guard; rows-affected==1 is the sole completer) <br> • The completion *precondition* (generator dry AND all stores empty AND no running workers) is computed by the caller (④b/④h); `try_complete` is only the guard |
+| **Module** | `runtime::run_store` |
+
+#### Aggregate: `Store` (bounded buffer — the backpressure boundary)
+
+| | |
+|---|---|
+| **Root identity** | `(run_id, stage)` |
+| **Composition** | `capacity`, `occupancy` |
+| **Invariants** | • **`occupancy ≤ capacity`, always** — `UPDATE stores SET occupancy=occupancy+1 WHERE … AND occupancy<capacity` (rows-affected==1 = won a slot; 0 = full → backpressure) <br> • `release` guarded by `occupancy>0` (never negative) <br> • No count-then-act race — the conditional UPDATE is the single writer |
+| **Module** | `runtime::store` |
+
+> **Generator ledger** (not an aggregate root — a per-`(run_id, source-stage)` append-only key set in `runtime::generator_ledger`): the dedup + dry-detection source of truth. `record_keys` (INSERT OR IGNORE) returns the count of NEW keys (0 ⇒ a dry pass); `found_keys` is the already-found set handed to the generator each pass.
+>
+> **Work-item.** The `Task` aggregate gains `run_id` + `item_key` (the candidate key — lineage/dedup identity), additive/nullable on `tasks` (migration 012) until ④b wires the worker pools onto the stores.
 
 ### Review
 
