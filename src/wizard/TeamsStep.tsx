@@ -37,7 +37,7 @@ export function TeamsStep({ draft, onChange }: TeamsStepProps) {
               style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", padding: "var(--sp-2)", borderRadius: "var(--r-sm)", fontFamily: "inherit" }}
             />
             <span style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)" }}>{t.id}</span>
-            <Button size="sm" variant="ghost" aria-label={`advanced ${t.id}`} aria-expanded={openAdvanced === t.id} onClick={() => setOpenAdvanced((o) => (o === t.id ? null : t.id))}>⚙</Button>
+            <Button size="sm" variant="ghost" aria-label={`advanced ${t.id}`} aria-expanded={openAdvanced === t.id} onClick={() => setOpenAdvanced((o) => (o === t.id ? null : t.id))}>⚙ Advanced{openAdvanced === t.id ? " ▾" : ""}</Button>
             <Button size="sm" variant="ghost" aria-label={`remove ${t.id}`} onClick={() => onChange(removeTeam(draft, t.id))}>✕</Button>
           </div>
           {openAdvanced === t.id && (
