@@ -1,6 +1,6 @@
 import type { DraftPipeline } from "../ipc/pipeline";
 import { PipelineView } from "../components/PipelineView";
-import { draftToPipeline } from "./WiringStep";
+import { draftToPipeline } from "./draftToPipeline";
 
 interface ReviewStepProps {
   basics: { name: string; root: string; description: string };
