@@ -147,6 +147,18 @@ fn workers_key_set_matches_ts() {
     assert_eq!(keys(&v), set(&["min", "max"]));
 }
 
+/// Pins the new Team fields to the TS shape: `role` (lowercase string),
+/// `store.capacity`, and the `workers.min` rename (replaces `default`).
+#[test]
+fn team_role_and_store_wire_shape() {
+    let t = full_team(); // existing helper that builds a fully-populated Team
+    let v = serde_json::to_value(&t).unwrap();
+    assert_eq!(v["role"], serde_json::json!("producer"));
+    assert_eq!(v["store"]["capacity"], serde_json::json!(8));
+    assert!(v["workers"].get("min").is_some(), "workers.min replaces default");
+    assert!(v["workers"].get("default").is_none());
+}
+
 /// Locks `src/ipc/pipeline.ts:46-50` `interface Gate { id; label; downstream }`.
 #[test]
 fn gate_key_set_matches_ts() {
