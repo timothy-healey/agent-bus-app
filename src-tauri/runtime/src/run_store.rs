@@ -129,6 +129,32 @@ impl RunStore {
         }))
     }
 
+    /// Every run for a project, newest first (created_at DESC, id DESC). Powers
+    /// the frontend run selector (Runtime redesign ④e): the board scopes to one
+    /// of these; the topmost not-completed run is the active one. Includes
+    /// completed runs so the operator can review past runs.
+    pub async fn list_for_project(&self, project_id: &str) -> Result<Vec<Run>, RunStoreError> {
+        let rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(
+            "SELECT id, pipeline, project_id, generator_dry, completed, created_at
+             FROM runs WHERE project_id = ?
+             ORDER BY created_at DESC, id DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Run {
+                id: r.0,
+                pipeline: r.1,
+                project_id: r.2,
+                generator_dry: r.3 != 0,
+                completed: r.4 != 0,
+                created_at: r.5,
+            })
+            .collect())
+    }
+
     /// Attempt to complete the run exactly once. The conditional UPDATE is the
     /// guard: `rows_affected == 1` ⇒ this caller is the sole completer; `0` ⇒ the
     /// run was already completed (another caller won, or a re-call). The
@@ -216,6 +242,26 @@ mod tests {
         assert_eq!(store.latest_active_for_project("proj").await.unwrap().unwrap().id, "R1");
         // a different project sees none
         assert!(store.latest_active_for_project("other").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_for_project_returns_newest_first_including_completed() {
+        let store = RunStore::new(fresh_pool().await);
+        assert!(store.list_for_project("proj").await.unwrap().is_empty());
+        let mut r1 = Run::new("R1".into(), "pipe".into(), "proj".into(), 100);
+        r1.created_at = 100;
+        store.create(&r1).await.unwrap();
+        let mut r2 = Run::new("R2".into(), "pipe".into(), "proj".into(), 200);
+        r2.created_at = 200;
+        store.create(&r2).await.unwrap();
+        // a different project's run must not leak in
+        store.create(&Run::new("RX".into(), "pipe".into(), "other".into(), 300)).await.unwrap();
+        store.try_complete("R1").await.unwrap();
+        let runs = store.list_for_project("proj").await.unwrap();
+        assert_eq!(runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["R2", "R1"]);
+        // completed runs are included (the operator reviews past runs)
+        assert!(runs.iter().find(|r| r.id == "R1").unwrap().completed);
+        assert!(!runs.iter().find(|r| r.id == "R2").unwrap().completed);
     }
 
     #[tokio::test]
