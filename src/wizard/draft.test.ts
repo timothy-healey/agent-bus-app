@@ -3,6 +3,7 @@ import { emptyDraft, WIZARD_STEPS, renameTeam, setPromptBody, setTeamModel, addT
 import { setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
 import { addGate, removeGate, setTeamApprove } from "./draft";
 import { addForkJoin, removeForkJoin } from "./draft";
+import { setTeamRole, setTeamStoreCapacity, setTeamWorkers } from "./draft";
 
 describe("wizard draft helpers", () => {
   it("emptyDraft has no teams + current schema version", () => {
@@ -76,6 +77,51 @@ describe("advanced team config helpers (W2)", () => {
     expect(d1.teams[0].scope.reads).toEqual(["src/**", "docs/**"]);
     const d2 = setTeamWrites(base, "research", "artifacts/**");
     expect(d2.teams[0].scope.writes).toEqual(["artifacts/**"]);
+  });
+});
+
+describe("role / scale / store helpers (chunk ②)", () => {
+  const base = addTeam(emptyDraft(), "research", "Research");
+
+  it("defaultTeam seeds role=producer and a store capacity", () => {
+    expect(base.teams[0].role).toBe("producer");
+    expect(base.teams[0].store?.capacity).toBeGreaterThan(0);
+  });
+
+  it("setTeamRole flips a team's role", () => {
+    const d = setTeamRole(base, "research", "reviewer");
+    expect(d.teams[0].role).toBe("reviewer");
+    // immutable: the source draft is untouched
+    expect(base.teams[0].role).toBe("producer");
+  });
+
+  it("setTeamRole only touches the named team", () => {
+    const two = addTeam(base, "review", "Review");
+    const d = setTeamRole(two, "review", "reviewer");
+    expect(d.teams.find((t) => t.id === "research")?.role).toBe("producer");
+    expect(d.teams.find((t) => t.id === "review")?.role).toBe("reviewer");
+  });
+
+  it("setTeamStoreCapacity sets the WIP capacity", () => {
+    const d = setTeamStoreCapacity(base, "research", 12);
+    expect(d.teams[0].store).toEqual({ capacity: 12 });
+  });
+
+  it("setTeamStoreCapacity floors at 1 and coerces non-finite to 1", () => {
+    expect(setTeamStoreCapacity(base, "research", 0).teams[0].store?.capacity).toBe(1);
+    expect(setTeamStoreCapacity(base, "research", -5).teams[0].store?.capacity).toBe(1);
+    expect(setTeamStoreCapacity(base, "research", Number.NaN).teams[0].store?.capacity).toBe(1);
+  });
+
+  it("setTeamWorkers sets the Scale min/max", () => {
+    const d = setTeamWorkers(base, "research", { min: 2, max: 5 });
+    expect(d.teams[0].workers).toEqual({ min: 2, max: 5 });
+  });
+
+  it("setTeamWorkers clamps min>=1 and max>=min", () => {
+    expect(setTeamWorkers(base, "research", { min: 0, max: 3 }).teams[0].workers).toEqual({ min: 1, max: 3 });
+    // max below min is raised to min
+    expect(setTeamWorkers(base, "research", { min: 4, max: 2 }).teams[0].workers).toEqual({ min: 4, max: 4 });
   });
 });
 
