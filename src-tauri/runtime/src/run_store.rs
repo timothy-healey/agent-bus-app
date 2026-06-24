@@ -13,6 +13,7 @@
 //!
 //! Additive: not wired into the existing single-task pool — that is ④b.
 
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use thiserror::Error;
 
@@ -25,7 +26,7 @@ pub enum RunStoreError {
 }
 
 /// A Run row (the aggregate root's persisted state).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
     pub pipeline: String,
@@ -101,6 +102,33 @@ impl RunStore {
         Ok(())
     }
 
+    /// The newest still-running (not-completed) run for a project, if any. The
+    /// worker loops poll this to find the run they should drive: `start_run`
+    /// creates a run, the loops pick it up on their next poll and drive its engine
+    /// step until it completes. Newest-first so a fresh Start supersedes an older
+    /// in-flight run for the same project (v1 drives one active run per project).
+    pub async fn latest_active_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<Run>, RunStoreError> {
+        let row = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(
+            "SELECT id, pipeline, project_id, generator_dry, completed, created_at
+             FROM runs WHERE project_id = ? AND completed = 0
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Run {
+            id: r.0,
+            pipeline: r.1,
+            project_id: r.2,
+            generator_dry: r.3 != 0,
+            completed: r.4 != 0,
+            created_at: r.5,
+        }))
+    }
+
     /// Attempt to complete the run exactly once. The conditional UPDATE is the
     /// guard: `rows_affected == 1` ⇒ this caller is the sole completer; `0` ⇒ the
     /// run was already completed (another caller won, or a re-call). The
@@ -168,6 +196,26 @@ mod tests {
         assert!(store.try_complete("R1").await.unwrap(), "first call completes");
         assert!(store.get("R1").await.unwrap().completed);
         assert!(!store.try_complete("R1").await.unwrap(), "second call no-ops");
+    }
+
+    #[tokio::test]
+    async fn latest_active_for_project_picks_newest_incomplete() {
+        let store = RunStore::new(fresh_pool().await);
+        // none yet
+        assert!(store.latest_active_for_project("proj").await.unwrap().is_none());
+        let mut r1 = Run::new("R1".into(), "pipe".into(), "proj".into(), 100);
+        r1.created_at = 100;
+        store.create(&r1).await.unwrap();
+        let mut r2 = Run::new("R2".into(), "pipe".into(), "proj".into(), 200);
+        r2.created_at = 200;
+        store.create(&r2).await.unwrap();
+        // newest incomplete wins
+        assert_eq!(store.latest_active_for_project("proj").await.unwrap().unwrap().id, "R2");
+        // complete R2 → R1 becomes the active one
+        store.try_complete("R2").await.unwrap();
+        assert_eq!(store.latest_active_for_project("proj").await.unwrap().unwrap().id, "R1");
+        // a different project sees none
+        assert!(store.latest_active_for_project("other").await.unwrap().is_none());
     }
 
     #[tokio::test]
