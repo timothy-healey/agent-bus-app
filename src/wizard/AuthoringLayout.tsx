@@ -70,9 +70,12 @@ export function AuthoringLayout({
                     onClick={s.disabled ? undefined : s.onSelect}
                     style={{
                       ...navStep,
-                      color: current ? "var(--text)" : s.disabled ? "var(--text-4)" : "var(--text-2)",
-                      background: current ? "var(--surface-2)" : "transparent",
-                      borderLeft: current ? "2px solid var(--accent)" : "2px solid transparent",
+                      // Current step = the "selected" state from DESIGN.md §States
+                      // (accent-2 surface + accent-bd border + accent text). NO
+                      // side-stripe — that accent border is a hard ban (§Anti-patterns).
+                      color: current ? "var(--accent)" : s.disabled ? "var(--text-4)" : "var(--text-2)",
+                      background: current ? "var(--accent-2)" : "transparent",
+                      borderColor: current ? "var(--accent-bd)" : "transparent",
                       cursor: s.disabled ? "not-allowed" : "pointer",
                     }}
                   >
@@ -122,10 +125,13 @@ const navStep: CSSProperties = {
   fontFamily: "inherit",
   fontSize: "var(--ts-base)",
   padding: "var(--sp-2) var(--sp-3)",
-  borderTop: "none",
-  borderRight: "none",
-  borderBottom: "none",
+  // A full 1px border (transparent by default; accent-bd when current) — never a
+  // side-stripe (DESIGN.md §Anti-patterns).
+  borderWidth: "1px",
+  borderStyle: "solid",
+  borderColor: "transparent",
   borderRadius: "var(--r-sm)",
+  background: "transparent",
   textTransform: "capitalize",
 };
 const switcherSlot: CSSProperties = { borderTop: "1px solid var(--border)", paddingTop: "var(--sp-4)" };
