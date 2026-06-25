@@ -335,6 +335,13 @@ pub fn parse_tool_call(block: &str) -> Result<ToolCallRequest, String> {
 /// ChatRunner::chat call. On hitting the cap the loop stops with a clear turn.
 pub const MAX_STEPS: usize = 8;
 
+/// Bounded **repair turn** budget for invalid tool ARGUMENTS (T1, mirroring
+/// DS-Schema's `chat_with_repair`): when the model emits a `{tool,args}` whose
+/// args fail schema validation, re-prompt on the SAME dialogue_id naming the
+/// specific arg error up to this many times before giving up with a clear,
+/// non-dispatch turn. A valid first emit dispatches with no extra call.
+pub const MAX_REPAIR_RETRIES: usize = 2;
+
 /// The within-turn agentic chat loop (backlog C1, Option B). For one user
 /// message it alternates model calls and tool dispatches until the model replies
 /// with plain prose (no fenced tool-call = done, DD3), then returns ONE composite
@@ -392,6 +399,8 @@ impl ConversationEngine for AgenticChatEngine {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         // The first turn is the user's words; subsequent turns are fed-back results.
         let mut next_user_message = input.to_string();
+        // T1: count of bounded arg-repair re-prompts used so far this turn.
+        let mut repair_attempts: usize = 0;
 
         for _step in 0..self.max_steps {
             // DD4: brake before each step — never call the model or dispatch while braked.
@@ -451,6 +460,36 @@ impl ConversationEngine for AgenticChatEngine {
                 }
                 Ok(req) => req,
             };
+
+            // T1: validate the model's args against the tool's PUBLISHED input_schema
+            // BEFORE dispatch (the ACL seal — the loop validates the JSON schema, never
+            // the supplier arg types). On a miss, run a BOUNDED repair turn: re-prompt
+            // on the SAME dialogue_id naming the specific arg error (≤ MAX_REPAIR_RETRIES),
+            // then give up with a clear non-dispatch turn (mirrors chat_with_repair).
+            if let Some(spec) = catalog.by_name(&request.tool_name) {
+                if let Err(arg_err) =
+                    conversational_control::validate::validate_args(&spec.input_schema, &request.args)
+                {
+                    if repair_attempts >= MAX_REPAIR_RETRIES {
+                        return EngineReply {
+                            text: format!(
+                                "[invalid tool arguments] `{}`: {arg_err}. Gave up after {} repair \
+                                 attempts; no tool was dispatched.",
+                                request.tool_name, MAX_REPAIR_RETRIES,
+                            ),
+                            tool_calls,
+                        };
+                    }
+                    repair_attempts += 1;
+                    next_user_message = format!(
+                        "Tool call rejected: arguments for `{}` are invalid — {arg_err}. \
+                         Re-emit the tool call as a single fenced ```json \
+                         {{\"tool\":\"{}\",\"args\":{{…}}}} block with the corrected arguments.",
+                        request.tool_name, request.tool_name,
+                    );
+                    continue;
+                }
+            }
 
             // DD4: brake before dispatch too.
             if self.brake.is_on() {
