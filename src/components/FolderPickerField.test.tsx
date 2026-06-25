@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-const pickFolderMock = vi.fn();
+const listDirMock = vi.fn();
 vi.mock("../ipc/workspace", () => ({
-  pickFolder: () => pickFolderMock(),
+  listDir: (path: string) => listDirMock(path),
 }));
 
 import { FolderPickerField } from "./FolderPickerField";
@@ -19,22 +19,18 @@ describe("FolderPickerField", () => {
     expect(onChange).toHaveBeenCalledWith("~/y");
   });
 
-  it("writes the picked absolute path into the field via Browse (mocked dialog)", async () => {
-    pickFolderMock.mockResolvedValueOnce("/Users/tim/projects/example");
+  it("opens the in-app tree on Browse and writes the picked folder", async () => {
+    listDirMock.mockResolvedValueOnce([
+      { name: "projects", path: "/Users/tim/projects", is_dir: true },
+      { name: "readme.md", path: "/Users/tim/readme.md", is_dir: false },
+    ]);
     const onChange = vi.fn();
-    render(<FolderPickerField label="Target repo" value="" onChange={onChange} />);
+    render(<FolderPickerField label="Target repo" value="" onChange={onChange} root="~" />);
     fireEvent.click(screen.getByRole("button", { name: /browse/i }));
-    await waitFor(() =>
-      expect(onChange).toHaveBeenCalledWith("/Users/tim/projects/example"),
-    );
-  });
-
-  it("does nothing when the picker is cancelled (null)", async () => {
-    pickFolderMock.mockResolvedValueOnce(null);
-    const onChange = vi.fn();
-    render(<FolderPickerField label="Target repo" value="keep" onChange={onChange} />);
-    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
-    await waitFor(() => expect(pickFolderMock).toHaveBeenCalled());
-    expect(onChange).not.toHaveBeenCalled();
+    // the tree loaded the root and shows the folder
+    await waitFor(() => expect(screen.getByText(/projects/)).toBeInTheDocument());
+    // a file is not selectable in folder mode (no checkbox, click is a no-op)
+    fireEvent.click(screen.getByText(/projects/));
+    expect(onChange).toHaveBeenCalledWith("/Users/tim/projects");
   });
 });

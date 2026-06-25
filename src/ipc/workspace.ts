@@ -72,6 +72,23 @@ export async function pickFolder(): Promise<string | null> {
   return typeof result === "string" ? result : null;
 }
 
+/** One filesystem entry returned by `list_dir` (G7). Mirrors the Rust
+ *  `DirEntry` DTO (wire-contract test locks the key set). */
+export interface DirEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+/** List a directory's immediate children for the in-app FileTreePicker (G7).
+ *  Tilde-expanded + dirs-first backend-side; tolerant (rejects with a string on
+ *  an unreadable dir). Sole crossing point for the fs read-dir idiom — the
+ *  picker depends on this wrapper, never std/fs (same ACL-seal discipline as
+ *  `pickFolder`/the keychain/git seams). */
+export async function listDir(path: string): Promise<DirEntry[]> {
+  return await invoke<DirEntry[]>("list_dir", { path });
+}
+
 /** Set (or clear) a project's target repo (A5). Clears when null/empty. */
 export async function workspaceSetTargetRepo(
   id: string,
