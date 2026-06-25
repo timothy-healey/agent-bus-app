@@ -253,6 +253,25 @@ fn role_str(team: &Team) -> &'static str {
     }
 }
 
+/// The human-readable topic for a produced work-item (LF32): the agent's
+/// `DESCRIPTION:` when present, else a de-kebabbed title derived from the slug
+/// (`item_key`) — hyphens/underscores to spaces, first letter capitalised. Pure.
+pub fn topic_for_item(description: Option<&str>, item_key: &str) -> String {
+    if let Some(d) = description {
+        let d = d.trim();
+        if !d.is_empty() {
+            return d.to_string();
+        }
+    }
+    let spaced = item_key.replace(['-', '_'], " ");
+    let spaced = spaced.trim();
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Run at most one transformer step for `team` using **block-before-claim**: a
 /// downstream slot is reserved BEFORE the input item is claimed, so no agent run
 /// is ever started that can't be placed (the backpressure barrier). On success
@@ -1570,6 +1589,14 @@ mod tests {
         RunnerOutput { verdict: agent_bus_core::Verdict::Approve, artifact_path: None, final_text: String::new(), usage: RunnerUsage::default() }
     }
 
+    #[test]
+    fn topic_for_item_prefers_description_then_dekebabs_the_key() {
+        assert_eq!(topic_for_item(Some("Tag deltas by kind"), "lwv-a1-seam"), "Tag deltas by kind");
+        assert_eq!(topic_for_item(None, "lwv-a1-logdelta-seam"), "Lwv a1 logdelta seam");
+        assert_eq!(topic_for_item(Some("   "), "only-key"), "Only key");
+        assert_eq!(topic_for_item(None, ""), "");
+    }
+
     #[tokio::test]
     async fn invoke_sets_working_dir_to_effective_target_repo() {
         // A single terminal producer team; one queued item to claim + invoke.
@@ -2705,7 +2732,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_streams_prose_deltas_when_a_log_sink_is_wired() {
-        use runners::output::LogSink;
+        use runners::output::{LogDelta, LogSink};
         let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
         // A FakeRunner with scripted deltas forwarded on invoke_stream.
         let runner = Arc::new(FakeRunner::with_deltas(
@@ -2720,7 +2747,7 @@ mod tests {
         ctx.log_sink = Some(Arc::new(move |task_id: &str| -> LogSink {
             let tid = task_id.to_string();
             let captured = seen_for_factory.clone();
-            Box::new(move |delta: &str| captured.lock().unwrap().push((tid.clone(), delta.to_string())))
+            Box::new(move |d: &LogDelta| captured.lock().unwrap().push((tid.clone(), d.text.clone())))
         }));
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
         ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
