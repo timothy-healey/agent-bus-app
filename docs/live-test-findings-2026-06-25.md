@@ -201,3 +201,15 @@ The generator (which has no parent task to inherit from) created its child work-
 ### LF25 · generator_ledger records keys BEFORE the work-item commits → lost candidates — `uninvestigated`
 
 > Surfaced diagnosing "where are the candidates": live DB showed 9 keys in `generator_ledger` but 0 tasks (the FK-787/LF24 runs). The research agent worked (9 sensible candidate keys), but `engine::generate_once` calls `record_keys` for the WHOLE batch BEFORE the reserve+commit loop. So any key whose commit fails (FK error pre-LF24, OR backpressure when the downstream store fills mid-loop) stays in the ledger as "found" but was never stored → a future/resumed pass sees it in `found`, emits 0 new, goes dry, and that candidate is **permanently lost** for the run. (An existing comment treats the backpressure case as intentional — but it's wrong: the un-committed key shouldn't be remembered as found.) Fix: record a key in the ledger only AFTER its work-item commit succeeds (move `record_keys` into the loop post-insert, or un-record on failure) so ledger ⟺ committed items stay consistent. Pre-LF24 runs are poisoned (ledger has keys, no tasks → resume goes dry); start a fresh run. To investigate.
+
+---
+
+### LF26 · Worker artifacts written to the app's cwd, not the project root — `uninvestigated`
+
+> Surfaced sweeping the DB before a wipe. Stored candidate artifacts are at `/Users/tim/projects/agent-bus-app/src-tauri/app/artifacts/research/<key>/candidate.md` — under the running APP's cwd, NOT the project root (`/Users/tim/projects/agent-bus-uplift/artifacts/` is empty). The claude worker process has no `current_dir` set (claude_cli spawn never sets cwd) and/or the `${project}`/artifact-dir isn't passed as an absolute project-rooted path, so the agent's relative `artifacts/research/...` writes resolve against the app's run dir. Consequences: (1) artifacts scatter into the app's own source tree (debris); (2) the CardDrawer artifact tab (`read_artifact`, project-rooted) can't find them → blank. Fix: set the worker's `current_dir` to the project root (or the target-repo/worktree) AND/OR make the output-contract artifact path absolute + project-anchored. Also clean the stray `src-tauri/app/artifacts/` debris. To investigate.
+
+### Diagnostic sweep observations (2026-06-25, pre-wipe)
+- `invocation_audit`: 9 `error:other` (the FK-787/LF24 failures) + **4 NULL-outcome rows** (`record_start` with no settle — a hard engine-step error leaves the audit row in-flight forever; settle-on-error is incomplete).
+- Leaked store reservations: spec-writers occupancy 1 (run fab) + **5** (run 51aa) with far fewer tasks — confirms the reservation-leak (lifecycle reconcile / LF25) live.
+- `generator_ledger` = 12 keys vs `tasks` = 3 — confirms LF25 (keys recorded before commit; most never became tasks).
+- 3 tasks stuck `queued` at spec-writers (not claimed) — spec-writers not progressing (running binary may predate recent fixes; worth re-checking on a fresh build).
