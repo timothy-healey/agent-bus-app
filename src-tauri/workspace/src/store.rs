@@ -151,13 +151,68 @@ impl ProjectStore {
     /// Deletes only the row — on-disk artifacts under the project root are NOT
     /// touched (Workspace owns the registry, not a destructive filesystem wipe).
     pub async fn remove(&self, id: &ProjectId) -> Result<(), ProjectStoreError> {
+        // FK-safe cascade: many tables reference a project directly or
+        // transitively, and the runtime pool runs with `PRAGMA foreign_keys = ON`
+        // (sqlx's default), so a bare `DELETE FROM projects` is blocked with FK
+        // 787 whenever the project has any children. Delete the whole subtree in
+        // a single transaction, leaf-first, then the project itself. Subqueries
+        // (not row-by-row) so it works regardless of how many children exist.
+        let mut tx = self.pool.begin().await?;
+
+        // Leaves first, walking up the FK chain.
+
+        // comments → tasks → projects
+        sqlx::query("DELETE FROM comments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        // invocation_audit → tasks → projects (no declared FK, cascaded for safety)
+        sqlx::query("DELETE FROM invocation_audit WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        // workers reference tasks (nullable, no declared FK) — clear the link so
+        // an idle worker row never dangles at a just-deleted task.
+        sqlx::query("UPDATE workers SET task_id = NULL WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+
+        // stores / generator_ledger → runs → projects (no declared FK)
+        sqlx::query("DELETE FROM stores WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?)")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM generator_ledger WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?)")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+
+        // Now the direct children of the project.
+        sqlx::query("DELETE FROM tasks WHERE project_id = ?")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM runs WHERE project_id = ?")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM conversations WHERE project_id = ?")
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+
+        // Finally the project row itself.
         let result = sqlx::query("DELETE FROM projects WHERE id = ?")
             .bind(&id.0)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         if result.rows_affected() == 0 {
+            // Roll back (drop) the empty transaction; nothing to commit.
             return Err(ProjectStoreError::NotFound(id.clone()));
         }
+
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -338,7 +393,9 @@ mod tests {
 
     #[tokio::test]
     async fn remove_deletes_the_project() {
-        let pool = fresh_pool().await;
+        // Full schema (and FKs on): the cascade references the child tables, so
+        // they must exist for even the childless case.
+        let pool = fresh_pool_full_schema().await;
         let store = ProjectStore::new(pool);
         let p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
         store.insert(&p).await.unwrap();
@@ -346,9 +403,167 @@ mod tests {
         assert!(matches!(store.get(&p.id).await, Err(ProjectStoreError::NotFound(_))));
     }
 
+    /// A pool with the FULL child schema applied AND `PRAGMA foreign_keys = ON`,
+    /// so the FK 787 the live app hit is actually enforced here. We enable the
+    /// pragma explicitly (don't rely on the driver default) so the test provably
+    /// exercises the constraint that broke the bare delete.
+    async fn fresh_pool_full_schema() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON;")
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for sql in [
+            include_str!("../../app/migrations/001_initial.sql"),
+            include_str!("../../app/migrations/003_runtime.sql"),
+            include_str!("../../app/migrations/004_comments_kind.sql"),
+            include_str!("../../app/migrations/006_fanout.sql"),
+            include_str!("../../app/migrations/007_invocation_audit.sql"),
+            include_str!("../../app/migrations/008_nested_groups.sql"),
+            include_str!("../../app/migrations/010_project_target_repo.sql"),
+            include_str!("../../app/migrations/011_skill_sources.sql"),
+            include_str!("../../app/migrations/012_runtime_stores.sql"),
+        ] {
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    #[tokio::test]
+    async fn foreign_keys_are_enforced_in_full_schema_pool() {
+        // Guard: prove the test pool actually rejects an orphan insert, so the
+        // cascade test below is meaningful (a non-enforcing pool would pass
+        // even with the old buggy `remove`).
+        let pool = fresh_pool_full_schema().await;
+        let res = sqlx::query(
+            "INSERT INTO conversations (id, project_id, started_at, last_message_at, history_json)
+             VALUES ('c', 'no-such-project', 0, 0, '[]')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(res.is_err(), "FKs must be enforced in the test pool");
+    }
+
+    #[tokio::test]
+    async fn remove_cascades_children_in_a_transaction() {
+        let pool = fresh_pool_full_schema().await;
+        let store = ProjectStore::new(pool.clone());
+
+        // A project with children spanning the whole FK chain.
+        let p = Project::new("Demo".into(), "/tmp/demo".into(), 100);
+        store.insert(&p).await.unwrap();
+        let pid = &p.id.0;
+
+        // conversation → project
+        sqlx::query(
+            "INSERT INTO conversations (id, project_id, started_at, last_message_at, history_json)
+             VALUES ('conv1', ?, 0, 0, '[]')",
+        )
+        .bind(pid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // task → project
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, pipeline, topic, current_stage, state, created_at, updated_at)
+             VALUES ('task1', ?, 'pl', 'topic', 'stage', 'queued', 0, 0)",
+        )
+        .bind(pid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // comment → task
+        sqlx::query(
+            "INSERT INTO comments (id, task_id, artifact_path, note, created_at)
+             VALUES ('cmt1', 'task1', '/a', 'n', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // invocation_audit → task
+        sqlx::query(
+            "INSERT INTO invocation_audit (invocation_id, task_id, team_id, model, started_at)
+             VALUES ('inv1', 'task1', 'team', 'model', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // worker referencing the task
+        sqlx::query(
+            "INSERT INTO workers (id, team_id, task_id, started_at) VALUES ('w1', 'team', 'task1', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // run → project, plus store + generator_ledger → run
+        sqlx::query(
+            "INSERT INTO runs (id, pipeline, project_id) VALUES ('run1', 'pl', ?)",
+        )
+        .bind(pid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO stores (run_id, stage, capacity, occupancy) VALUES ('run1', 'st', 4, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO generator_ledger (run_id, stage, candidate_key) VALUES ('run1', 'st', 'k')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The bug: with FKs on, the old bare DELETE would 787 here. The fix must
+        // delete cleanly and leave no orphans.
+        store.remove(&p.id).await.unwrap();
+
+        // Project gone.
+        assert!(matches!(store.get(&p.id).await, Err(ProjectStoreError::NotFound(_))));
+
+        // No orphaned children anywhere in the chain.
+        for (table, predicate) in [
+            ("conversations", "1=1"),
+            ("tasks", "1=1"),
+            ("runs", "1=1"),
+            ("comments", "task_id = 'task1'"),
+            ("invocation_audit", "task_id = 'task1'"),
+            ("stores", "run_id = 'run1'"),
+            ("generator_ledger", "run_id = 'run1'"),
+        ] {
+            let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(n, 0, "expected no rows left in {table}, found {n}");
+        }
+
+        // The worker row survives with its task link cleared (idle worker).
+        let worker_task: Option<String> =
+            sqlx::query_scalar("SELECT task_id FROM workers WHERE id = 'w1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(worker_task, None);
+    }
+
     #[tokio::test]
     async fn remove_missing_is_not_found() {
-        let pool = fresh_pool().await;
+        let pool = fresh_pool_full_schema().await;
         let store = ProjectStore::new(pool);
         assert!(matches!(
             store.remove(&ProjectId("nope".into())).await,
