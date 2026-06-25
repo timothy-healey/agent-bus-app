@@ -323,6 +323,50 @@ pub async fn start_run_inner(state: &RuntimeState, _topic: Option<String>) -> Re
     Ok(run)
 }
 
+/// Outcome of a Start press (LF33). `Started` = a new run was created; `Resumed`
+/// = an incomplete run already existed for the project and is returned as-is (no
+/// second run is ever created). The app-crate command turns `Resumed` into a
+/// brake-clear when the brake was on, and emits `run-changed` either way.
+pub enum StartOutcome {
+    Started(Run),
+    Resumed(Run),
+}
+
+impl StartOutcome {
+    /// The resolved run, regardless of whether it was just created or pre-existing.
+    pub fn run(&self) -> &Run {
+        match self {
+            StartOutcome::Started(r) | StartOutcome::Resumed(r) => r,
+        }
+    }
+
+    /// Consume into the owned run.
+    pub fn into_run(self) -> Run {
+        match self {
+            StartOutcome::Started(r) | StartOutcome::Resumed(r) => r,
+        }
+    }
+}
+
+/// LF33: idempotent Start. If an incomplete run already exists for the active
+/// project, return it (`Resumed`) WITHOUT creating a second — this is what makes a
+/// double-press safe. Otherwise create a fresh run via `start_run_inner`
+/// (`Started`). Tauri-unaware: the app-crate wrapper owns the brake-clear + the
+/// `run-changed` emit; this fn only owns the create-or-reuse decision.
+pub async fn start_or_resume_run_inner(state: &RuntimeState) -> Result<StartOutcome, String> {
+    let project_id = state.active().project_id.clone();
+    if let Some(existing) = state
+        .runs
+        .latest_active_for_project(&project_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(StartOutcome::Resumed(existing));
+    }
+    let run = start_run_inner(state, None).await?;
+    Ok(StartOutcome::Started(run))
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn approve_gate(
     state: tauri::State<'_, Arc<RuntimeState>>,
@@ -1005,6 +1049,44 @@ mod tests {
         let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&r1.id.as_str()));
         assert!(ids.contains(&r2.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn start_or_resume_creates_when_none_active() {
+        let state = state_with_two_team_pipeline().await;
+        let outcome = start_or_resume_run_inner(&state).await.unwrap();
+        assert!(matches!(outcome, StartOutcome::Started(_)));
+        let run = outcome.run();
+        assert!(run.id.starts_with("R-"));
+        // stores ensured (it really created the run, not a no-op)
+        assert_eq!(state.stores.occupancy(&run.id, "research").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn start_or_resume_returns_existing_active_without_creating_a_second() {
+        let state = state_with_two_team_pipeline().await;
+        let first = start_or_resume_run_inner(&state).await.unwrap().run().clone();
+        // second call must NOT create a new run — same id, and only one run exists.
+        let second = start_or_resume_run_inner(&state).await.unwrap();
+        assert!(matches!(second, StartOutcome::Resumed(_)));
+        assert_eq!(second.run().id, first.id);
+        assert_eq!(state.runs.list_for_project("proj").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn start_or_resume_on_empty_pipeline_is_an_error() {
+        let state = state_with_two_team_pipeline().await;
+        state.activate_into(ActivePipeline {
+            pipeline: Arc::new(Pipeline {
+                id: "e".into(), name: "E".into(), description: String::new(), schema_version: 3,
+                defaults: None, teams: vec![], gates: vec![], escalations: vec![], forks: vec![], joins: vec![],
+            }),
+            project_id: "proj".into(),
+            project_root: "/p".into(),
+            project_target_repo: None,
+        });
+        // No active run exists, so it falls through to create -> empty pipeline errors.
+        assert!(start_or_resume_run_inner(&state).await.is_err());
     }
 
     #[tokio::test]
