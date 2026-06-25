@@ -199,22 +199,33 @@ impl TaskLogBuffer {
     }
 }
 
-/// Build a per-task `LogSink` factory that emits throttled `task.log` Tauri
-/// events `{ task_id, delta }`. Display-only: the payload is the task id + a
-/// prose fragment; no stream-json idiom crosses here. Each task gets its own
-/// coalescing buffer so concurrent workers' logs never interleave within a flush.
+/// Build a per-task `LogSink` factory that emits throttled `task-log` Tauri
+/// events `{ task_id, delta, kind }`. Display-only: the payload is the task id, a
+/// prose fragment, and its channel (`"output"` | `"thinking"`); no stream-json
+/// idiom crosses here. Each task gets one coalescing buffer PER kind so output and
+/// thinking never interleave within an emitted fragment, and concurrent workers'
+/// logs never interleave within a flush.
 fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::log_sink::LogSinkFactory> {
+    use runners::output::{LogDelta, LogKind};
     Arc::new(move |task_id: &str| -> runners::output::LogSink {
         use std::sync::Mutex;
-        let buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
+        // One coalescing buffer per kind so output and thinking never interleave
+        // within a single emitted fragment; each emit carries its kind.
+        let out_buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
+        let think_buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
         let handle = handle.clone();
-        Box::new(move |frag: &str| {
+        Box::new(move |d: &LogDelta| {
+            let (buf, kind_str) = match d.kind {
+                LogKind::Output => (&out_buf, "output"),
+                LogKind::Thinking => (&think_buf, "thinking"),
+            };
             let mut b = buf.lock().unwrap();
-            b.push(frag);
+            b.push(&d.text);
+            let handle = handle.clone();
             b.flush_if_due(&mut |tid: &str, delta: &str| {
                 let _ = handle.emit(
                     crate::events::TASK_LOG,
-                    serde_json::json!({ "task_id": tid, "delta": delta }),
+                    serde_json::json!({ "task_id": tid, "delta": delta, "kind": kind_str }),
                 );
             });
         })
@@ -1604,6 +1615,34 @@ pub fn run() {
 mod task_log_tests {
     use super::TaskLogBuffer;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn per_kind_buffers_coalesce_independently_and_tag_their_kind() {
+        use runners::output::{LogDelta, LogKind};
+        // Two buffers keyed by kind; pushing into each and force-flushing yields
+        // one emit per kind, each tagged.
+        let mut out_buf = TaskLogBuffer::new("T-1".into());
+        let mut think_buf = TaskLogBuffer::new("T-1".into());
+        for d in [
+            LogDelta { kind: LogKind::Thinking, text: "rea".into() },
+            LogDelta { kind: LogKind::Thinking, text: "soning".into() },
+            LogDelta { kind: LogKind::Output, text: "ans".into() },
+        ] {
+            match d.kind {
+                LogKind::Output => out_buf.push(&d.text),
+                LogKind::Thinking => think_buf.push(&d.text),
+            }
+        }
+        let emitted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let e = emitted.clone();
+        out_buf.force_flush(&mut |t, d| e.lock().unwrap().push((t.into(), d.into())));
+        let e2 = emitted.clone();
+        think_buf.force_flush(&mut |t, d| e2.lock().unwrap().push((t.into(), d.into())));
+        assert_eq!(
+            *emitted.lock().unwrap(),
+            vec![("T-1".into(), "ans".into()), ("T-1".into(), "reasoning".into())]
+        );
+    }
 
     #[test]
     fn buffer_coalesces_until_flushed_then_emits_task_id_and_delta() {
