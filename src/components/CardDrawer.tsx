@@ -91,12 +91,12 @@ export function CardDrawer({
   // recovery; a clean hand-off offers accept/send-back.
   const kind = needsHuman ? classifyNeedsHuman(invocations, pipeline) : null;
   const latest = invocations[0];
-  // The card's headline reason line: the latest invocation's outcome, humanized.
+  // The card's headline reason line: the noun state (DESIGN copy: "needs you" /
+  // "ready for you") plus the latest invocation's humanized outcome + stage.
+  const stateLabel = kind === "handoff" ? "ready for you" : "needs you";
   const reason = latest
-    ? `${kind === "handoff" ? "ready for you" : "needs attention"}: ${outcomeLabel(latest.outcome)} at ${latest.team_id}`
-    : kind === "handoff"
-      ? "ready for you"
-      : "needs attention";
+    ? `${stateLabel} · ${outcomeLabel(latest.outcome)} at ${latest.team_id}`
+    : stateLabel;
 
   const head: CSSProperties = { padding: "14px 18px", borderBottom: "1px solid var(--border)" };
   const tabBar: CSSProperties = {
@@ -168,15 +168,30 @@ export function CardDrawer({
             data-kind={kind ?? ""}
             role="status"
             style={{
-              marginTop: 8,
-              padding: "6px 10px",
-              borderRadius: 4,
+              marginTop: "var(--sp-2)",
+              padding: "var(--sp-1) var(--sp-3)",
+              borderRadius: "var(--r-sm)",
               fontSize: "var(--ts-sm)",
-              borderLeft: `2px solid ${kind === "handoff" ? "var(--accent-bd)" : "var(--danger)"}`,
-              background: kind === "handoff" ? "var(--bg-2)" : "var(--danger-2)",
+              display: "flex",
+              alignItems: "center",
+              gap: "var(--sp-2)",
+              // Full border + background tint (no accent side-stripe): the dot +
+              // tint carry the signal, per DESIGN §Anti-patterns.
+              border: `1px solid ${kind === "handoff" ? "var(--accent-bd)" : "var(--danger)"}`,
+              background: kind === "handoff" ? "var(--accent-2)" : "var(--danger-2)",
               color: kind === "handoff" ? "var(--text-2)" : "var(--danger)",
             }}
           >
+            <span
+              aria-hidden="true"
+              style={{
+                flexShrink: 0,
+                width: 6,
+                height: 6,
+                borderRadius: "var(--r-pill)",
+                background: kind === "handoff" ? "var(--accent)" : "var(--danger)",
+              }}
+            />
             {reason}
           </div>
         )}
@@ -281,16 +296,17 @@ export function CardDrawer({
           </div>
         )}
         {tab === "history" && (
-          <div data-testid="history-panel" style={{ flex: 1, overflowY: "auto", padding: "10px 14px" }}>
+          <div data-testid="history-panel" style={{ flex: 1, overflowY: "auto", padding: "var(--sp-3) var(--sp-4)" }}>
             {invocations.length === 0 ? (
-              <div style={{ color: "var(--text-3)", fontSize: "var(--ts-base)", fontStyle: "italic", padding: "6px 4px" }}>
+              <div style={{ color: "var(--text-3)", fontSize: "var(--ts-base)", fontStyle: "italic", padding: "var(--sp-1) var(--sp-1)" }}>
                 no invocations recorded for this task yet.
               </div>
             ) : (
-              <ul aria-label="invocation history" style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+              <ul aria-label="invocation history" style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "var(--sp-1)" }}>
                 {invocations.map((inv) => {
                   const err = isErrorOutcome(inv.outcome);
                   const settled = inv.settled_at != null;
+                  const tokens = inv.input_tokens + inv.output_tokens;
                   return (
                     <li
                       key={inv.invocation_id}
@@ -298,16 +314,16 @@ export function CardDrawer({
                         display: "flex",
                         flexWrap: "wrap",
                         alignItems: "baseline",
-                        gap: 8,
-                        padding: "8px 10px",
-                        borderRadius: 4,
+                        gap: "var(--sp-2)",
+                        padding: "var(--sp-2) var(--sp-3)",
+                        borderRadius: "var(--r-md)",
                         border: "1px solid var(--border)",
                         background: "var(--bg-2)",
                         fontSize: "var(--ts-sm)",
                       }}
                     >
                       <span style={{ color: "var(--text)", fontWeight: 500 }}>{inv.team_id}</span>
-                      <span style={{ color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>{inv.model}</span>
+                      <span style={{ color: "var(--text-3)" }}>{inv.model}</span>
                       <span style={{ color: "var(--text-3)" }}>a{inv.attempts}</span>
                       <span
                         style={{
@@ -318,10 +334,8 @@ export function CardDrawer({
                       >
                         {settled ? outcomeLabel(inv.outcome) : "in flight"}
                       </span>
-                      <span style={{ flexBasis: "100%", color: "var(--text-3)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
-                        {inv.input_tokens + inv.output_tokens > 0
-                          ? `${inv.input_tokens}↑ ${inv.output_tokens}↓ tokens · `
-                          : ""}
+                      <span style={{ flexBasis: "100%", color: "var(--text-3)", fontSize: "var(--ts-sm)", fontVariantNumeric: "tabular-nums" }}>
+                        {tokens > 0 ? `${tokens.toLocaleString()} tokens · ` : ""}
                         {formatAge(inv.started_at, now)} ago
                       </span>
                     </li>
@@ -398,9 +412,11 @@ export function CardDrawer({
 
         {needsHuman && kind === "handoff" && (
           <>
-            <Button variant="default" onClick={() => setRevising(true)}>
-              send back
-            </Button>
+            {onRetry && (
+              <Button variant="default" onClick={() => onRetry(task.id)}>
+                send back
+              </Button>
+            )}
             {onAccept && (
               <Button variant="primary" onClick={() => onAccept(task.id)}>
                 accept
