@@ -31,4 +31,21 @@ describe("useRuntimeEvents", () => {
     act(() => listeners["run-changed"]?.({ payload: "R-7" }));
     expect(onRunChanged).toHaveBeenCalledWith("R-7");
   });
+
+  it("does not raise an unhandled rejection when unlisten throws on cleanup", async () => {
+    const { listen } = await import("@tauri-apps/api/event");
+    // Mimic Tauri's async unlisten that rejects for an already-gone eventId.
+    vi.mocked(listen).mockImplementationOnce(async (name, cb) => {
+      listeners[name as string] = cb as (e: { payload: unknown }) => void;
+      return (async () => {
+        throw new TypeError("undefined is not an object (evaluating 'listeners[eventId].handlerId')");
+      }) as unknown as ReturnType<typeof listen> extends Promise<infer U> ? U : never;
+    });
+    const onTaskChanged = vi.fn();
+    const { unmount } = renderHook(() => useRuntimeEvents({ onTaskChanged }));
+    await act(async () => { await Promise.resolve(); });
+    // Cleanup fires the rejecting unlisten; safeUnlisten must swallow it.
+    expect(() => unmount()).not.toThrow();
+    await act(async () => { await Promise.resolve(); });
+  });
 });
