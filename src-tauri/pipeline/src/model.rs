@@ -245,6 +245,12 @@ pub enum Role {
     #[default]
     Producer,
     Reviewer,
+    /// A repo-mutating stage (vet F8 / worktree isolation). Treated like a
+    /// producer for routing (no verdict); marks the stage that creates/enters a
+    /// per-work-item git worktree. Additive; default stays `producer`; no
+    /// SCHEMA_VERSION bump. NOTE: seed/backend-only — never offered in the
+    /// authoring wizard (the TS `setTeamRole` union stays producer|reviewer).
+    Implementer,
 }
 
 /// A node kind discriminator used by validation and the frontend viewer.
@@ -343,6 +349,18 @@ mod tests {
         assert_eq!(serde_json::to_string(&Role::Reviewer).unwrap(), "\"reviewer\"");
         let r: Role = serde_json::from_str("\"producer\"").unwrap();
         assert_eq!(r, Role::Producer);
+    }
+
+    #[test]
+    fn implementer_role_serializes_lowercase_and_round_trips() {
+        assert_eq!(serde_json::to_string(&Role::Implementer).unwrap(), "\"implementer\"");
+        let r: Role = serde_json::from_str("\"implementer\"").unwrap();
+        assert_eq!(r, Role::Implementer);
+    }
+
+    #[test]
+    fn role_default_is_still_producer_after_adding_implementer() {
+        assert_eq!(Role::default(), Role::Producer);
     }
 
     #[test]
