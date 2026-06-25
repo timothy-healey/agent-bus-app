@@ -255,6 +255,7 @@ export function NewProjectWizard({
             draft={draft}
             onChange={setDraft}
             showBanner={showBanner}
+            targetRepo={targetRepo.trim() || null}
             onValidityChange={(valid) => {
               setCanvasValid(valid);
               // Once the draft is fixed, retract the prominent banner (it returns on

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { useState } from "react";
+
+const testModelMock = vi.fn();
+vi.mock("../../ipc/runner", () => ({ testModel: (m: string) => testModelMock(m) }));
+const listDirMock = vi.fn();
+vi.mock("../../ipc/workspace", () => ({ listDir: (p: string) => listDirMock(p) }));
+
 import { NodeDrawer } from "./NodeDrawer";
 import { emptyDraft, addTeam } from "../draft";
 import type { DraftPipeline } from "../../ipc/pipeline";
@@ -56,11 +62,11 @@ describe("NodeDrawer — team editor round-trips", () => {
     expect(onChange.mock.calls.at(-1)?.[0].teams[0].store).toEqual({ capacity: 16 });
   });
 
-  it("editing the model flows through setTeamModel", () => {
+  it("selecting a known model flows through setTeamModel (G6 selector)", () => {
     const onChange = vi.fn();
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
-    fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "claude-haiku-4" } });
-    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("claude-haiku-4");
+    fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "claude-haiku-4-5" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("claude-haiku-4-5");
   });
 });
 
@@ -98,6 +104,53 @@ describe("NodeDrawer — A4 skill autocomplete on the prompt field", () => {
     const tinted = document.querySelectorAll('.abp-skill-token[data-recognized="true"]');
     expect(tinted.length).toBe(1);
     expect(tinted[0].textContent).toBe("/brainstorming");
+  });
+});
+
+describe("NodeDrawer — G6 model selector + Test probe", () => {
+  it("custom-id toggle reveals a free-text override flagged unverified", () => {
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
+    fireEvent.click(screen.getByLabelText("model override toggle for research"));
+    fireEvent.change(screen.getByLabelText("model override for research"), { target: { value: "claude-experimental" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("claude-experimental");
+    expect(screen.getByText("unverified")).toBeInTheDocument();
+  });
+
+  it("Test button fires test_model and surfaces the result", async () => {
+    testModelMock.mockResolvedValueOnce({ status: "unavailable", message: "model not found" });
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByLabelText("test model for research"));
+    await waitFor(() => expect(screen.getByText(/unavailable — pick another/i)).toBeInTheDocument());
+    expect(testModelMock).toHaveBeenCalledWith("claude-opus-4-8");
+  });
+});
+
+describe("NodeDrawer — G8 tooltips", () => {
+  it("the Role legend has an accessible info affordance with a popover", () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    const help = screen.getByRole("button", { name: /help for Role/i });
+    fireEvent.click(help);
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+  });
+});
+
+describe("NodeDrawer — G7 scope picker", () => {
+  it("offers the in-app FileTreePicker for reads when a target repo is bound", async () => {
+    listDirMock.mockResolvedValueOnce([{ name: "artifacts", path: "/repo/artifacts", is_dir: true }]);
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} targetRepo="/repo" />);
+    fireEvent.click(screen.getByLabelText("browse reads for research"));
+    await waitFor(() => expect(screen.getByText(/artifacts/)).toBeInTheDocument());
+    // selecting stores the repo-relative path
+    fireEvent.click(screen.getByLabelText("select artifacts"));
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.reads).toEqual(["artifacts"]);
+  });
+
+  it("shows no Browse button for reads without a target repo (text fallback only)", () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    expect(screen.queryByLabelText("browse reads for research")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("reads for research")).toBeInTheDocument();
   });
 });
 

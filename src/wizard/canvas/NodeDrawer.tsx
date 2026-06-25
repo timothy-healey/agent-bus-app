@@ -2,9 +2,15 @@ import type React from "react";
 import type { CSSProperties } from "react";
 import type { DraftPipeline, DraftTeam, EffortMode } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
+import { useState } from "react";
 import { Drawer } from "../../components/ui/Drawer";
 import { Button } from "../../components/ui/Button";
 import { SkillAutocomplete } from "./SkillAutocomplete";
+import { FileTreePicker } from "../../components/FileTreePicker";
+import { InfoTip } from "../../components/InfoTip";
+import { toRepoRelative } from "../../components/fileTree";
+import { CLAUDE_MODELS } from "../../ipc/models";
+import { testModel, type ModelTestResult } from "../../ipc/runner";
 import {
   renameTeam,
   setPromptBody,
@@ -41,6 +47,11 @@ interface NodeDrawerProps {
   /// G9 — delete the selected node (routes through `removeNode` at the host). When
   /// absent the header delete button is hidden.
   onDelete?: (id: string) => void;
+  /// G7 — absolute path of the project's target repo. When present, the Scope
+  /// reads/writes fields offer the in-app FileTreePicker rooted here (multi-
+  /// select, stored repo-relative); the comma-separated text stays as the
+  /// fallback. Absent (e.g. mid-create before a repo is bound) = text only.
+  targetRepo?: string | null;
 }
 
 type Kind = "team" | "gate" | "fork" | "join" | "escalation" | "unknown";
@@ -54,7 +65,7 @@ function kindOf(draft: DraftPipeline, id: string): Kind {
   return "unknown";
 }
 
-export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], onDelete }: NodeDrawerProps) {
+export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], onDelete, targetRepo }: NodeDrawerProps) {
   const open = selectedId != null;
   const kind = selectedId ? kindOf(draft, selectedId) : "unknown";
 
@@ -72,7 +83,7 @@ export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], 
               </Button>
             )}
           </header>
-          {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} skills={skills} />}
+          {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} skills={skills} targetRepo={targetRepo} />}
           {kind === "gate" && <GateEditor draft={draft} id={selectedId} onChange={onChange} />}
           {kind === "join" && <JoinEditor draft={draft} id={selectedId} onChange={onChange} />}
           {kind === "fork" && <ForkEditor draft={draft} id={selectedId} />}
@@ -87,7 +98,7 @@ export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], 
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
   return (
     <label style={lbl}>
       <span style={{ display: "block", marginBottom: "var(--sp-1)" }}>{label}</span>
@@ -96,7 +107,158 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function TeamEditor({ draft, id, onChange, skills }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void; skills: SkillEntry[] }) {
+/// G8 help copy for the unclear authoring fields. Concise, action-oriented.
+const HELP = {
+  reads: "Paths the agent may READ (relative to the project's target repo). Add an artifacts path so it can see upstream work. Leave empty to read nothing extra.",
+  writes: "Paths the agent may WRITE. A producer needs its artifacts dir; a reviewer that only judges can have none.",
+  tools: "Allowed tool names (e.g. Read, Edit, Bash, WebFetch). WebFetch/WebSearch also open network access under the sandbox profile.",
+  role: "producer = does work and hands off on approve. reviewer = judges upstream work and emits approve / revise / reject.",
+  runner: "Which Claude is invoked and how hard it thinks. Model + effort; an API-key env var name when using the anthropic-api runner.",
+  scale: "Worker concurrency for this team: minimum kept warm and maximum it can burst to.",
+  store: "Bounded input buffer (WIP limit) — how many tasks can queue for this team before upstream back-pressures.",
+} as const;
+
+/// A fieldset legend with an inline G8 InfoTip.
+function TipLegend({ text, children }: { text: string; children: React.ReactNode }) {
+  return (
+    <legend style={{ ...legend, display: "inline-flex", alignItems: "center", gap: "var(--sp-2)" }}>
+      {children}
+      <InfoTip text={text} label={`help for ${String(children)}`} />
+    </legend>
+  );
+}
+
+/// An inline label + G8 InfoTip (for individual Field labels).
+function LabelTip({ text, children }: { text: string; children: React.ReactNode }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "var(--sp-2)" }}>
+      {children}
+      <InfoTip text={text} label={`help for ${String(children)}`} />
+    </span>
+  );
+}
+
+/// G6 — model SELECTOR (curated known IDs) + a free-text override flagged
+/// "unverified", plus a "Test" button firing a 1-token probe via test_model.
+function ModelField({ id, value, onChange }: { id: string; value: string; onChange: (m: string) => void }) {
+  const known = CLAUDE_MODELS.some((m) => m.id === value);
+  const [override, setOverride] = useState(!known && value.length > 0);
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<ModelTestResult | null>(null);
+
+  async function runTest() {
+    setTesting(true);
+    setResult(null);
+    try {
+      setResult(await testModel(value));
+    } catch (e) {
+      setResult({ status: "error", message: String(e) });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "grid", gap: "var(--sp-2)" }}>
+      {override ? (
+        <input
+          aria-label={`model override for ${id}`}
+          value={value}
+          placeholder="custom model id"
+          onChange={(e) => { onChange(e.target.value); setResult(null); }}
+          style={inp}
+        />
+      ) : (
+        <select aria-label={`model for ${id}`} value={known ? value : ""} onChange={(e) => { onChange(e.target.value); setResult(null); }} style={inp}>
+          {!known && <option value="">{value || "(select a model)"}</option>}
+          {CLAUDE_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>{m.label} ({m.id})</option>
+          ))}
+        </select>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", flexWrap: "wrap" }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: "var(--sp-1)", fontSize: "var(--ts-xs)", color: "var(--text-3)" }}>
+          <input type="checkbox" aria-label={`model override toggle for ${id}`} checked={override} onChange={(e) => { setOverride(e.target.checked); setResult(null); }} />
+          custom id
+        </label>
+        {override && value.length > 0 && (
+          <span style={{ fontSize: "var(--ts-xs)", color: "var(--warn, var(--text-3))" }}>unverified</span>
+        )}
+        <Button size="sm" aria-label={`test model for ${id}`} disabled={testing || !value} onClick={runTest}>
+          {testing ? "Testing…" : "Test"}
+        </Button>
+        {result && (
+          <span aria-live="polite" style={{ fontSize: "var(--ts-xs)", color: testResultColor(result.status) }}>
+            {testResultLabel(result)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function testResultColor(status: ModelTestResult["status"]): string {
+  if (status === "ok") return "var(--ok, var(--text-2))";
+  if (status === "unavailable") return "var(--danger)";
+  return "var(--warn, var(--text-3))";
+}
+function testResultLabel(r: ModelTestResult): string {
+  if (r.status === "ok") return "✓ available";
+  if (r.status === "unavailable") return "✗ unavailable — pick another";
+  return `· ${r.message || "test failed"}`;
+}
+
+/// G7 — a Scope reads/writes field that offers the in-app FileTreePicker
+/// (multi-select within the target repo, stored repo-relative) plus the
+/// comma-separated text fallback. When no targetRepo is bound, only the text
+/// field shows.
+function ScopePathField({
+  id,
+  kind,
+  help,
+  value,
+  targetRepo,
+  onChange,
+}: {
+  id: string;
+  kind: "reads" | "writes";
+  help: string;
+  value: string[];
+  targetRepo?: string | null;
+  onChange: (raw: string) => void;
+}) {
+  const [browsing, setBrowsing] = useState(false);
+  // The picker selects absolute paths under the repo; map back to repo-relative.
+  const selectedAbs = targetRepo
+    ? value.map((p) => (p.startsWith("/") ? p : `${targetRepo.replace(/\/+$/, "")}/${p}`))
+    : [];
+
+  return (
+    <Field label={<LabelTip text={help}>{kind === "reads" ? "Reads" : "Writes"} (comma-separated)</LabelTip>}>
+      <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+        <input aria-label={`${kind} for ${id}`} value={value.join(", ")} onChange={(e) => onChange(e.target.value)} style={{ ...inp, flex: 1 }} />
+        {targetRepo && (
+          <Button size="sm" aria-label={`browse ${kind} for ${id}`} aria-expanded={browsing} onClick={() => setBrowsing((b) => !b)}>
+            {browsing ? "Close" : "Browse…"}
+          </Button>
+        )}
+      </div>
+      {browsing && targetRepo && (
+        <div style={{ marginTop: "var(--sp-2)" }}>
+          <FileTreePicker
+            root={targetRepo}
+            mode="files"
+            label={`${kind} picker for ${id}`}
+            selected={selectedAbs}
+            onChange={(abs) => onChange(abs.map((p) => toRepoRelative(p, targetRepo)).join(", "))}
+          />
+        </div>
+      )}
+    </Field>
+  );
+}
+
+function TeamEditor({ draft, id, onChange, skills, targetRepo }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void; skills: SkillEntry[]; targetRepo?: string | null }) {
   const t = draft.teams.find((x) => x.id === id) as DraftTeam;
   if (!t) return null;
   const effort = t.runner.effort;
@@ -122,7 +284,7 @@ function TeamEditor({ draft, id, onChange, skills }: { draft: DraftPipeline; id:
       </Field>
 
       <fieldset style={group}>
-        <legend style={legend}>Role</legend>
+        <TipLegend text={HELP.role}>Role</TipLegend>
         <select aria-label={`role for ${id}`} value={t.role ?? "producer"} onChange={(e) => onChange(setTeamRole(draft, id, e.target.value as "producer" | "reviewer"))} style={inp}>
           <option value="producer">producer (hand-off)</option>
           <option value="reviewer">reviewer (approve · revise · reject)</option>
@@ -130,10 +292,10 @@ function TeamEditor({ draft, id, onChange, skills }: { draft: DraftPipeline; id:
       </fieldset>
 
       <fieldset style={group}>
-        <legend style={legend}>Runner</legend>
+        <TipLegend text={HELP.runner}>Runner</TipLegend>
         <div style={{ display: "grid", gap: "var(--sp-3)" }}>
           <Field label="Model">
-            <input aria-label={`model for ${id}`} value={t.runner.model} onChange={(e) => onChange(setTeamModel(draft, id, e.target.value))} style={inp} />
+            <ModelField id={id} value={t.runner.model} onChange={(m) => onChange(setTeamModel(draft, id, m))} />
           </Field>
           <Field label="Effort">
             <select
@@ -177,20 +339,30 @@ function TeamEditor({ draft, id, onChange, skills }: { draft: DraftPipeline; id:
       <fieldset style={group}>
         <legend style={legend}>Scope</legend>
         <div style={{ display: "grid", gap: "var(--sp-3)" }}>
-          <Field label="Reads (comma-separated)">
-            <input aria-label={`reads for ${id}`} value={t.scope.reads.join(", ")} onChange={(e) => onChange(setTeamReads(draft, id, e.target.value))} style={inp} />
-          </Field>
-          <Field label="Writes (comma-separated)">
-            <input aria-label={`writes for ${id}`} value={t.scope.writes.join(", ")} onChange={(e) => onChange(setTeamWrites(draft, id, e.target.value))} style={inp} />
-          </Field>
-          <Field label="Tools (comma-separated)">
+          <ScopePathField
+            id={id}
+            kind="reads"
+            help={HELP.reads}
+            value={t.scope.reads}
+            targetRepo={targetRepo}
+            onChange={(e) => onChange(setTeamReads(draft, id, e))}
+          />
+          <ScopePathField
+            id={id}
+            kind="writes"
+            help={HELP.writes}
+            value={t.scope.writes}
+            targetRepo={targetRepo}
+            onChange={(e) => onChange(setTeamWrites(draft, id, e))}
+          />
+          <Field label={<LabelTip text={HELP.tools}>Tools (comma-separated)</LabelTip>}>
             <input aria-label={`tools for ${id}`} value={t.scope.tools.join(", ")} onChange={(e) => onChange(setTeamTools(draft, id, e.target.value))} style={inp} />
           </Field>
         </div>
       </fieldset>
 
       <fieldset style={group}>
-        <legend style={legend}>Scale (min · max)</legend>
+        <TipLegend text={HELP.scale}>Scale (min · max)</TipLegend>
         <div style={{ display: "flex", gap: "var(--sp-3)" }}>
           <Field label="Min">
             <input type="number" min={1} aria-label={`scale min for ${id}`} value={workers.min} onChange={(e) => onChange(setTeamWorkers(draft, id, { min: Number(e.target.value) || 1, max: workers.max }))} style={inp} />
@@ -202,7 +374,7 @@ function TeamEditor({ draft, id, onChange, skills }: { draft: DraftPipeline; id:
       </fieldset>
 
       <fieldset style={group}>
-        <legend style={legend}>Store capacity</legend>
+        <TipLegend text={HELP.store}>Store capacity</TipLegend>
         <Field label="WIP limit">
           <input type="number" min={1} aria-label={`store capacity for ${id}`} value={t.store?.capacity ?? 8} onChange={(e) => onChange(setTeamStoreCapacity(draft, id, Number(e.target.value) || 1))} style={inp} />
         </Field>
