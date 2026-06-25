@@ -121,7 +121,7 @@ describe("NodeDrawer — G6 model selector + Test probe", () => {
     testModelMock.mockResolvedValueOnce({ status: "unavailable", message: "model not found" });
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
     fireEvent.click(screen.getByLabelText("test model for research"));
-    await waitFor(() => expect(screen.getByText(/unavailable — pick another/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/unavailable, pick another/i)).toBeInTheDocument());
     expect(testModelMock).toHaveBeenCalledWith("claude-opus-4-8");
   });
 });

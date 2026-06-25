@@ -131,9 +131,14 @@ export function FileTreePicker({ root, mode, selected, onChange, label = "file t
             )}
             <span
               onClick={() => pick(entry)}
-              style={{ cursor: selectable ? "pointer" : "default", flex: 1, color: entry.is_dir ? "var(--text-2)" : "var(--text-3)" }}
+              style={{
+                cursor: selectable ? "pointer" : "default",
+                flex: 1,
+                fontFamily: "var(--font-mono)",
+                color: entry.is_dir ? "var(--text-2)" : "var(--text-3)",
+              }}
             >
-              {entry.is_dir ? "📁" : "📄"} {entry.name}
+              {entry.name}{entry.is_dir ? "/" : ""}
             </span>
           </div>
           {entry.is_dir && isExp && (

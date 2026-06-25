@@ -182,7 +182,7 @@ function ModelField({ id, value, onChange }: { id: string; value: string; onChan
           custom id
         </label>
         {override && value.length > 0 && (
-          <span style={{ fontSize: "var(--ts-xs)", color: "var(--warn, var(--text-3))" }}>unverified</span>
+          <span style={{ fontSize: "var(--ts-xs)", color: "var(--warn)" }}>unverified</span>
         )}
         <Button size="sm" aria-label={`test model for ${id}`} disabled={testing || !value} onClick={runTest}>
           {testing ? "Testing…" : "Test"}
@@ -197,15 +197,18 @@ function ModelField({ id, value, onChange }: { id: string; value: string; onChan
   );
 }
 
+// Restrained palette has no success-green by design: ochre accent carries the
+// positive "available" state; danger for unavailable; muted text for a generic
+// test failure.
 function testResultColor(status: ModelTestResult["status"]): string {
-  if (status === "ok") return "var(--ok, var(--text-2))";
+  if (status === "ok") return "var(--accent)";
   if (status === "unavailable") return "var(--danger)";
-  return "var(--warn, var(--text-3))";
+  return "var(--text-3)";
 }
 function testResultLabel(r: ModelTestResult): string {
-  if (r.status === "ok") return "✓ available";
-  if (r.status === "unavailable") return "✗ unavailable — pick another";
-  return `· ${r.message || "test failed"}`;
+  if (r.status === "ok") return "available";
+  if (r.status === "unavailable") return "unavailable, pick another";
+  return r.message || "test failed";
 }
 
 /// G7 — a Scope reads/writes field that offers the in-app FileTreePicker
