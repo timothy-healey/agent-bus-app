@@ -143,3 +143,20 @@ export function addForkJoin(
 export function removeForkJoin(d: DraftPipeline, forkId: string, joinId: string): DraftPipeline {
   return { ...d, forks: d.forks.filter((f) => f.id !== forkId), joins: d.joins.filter((j) => j.id !== joinId) };
 }
+
+function mapJoin(d: DraftPipeline, joinId: string, f: (j: Join) => Join): DraftPipeline {
+  return { ...d, joins: d.joins.map((j) => (j.id === joinId ? f(j) : j)) };
+}
+
+/// Set/clear a join's N-of-M quorum (AU1/P3). A number sets the quorum; `undefined`
+/// clears it back to all-must-approve (the default barrier). `cancel_on_reject` is
+/// left intact — the runtime merely ignores it while a quorum is set (DD7), so
+/// toggling the quorum off restores the prior toggle. No-op on an unknown join id.
+export function setJoinQuorum(d: DraftPipeline, joinId: string, quorum: number | undefined): DraftPipeline {
+  return mapJoin(d, joinId, (j) => ({ ...j, quorum }));
+}
+
+/// Set a join's early-cancel-on-reject policy (AU1/P2). No-op on an unknown join id.
+export function setJoinCancelOnReject(d: DraftPipeline, joinId: string, value: boolean): DraftPipeline {
+  return mapJoin(d, joinId, (j) => ({ ...j, cancel_on_reject: value }));
+}
