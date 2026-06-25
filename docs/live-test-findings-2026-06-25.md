@@ -213,3 +213,7 @@ The generator (which has no parent task to inherit from) created its child work-
 - Leaked store reservations: spec-writers occupancy 1 (run fab) + **5** (run 51aa) with far fewer tasks — confirms the reservation-leak (lifecycle reconcile / LF25) live.
 - `generator_ledger` = 12 keys vs `tasks` = 3 — confirms LF25 (keys recorded before commit; most never became tasks).
 - 3 tasks stuck `queued` at spec-writers (not claimed) — spec-writers not progressing (running binary may predate recent fixes; worth re-checking on a fresh build).
+
+### LF27 · Unhandled promise rejection from Tauri unlisten on cleanup — `fixed`
+
+> `TypeError: undefined is not an object (evaluating 'listeners[eventId].handlerId')` from `useRuntimeEvents.ts`. Tauri 2.11's unlisten is `async () => _unlisten(...)` and throws synchronously inside the injected `unregisterListener` when the listener's internal bookkeeping is already gone (dev/StrictMode subscribe→teardown race). Cleanup fired it fire-and-forget, so the rejection went unhandled. Fix: `safeUnlisten` wraps each unlisten call (try/catch + `.catch` on the returned promise); a throw means already-unregistered, so nothing leaks. Regression test added. Commit on main.
