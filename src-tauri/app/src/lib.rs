@@ -1,5 +1,6 @@
 mod events;
 mod pipeline_activator;
+mod process_registry;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
