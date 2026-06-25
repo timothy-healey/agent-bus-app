@@ -78,6 +78,7 @@ impl Runner for FakeRunner {
 fn clone_err(e: &RunnerError) -> RunnerError {
     match e {
         RunnerError::RateLimited(s) => RunnerError::RateLimited(s.clone()),
+        RunnerError::ModelUnavailable(s) => RunnerError::ModelUnavailable(s.clone()),
         RunnerError::Spawn(s) => RunnerError::Spawn(s.clone()),
         RunnerError::NoResult => RunnerError::NoResult,
         RunnerError::Other(s) => RunnerError::Other(s.clone()),

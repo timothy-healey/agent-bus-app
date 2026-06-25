@@ -30,6 +30,9 @@ pub enum InvocationOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
     RateLimited,
+    /// The model was not found / unavailable (G6) — distinct so a misconfigured
+    /// model is visible in the trail (dovetails with L3 card-side detail).
+    ModelUnavailable,
     Spawn,
     NoResult,
     Other,
@@ -40,6 +43,7 @@ impl ErrorClass {
     pub fn of(e: &RunnerError) -> Self {
         match e {
             RunnerError::RateLimited(_) => ErrorClass::RateLimited,
+            RunnerError::ModelUnavailable(_) => ErrorClass::ModelUnavailable,
             RunnerError::Spawn(_) => ErrorClass::Spawn,
             RunnerError::NoResult => ErrorClass::NoResult,
             RunnerError::Other(_) => ErrorClass::Other,
@@ -49,6 +53,7 @@ impl ErrorClass {
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorClass::RateLimited => "rate_limited",
+            ErrorClass::ModelUnavailable => "model_unavailable",
             ErrorClass::Spawn => "spawn",
             ErrorClass::NoResult => "no_result",
             ErrorClass::Other => "other",
@@ -305,5 +310,6 @@ mod tests {
         assert_eq!(ErrorClass::of(&RunnerError::Spawn("x".into())).as_str(), "spawn");
         assert_eq!(ErrorClass::of(&RunnerError::NoResult).as_str(), "no_result");
         assert_eq!(ErrorClass::of(&RunnerError::Other("x".into())).as_str(), "other");
+        assert_eq!(ErrorClass::of(&RunnerError::ModelUnavailable("x".into())).as_str(), "model_unavailable");
     }
 }

@@ -31,16 +31,15 @@ pub fn interpret_runner_output(
         return Ok(String::from_utf8_lossy(&stdout).into_owned());
     }
     let err = String::from_utf8_lossy(&stderr).into_owned();
-    let lower = err.to_lowercase();
-    if lower.contains("rate") || lower.contains("429") || lower.contains("quota") {
-        Err(RunnerError::RateLimited(err))
-    } else if err.trim().is_empty() {
-        Err(RunnerError::Other(
+    if err.trim().is_empty() {
+        return Err(RunnerError::Other(
             "claude exited non-zero with no stderr".into(),
-        ))
-    } else {
-        Err(RunnerError::Other(err))
+        ));
     }
+    // Classify the stderr into a distinct class: rate/quota → RateLimited,
+    // model-not-found/unavailable → ModelUnavailable (G6), else → Other.
+    let lower = err.to_lowercase();
+    Err(RunnerError::classify(&lower, err))
 }
 
 pub struct ClaudeCliRunner {
@@ -264,6 +263,18 @@ mod tests {
             RunnerError::Other(m) => assert!(m.contains("requires --verbose")),
             other => panic!("expected Other, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn interpret_runner_output_model_not_found_maps_to_model_unavailable() {
+        let err = interpret_runner_output(
+            Vec::new(),
+            b"Error: model 'claude-nope' not found".to_vec(),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RunnerError::ModelUnavailable(_)));
+        assert!(err.is_model_unavailable());
     }
 
     #[test]

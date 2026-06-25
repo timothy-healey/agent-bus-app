@@ -566,6 +566,18 @@ fn seed_template_cmd(id: String) -> Result<DraftPipeline, String> {
     pipeline::seed_template::seed_template(&id).ok_or_else(|| format!("unknown seed template: {id}"))
 }
 
+/// OHS (G6): probe a model's availability with a 1-token call. Returns a
+/// `ModelProbe { status, message }` — `ok` / `unavailable` (the runner
+/// classified a model-not-found, surfaced as "pick another") / `error`. The
+/// live subprocess path is structural-only (no headless claude here); the
+/// default `ClaudeCliRunner` is used (authoring-time check, no team config).
+/// Pure classification + the seam are unit-tested in `runners::probe`.
+#[tauri::command(rename_all = "snake_case")]
+async fn test_model(model: String) -> Result<runners::probe::ModelProbe, String> {
+    let runner = runners::claude_cli::ClaudeCliRunner::new();
+    Ok(runners::probe::run_probe(&runner, &model).await)
+}
+
 /// OHS: one Design Session turn — apply a slice + return prose + updated draft.
 #[tauri::command(rename_all = "snake_case")]
 async fn design_session_turn_cmd(
@@ -1313,6 +1325,7 @@ pub fn run() {
             kickoff_generate_cmd,
             list_seed_templates_cmd,
             seed_template_cmd,
+            test_model,
             design_session_turn_cmd,
             best_effort_validate_cmd,
             create_project_from_draft,
