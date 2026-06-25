@@ -139,3 +139,11 @@ G7 replaced the native folder dialog with an in-app FileTreePicker. Operator wan
 > "the accent highlighting the textbox overflows the visible section of its container, cutting off the horizontal edges. This happens in multiple places"
 
 Global `:focus-visible` used `outline-offset: 1px` (ring OUTSIDE the box) → clipped by overflow containers on full-width controls. Changed to `outline-offset: -2px` (inset) — clip-safe everywhere in one rule. Commit on `main`.
+
+---
+
+### LF18 · NodeDrawer Delete button overlaps the Drawer close X — `fixed`
+
+> "the delete button is overlapping the x to the team panel"
+
+The NodeDrawer header places Delete flush-right (justify-content: space-between), and the Drawer's absolute close X (right:12) sits over it (body horizontal padding is only 20px). Added `paddingRight: var(--sp-7)` to the header so Delete clears the X. Commit on `main`.
