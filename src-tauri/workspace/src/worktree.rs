@@ -130,6 +130,12 @@ pub trait WorktreeGit: Send + Sync {
     fn list_porcelain(&self, repo: &str) -> Result<String, String>;
     /// `git -C <repo> worktree remove <path>`.
     fn remove(&self, repo: &str, path: &str) -> Result<(), String>;
+    /// `git -C <repo> worktree add -b <branch> <path> <base_ref>`.
+    fn add(&self, repo: &str, path: &str, branch: &str, base_ref: &str) -> Result<(), String>;
+    /// Reset a worktree to its branch baseline:
+    /// `git -C <worktree_path> reset --hard` then `git -C <worktree_path> clean -fd`
+    /// (no remote, so no `@{upstream}`).
+    fn reset(&self, worktree_path: &str) -> Result<(), String>;
 }
 
 /// Production git runner: shells out to the system `git`. Constructed at the
@@ -164,6 +170,44 @@ impl WorktreeGit for GitCli {
         }
         Ok(())
     }
+
+    fn add(&self, repo: &str, path: &str, branch: &str, base_ref: &str) -> Result<(), String> {
+        let out = std::process::Command::new("git")
+            .args(["-C", repo, "worktree", "add", "-b", branch, path, base_ref])
+            .output()
+            .map_err(|e| format!("git worktree add failed to spawn: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    fn reset(&self, worktree_path: &str) -> Result<(), String> {
+        let reset = std::process::Command::new("git")
+            .args(["-C", worktree_path, "reset", "--hard"])
+            .output()
+            .map_err(|e| format!("git reset failed to spawn: {e}"))?;
+        if !reset.status.success() {
+            return Err(format!(
+                "git reset --hard failed: {}",
+                String::from_utf8_lossy(&reset.stderr)
+            ));
+        }
+        let clean = std::process::Command::new("git")
+            .args(["-C", worktree_path, "clean", "-fd"])
+            .output()
+            .map_err(|e| format!("git clean failed to spawn: {e}"))?;
+        if !clean.status.success() {
+            return Err(format!(
+                "git clean -fd failed: {}",
+                String::from_utf8_lossy(&clean.stderr)
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// List the project's cleanup-candidate worktrees. Pure orchestration over the
@@ -186,6 +230,32 @@ pub fn remove_worktree_inner(
 ) -> Result<(), String> {
     let resolved = worktree_under_root(project_root, path)?;
     git.remove(project_root, &resolved.to_string_lossy())
+}
+
+/// Create one worktree after the path-scoping guard passes (same guard as
+/// `remove_worktree_inner`). Runs NO git command on a rejected path. The branch
+/// is created at `base_ref` (the target repo's current HEAD, passed by the
+/// caller). Testable with a fake git.
+pub fn add_worktree_inner(
+    git: &dyn WorktreeGit,
+    project_root: &str,
+    path: &str,
+    branch: &str,
+    base_ref: &str,
+) -> Result<(), String> {
+    let resolved = worktree_under_root(project_root, path)?;
+    git.add(project_root, &resolved.to_string_lossy(), branch, base_ref)
+}
+
+/// Reset one worktree to its branch baseline after the path-scoping guard
+/// passes. Runs NO git command on a rejected path. Testable with a fake git.
+pub fn reset_worktree_inner(
+    git: &dyn WorktreeGit,
+    project_root: &str,
+    path: &str,
+) -> Result<(), String> {
+    let resolved = worktree_under_root(project_root, path)?;
+    git.reset(&resolved.to_string_lossy())
 }
 
 /// The scaffolded subdirs the wizard creates under a project root, in the order
@@ -434,6 +504,8 @@ detached
     struct FakeGit {
         porcelain: String,
         removed: Mutex<Vec<(String, String)>>, // (repo, path)
+        added: Mutex<Vec<(String, String, String, String)>>, // (repo, path, branch, base)
+        reset_paths: Mutex<Vec<String>>,
         fail_remove: bool,
     }
     impl FakeGit {
@@ -441,6 +513,8 @@ detached
             Self {
                 porcelain: porcelain.into(),
                 removed: Mutex::new(vec![]),
+                added: Mutex::new(vec![]),
+                reset_paths: Mutex::new(vec![]),
                 fail_remove: false,
             }
         }
@@ -456,6 +530,69 @@ detached
             self.removed.lock().unwrap().push((repo.into(), path.into()));
             Ok(())
         }
+        fn add(&self, repo: &str, path: &str, branch: &str, base: &str) -> Result<(), String> {
+            self.added.lock().unwrap().push((repo.into(), path.into(), branch.into(), base.into()));
+            Ok(())
+        }
+        fn reset(&self, worktree_path: &str) -> Result<(), String> {
+            self.reset_paths.lock().unwrap().push(worktree_path.into());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn add_worktree_inner_runs_git_for_an_in_subtree_path() {
+        let git = FakeGit::new("");
+        add_worktree_inner(
+            &git,
+            "/home/u/proj",
+            "/home/u/proj/worktrees/R-1/alpha",
+            "agent-bus/R-1/alpha",
+            "HEAD",
+        )
+        .unwrap();
+        let calls = git.added.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            (
+                "/home/u/proj".into(),
+                "/home/u/proj/worktrees/R-1/alpha".into(),
+                "agent-bus/R-1/alpha".into(),
+                "HEAD".into()
+            )
+        );
+    }
+
+    #[test]
+    fn add_worktree_inner_rejects_an_escape_and_runs_no_git() {
+        let git = FakeGit::new("");
+        let err = add_worktree_inner(
+            &git,
+            "/home/u/proj",
+            "/home/u/proj/artifacts/x",
+            "agent-bus/x",
+            "HEAD",
+        );
+        assert!(err.is_err());
+        assert!(git.added.lock().unwrap().is_empty(), "no git on a rejected path");
+    }
+
+    #[test]
+    fn reset_worktree_inner_runs_git_for_an_in_subtree_path() {
+        let git = FakeGit::new("");
+        reset_worktree_inner(&git, "/home/u/proj", "/home/u/proj/worktrees/R-1/alpha").unwrap();
+        let calls = git.reset_paths.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], "/home/u/proj/worktrees/R-1/alpha");
+    }
+
+    #[test]
+    fn reset_worktree_inner_rejects_an_escape_and_runs_no_git() {
+        let git = FakeGit::new("");
+        let err = reset_worktree_inner(&git, "/home/u/proj", "/home/u/proj/worktrees/../../etc");
+        assert!(err.is_err());
+        assert!(git.reset_paths.lock().unwrap().is_empty(), "no git on a rejected path");
     }
 
     #[test]
