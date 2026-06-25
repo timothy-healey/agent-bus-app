@@ -28,14 +28,13 @@ All build on chunk 1's `ProcessRegistry` / killable spawner / brake wiring.
 - **LF33** — `done` (tag `plan-run-lifecycle-ux`) — frontend Start now emits `run-changed` + is idempotent (one active run); board/control auto-refresh, no run proliferation. Run dropdown demoted to history.
 - **LF34** — `done` (tag `plan-usage-cache-count`) — usage window total counts all tokens incl. cache; default budget recalibrated to ~190M; budget calibratable in Settings. A tunable estimate, not an exact claude.ai mirror.
 
-## Authoring-UI deferrals (backend done, UI pending)
-- **AU1 · P2/P3 join authoring controls** — `backlog` — `cancel_on_reject` toggle + quorum (N-of-M) control in the wizard (runtime supports both).
-- **AU2 · Nested-lane (P1) hierarchical render** — `backlog` — render nested fork lanes distinctly in `PipelineView`.
+## Authoring-UI deferrals
+- **AU1 · P2/P3 join authoring controls** — `done` (tag `plan-au1`) — the quorum + cancel_on_reject controls already existed; hardened with named mutators, DD7-interplay tests, a backend best-effort quorum-range check (single source of truth), and a11y.
+- **AU2 · Nested-lane (P1) hierarchical render** — `done` (tag `plan-au2`) — nested fork lanes render indented inside a dashed depth-labelled containment box; nesting derived by a consolidated lane-walk faithful to `validate.rs`, depth-capped at 3.
 
 ## Frontend impeccable-pass leftovers
-- **FE1 · Inline-style → CSS-class migration** — `backlog` — ~26 one-off chrome components remain inline (only `ui/*` + high-traffic controls were converted).
-- **FE2 · Tablist roving-tabindex / arrow-key nav** — `backlog` — `role=tab` present, arrow-key navigation not added.
-- **FE3 · UsageMeter full tooltip rows** — `backlog` — brake-at, 10-min avg, per-team effort (needs data plumbing).
+- **FE2 + FE3** — `plan ready, NOT built` — **plan committed: `docs/superpowers/plans/2026-06-25-fe2-fe3-polish.md`** (6 tasks). FE2: roving-tabindex/arrow-key nav on the CardDrawer + ViewSwitcher tablists (a `rovingTabKey` helper). FE3: UsageMeter tooltip rows from EXISTING snapshot fields only (brake-eta from `est_brake_at`, reset countdown). **Next session: build this first** — implementer → 2-stage review → gates → tag `plan-fe2-fe3-polish`. (Out of scope in that plan, would need backend plumbing: 10-min burn avg, per-team effort/burn.)
+- **FE1 · Inline-style → CSS-class migration** — `backlog` (deferred, large/regression-risky) — ~26 one-off chrome components remain inline; the impeccable pass deliberately scoped this out. Only do on explicit ask.
 
 ## Platform / test hardening
 - **R4-API · Live-log + thinking for the anthropic-api runner** — `backlog` — the API runner uses the default `invoke_stream` (final result only), so API-path workers show no live log/thinking (pre-existing; R4 live-log was CLI-only). Surfaced by the live-worker-view candidates (LWV-A3).
