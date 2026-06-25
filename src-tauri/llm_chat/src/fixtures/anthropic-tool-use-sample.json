@@ -1,0 +1,27 @@
+{
+  "id": "msg_02TOOL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-8",
+  "content": [
+    { "type": "text", "text": "Here is the team set." },
+    {
+      "type": "tool_use",
+      "id": "toolu_01XYZ",
+      "name": "emit_slice",
+      "input": {
+        "kind": "teams",
+        "teams": [
+          { "id": "research", "name": "Research" }
+        ]
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+    "input_tokens": 800,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 100,
+    "cache_read_input_tokens": 20
+  }
+}

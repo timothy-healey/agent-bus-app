@@ -20,6 +20,7 @@ pub mod command;
 pub mod stream_json;
 pub mod session;
 pub mod claude_cli;
+pub mod anthropic_api;
 pub mod fake;
 
 pub use chat::*;
