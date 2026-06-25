@@ -5,7 +5,7 @@
 //! trait ever gains process types — process control is a root concern.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Shared registry of live child process-group ids (pgid == leader pid because
 /// the spawner sets `.process_group(0)`). Cloned behind an `Arc` at the root.
@@ -104,6 +104,94 @@ impl ProcessRegistry {
     }
 }
 
+/// Build the production worker spawner closure: spawns `claude` in its own
+/// process group, registers the pgid, captures output to completion, waits,
+/// deregisters, and maps the result via `interpret_runner_output`. The group +
+/// registry are what make `kill_all` reach `claude`'s own children (LF20).
+pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude_cli::SpawnFn {
+    let registry = registry.clone();
+    Box::new(move |args: &[String], cwd: Option<&str>| {
+        use runners::output::RunnerError;
+        use std::process::Stdio;
+        let (program, rest) = args
+            .split_first()
+            .ok_or_else(|| RunnerError::Spawn("empty argv".into()))?;
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(rest).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0); // child leads a fresh group; pgid == child pid
+        }
+        let mut child = cmd.spawn().map_err(|e| RunnerError::Spawn(e.to_string()))?;
+        let pgid = child.id() as i32;
+        registry.register(pgid);
+        // Capture to completion, then wait. (Reads the piped handles; for the
+        // streaming path the engine still forwards deltas via the stream parser
+        // over the returned stdout — same as the .output() path.)
+        use std::io::Read;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut o) = child.stdout.take() {
+            let _ = o.read_to_end(&mut stdout);
+        }
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_end(&mut stderr);
+        }
+        let status = child.wait().map_err(|e| RunnerError::Spawn(e.to_string()));
+        registry.deregister(pgid);
+        let status = status?;
+        runners::claude_cli::interpret_runner_output(stdout, stderr, status.success())
+    })
+}
+
+/// Build a worker `ClaudeCliRunner` wired to the killable spawner.
+pub(crate) fn build_killable_worker_runner(
+    registry: Arc<ProcessRegistry>,
+) -> Arc<dyn runners::output::Runner> {
+    Arc::new(runners::claude_cli::ClaudeCliRunner::with_spawner(
+        killable_spawn(&registry),
+    ))
+}
+
+/// Same for the chat runner (capture-to-completion via the chat SpawnFn).
+pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::claude_cli::SpawnFn {
+    let registry = registry.clone();
+    Box::new(move |args: &[String], cwd: Option<&str>| {
+        use llm_chat::chat::ChatError;
+        use std::process::Stdio;
+        let mut cmd = std::process::Command::new(runners::command::CLAUDE_BIN);
+        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd.spawn().map_err(|e| ChatError::Spawn(e.to_string()))?;
+        let pgid = child.id() as i32;
+        registry.register(pgid);
+        use std::io::Read;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut o) = child.stdout.take() {
+            let _ = o.read_to_end(&mut stdout);
+        }
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_end(&mut stderr);
+        }
+        let status = child.wait().map_err(|e| ChatError::Spawn(e.to_string()));
+        registry.deregister(pgid);
+        let status = status?;
+        llm_chat::claude_cli::interpret_chat_output(stdout, stderr, status.success())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +221,18 @@ mod tests {
         reg.register(42);
         reg.register(42);
         assert_eq!(reg.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn killable_spawner_runs_a_child_captures_output_and_drains_registry() {
+        let reg = Arc::new(ProcessRegistry::new());
+        let out = (super::killable_spawn(&reg))(
+            &["sh".into(), "-c".into(), "printf hello".into()],
+            None,
+        );
+        assert_eq!(out.unwrap(), "hello");
+        assert!(reg.is_empty(), "registry drained after the child is waited on");
     }
 
     #[cfg(unix)]

@@ -74,6 +74,8 @@ struct RootDispatcher {
     runtime: Arc<RuntimeState>,
     usage: Arc<usage_telemetry::api::UsageState>,
     app: tauri::AppHandle,
+    /// LF20: brake-on (Stop) kills every in-flight `claude` process group.
+    process_registry: Arc<process_registry::ProcessRegistry>,
 }
 
 /// Concrete revise-bundle reader (Plan 4 vet F1 consumer). Reads the comments
@@ -765,6 +767,21 @@ async fn create_project_from_draft(
     Ok(project)
 }
 
+/// LF20: the frontend Stop button. A root-crate wrapper over the runtime brake
+/// so the composition-root `ProcessRegistry` (which the runtime crate must not
+/// know about) gets its `kill_all` on Stop. Replaces `runtime::api::brake_on` in
+/// the invoke handler; sets the brake then kills every in-flight `claude` group.
+#[tauri::command(rename_all = "snake_case")]
+fn brake_on(
+    runtime: tauri::State<'_, Arc<RuntimeState>>,
+    registry: tauri::State<'_, Arc<process_registry::ProcessRegistry>>,
+    reason: Option<String>,
+) -> runtime::brake::BrakeState {
+    runtime.brake.set_on(reason.unwrap_or_else(|| "manual".into()));
+    registry.kill_all();
+    runtime.brake.state()
+}
+
 /// OHS command: activate a project's runtime (swap the active pipeline + respawn
 /// worker loops at a fresh generation). Called by the frontend when a project is
 /// created or selected. Idempotent: re-activating the same project just bumps the
@@ -1071,6 +1088,8 @@ impl ToolDispatcher for RootDispatcher {
                 let args = parse_args!(runtime::api::args::BrakeOnArgs);
                 let s = self.runtime.brake.clone();
                 s.set_on(args.reason.unwrap_or_else(|| "manual".into()));
+                // LF20: Stop kills every in-flight `claude` process group.
+                self.process_registry.kill_all();
                 let _ = self.app.emit(crate::events::USAGE_CHANGED, ());
                 ok(serde_json::to_value(s.state()).unwrap())
             }
@@ -1215,6 +1234,12 @@ pub fn run() {
         },
     ];
 
+    // Live child process-group registry (LF20): the killable spawners register
+    // each `claude` group; the exit handler + brake triggers kill them all.
+    // Built BEFORE the builder so a clone reaches the `run` exit callback.
+    let process_registry = Arc::new(crate::process_registry::ProcessRegistry::new());
+    let process_registry_for_exit = process_registry.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -1222,7 +1247,8 @@ pub fn run() {
                 .add_migrations(DB_URL, migrations)
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
+            let process_registry = process_registry.clone();
             let handle = app.handle().clone();
             tauri::async_runtime::block_on(async move {
                 let data_dir = handle.path().app_data_dir().expect("no app data dir");
@@ -1330,6 +1356,9 @@ pub fn run() {
                     },
                 ));
                 handle.manage(runtime_state_arc.clone());
+                // LF20: the process registry as managed State so the root
+                // `brake_on` command (and any other consumer) can resolve it.
+                handle.manage(process_registry.clone());
 
                 // Review state (Plan 4).
                 let review_state = review::api::ReviewState {
@@ -1378,6 +1407,7 @@ pub fn run() {
                     runtime: runtime_state_arc.clone(),
                     usage: usage_state_arc.clone(),
                     app: handle.clone(),
+                    process_registry: process_registry.clone(),
                 });
 
                 // The terminal's free-form chat engine (Plan llm_chat). One
@@ -1390,9 +1420,10 @@ pub fn run() {
                 // (degrades via the trait default). The API idiom never crosses —
                 // Runtime/CC hold an opaque Arc<dyn ChatRunner>.
                 let chat_runner: Arc<dyn llm_chat::chat::ChatRunner> =
-                    pipeline_activator::chat_runner_for(&|| {
-                        pipeline_activator::resolve_chat_key(&keychain)
-                    });
+                    pipeline_activator::chat_runner_for(
+                        &|| pipeline_activator::resolve_chat_key(&keychain),
+                        &process_registry,
+                    );
                 handle.manage(DesignSessionState { runner: chat_runner.clone() });
                 // The slash branch: parser -> RootDispatcher (restores the full
                 // slash tool surface). The agentic branch: the bounded,
@@ -1457,6 +1488,7 @@ pub fn run() {
                         runs: runs.clone(),
                         ledger: ledger.clone(),
                         fanout: fanout.clone(),
+                        process_registry: process_registry.clone(),
                     },
                 ));
                 handle.manage(activator.clone());
@@ -1474,6 +1506,7 @@ pub fn run() {
                     let brake = brake.clone();
                     let pool = pool.clone();
                     let handle = handle.clone();
+                    let process_registry = process_registry.clone();
                     tauri::async_runtime::spawn(async move {
                         use usage_telemetry::api::load_config;
                         use usage_telemetry::brake_policy::{BrakeDecision, AUTO_METER_REASON};
@@ -1486,7 +1519,7 @@ pub fn run() {
                             let now = now_unix();
                             if let Ok(snap) = compute_snapshot(&cc, &worker, &cfg, brake.is_on(), now).await {
                                 match auto_brake_decision(&snap, &cfg, auto_on) {
-                                    BrakeDecision::SetOn(reason) => { brake.set_on(reason); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
+                                    BrakeDecision::SetOn(reason) => { brake.set_on(reason); process_registry.kill_all(); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
                                     BrakeDecision::Release => { brake.set_off(); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
                                     BrakeDecision::NoChange => {}
                                 }
@@ -1540,7 +1573,7 @@ pub fn run() {
             runtime::api::accept_task,
             runtime::api::list_runs,
             runtime::api::run_store_occupancy,
-            runtime::api::brake_on,
+            brake_on,
             runtime::api::brake_off,
             runtime::api::brake_state,
             runtime::api::scale_team,
@@ -1555,8 +1588,15 @@ pub fn run() {
             conversational_control::api::send_message,
             conversational_control::api::get_conversation,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // LF20: kill every in-flight `claude` process group on quit so no
+                // orphan keeps mutating a worktree after the app is gone.
+                process_registry_for_exit.kill_all();
+            }
+        });
 }
 
 #[cfg(test)]
