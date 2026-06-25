@@ -3,7 +3,9 @@ import { emptyDraft, WIZARD_STEPS, renameTeam, setPromptBody, setTeamModel, addT
 import { setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
 import { addGate, removeGate, setTeamApprove } from "./draft";
 import { addForkJoin, removeForkJoin } from "./draft";
+import { setJoinQuorum, setJoinCancelOnReject } from "./draft";
 import { setTeamRole, setTeamStoreCapacity, setTeamWorkers } from "./draft";
+import { draftToPipeline } from "./draftToPipeline";
 
 describe("wizard draft helpers", () => {
   it("emptyDraft has no teams + current schema version", () => {
@@ -182,5 +184,61 @@ describe("fork/join helpers (W4)", () => {
     const d = removeForkJoin(addForkJoin(base, "fork-1", "join-1", ["a", "b"], "c"), "fork-1", "join-1");
     expect(d.forks).toHaveLength(0);
     expect(d.joins).toHaveLength(0);
+  });
+});
+
+describe("join field mutators (AU1 — quorum + cancel-on-reject)", () => {
+  const base = addForkJoin(
+    addTeam(addTeam(addTeam(emptyDraft(), "a", "A"), "b", "B"), "c", "C"),
+    "fork-1",
+    "join-1",
+    ["a", "b"],
+    "c",
+  );
+
+  it("addForkJoin seeds a join WITHOUT quorum/cancel_on_reject (both start undefined)", () => {
+    expect(base.joins[0].quorum).toBeUndefined();
+    expect(base.joins[0].cancel_on_reject).toBeUndefined();
+  });
+
+  it("setJoinQuorum writes the number on the matching join", () => {
+    const d = setJoinQuorum(base, "join-1", 2);
+    expect(d.joins[0].quorum).toBe(2);
+  });
+
+  it("setJoinQuorum with undefined clears it back to all-must-approve", () => {
+    const set = setJoinQuorum(base, "join-1", 2);
+    const cleared = setJoinQuorum(set, "join-1", undefined);
+    expect(cleared.joins[0].quorum).toBeUndefined();
+  });
+
+  it("setJoinQuorum keeps cancel_on_reject intact (it is merely ignored by the runtime)", () => {
+    const withToggle = setJoinCancelOnReject(base, "join-1", true);
+    const withQuorum = setJoinQuorum(withToggle, "join-1", 2);
+    expect(withQuorum.joins[0].cancel_on_reject).toBe(true);
+    // clearing the quorum restores the prior toggle untouched
+    expect(setJoinQuorum(withQuorum, "join-1", undefined).joins[0].cancel_on_reject).toBe(true);
+  });
+
+  it("setJoinQuorum is a no-op on an unknown join id", () => {
+    const d = setJoinQuorum(base, "ghost", 2);
+    expect(d).toEqual(base);
+  });
+
+  it("setJoinCancelOnReject writes the boolean on the matching join", () => {
+    expect(setJoinCancelOnReject(base, "join-1", true).joins[0].cancel_on_reject).toBe(true);
+    expect(setJoinCancelOnReject(base, "join-1", false).joins[0].cancel_on_reject).toBe(false);
+  });
+
+  it("setJoinCancelOnReject is a no-op on an unknown join id", () => {
+    const d = setJoinCancelOnReject(base, "ghost", true);
+    expect(d).toEqual(base);
+  });
+
+  it("both fields round-trip through draftToPipeline (adapter passes joins straight through)", () => {
+    const d = setJoinCancelOnReject(setJoinQuorum(base, "join-1", 2), "join-1", true);
+    const p = draftToPipeline(d);
+    expect(p.joins[0].quorum).toBe(2);
+    expect(p.joins[0].cancel_on_reject).toBe(true);
   });
 });
