@@ -55,6 +55,23 @@ describe("NodeDrawer — team editor round-trips", () => {
     expect(onChange.mock.calls.at(-1)?.[0].teams[0].workers).toEqual({ min: 1, max: 4 });
   });
 
+  it("a store node header reads Store · <team-id>", () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="store:research" onChange={() => {}} onClose={() => {}} />);
+    expect(screen.getByRole("dialog", { name: /store · research/i })).toBeInTheDocument();
+  });
+
+  it("a store node drawer edits the owning team's store.capacity", () => {
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="store:research" onChange={onChange} onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText("store capacity for research"), { target: { value: "5" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].store.capacity).toBe(5);
+  });
+
+  it("a store node hides the Delete button (derived, not deletable)", () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="store:research" onChange={() => {}} onClose={() => {}} onDelete={() => {}} />);
+    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+  });
+
   it("editing Store capacity flows through setTeamStoreCapacity", () => {
     const onChange = vi.fn();
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
