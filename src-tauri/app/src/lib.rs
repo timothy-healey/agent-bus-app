@@ -1347,8 +1347,15 @@ pub fn run() {
                 // chat runner; the conversation's project_id is the stable
                 // dialogue_id (D4). The system framing is the terminal's
                 // operating prompt; model + budget are v1 defaults.
+                // Per-runner selection (T2): an anthropic key resolvable via the
+                // keychain / ANTHROPIC_API_KEY (S1) picks the structured
+                // AnthropicApiChatRunner (native tool-use); else the CLI runner
+                // (degrades via the trait default). The API idiom never crosses —
+                // Runtime/CC hold an opaque Arc<dyn ChatRunner>.
                 let chat_runner: Arc<dyn llm_chat::chat::ChatRunner> =
-                    Arc::new(llm_chat::claude_cli::ClaudeChatRunner::new());
+                    pipeline_activator::chat_runner_for(&|| {
+                        pipeline_activator::resolve_chat_key(&keychain)
+                    });
                 handle.manage(DesignSessionState { runner: chat_runner.clone() });
                 // The slash branch: parser -> RootDispatcher (restores the full
                 // slash tool surface). The agentic branch: the bounded,
