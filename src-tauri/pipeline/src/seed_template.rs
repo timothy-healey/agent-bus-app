@@ -187,6 +187,7 @@ fn ddd_seed() -> DraftPipeline {
                 t.outputs.on_reject = Some("needs-human".into());
             }
             "implementers" => {
+                t.role = Role::Implementer;
                 t.outputs.on_revise = Some("plan-writers".into());
                 t.outputs.on_reject = Some("needs-human".into());
             }
@@ -272,6 +273,18 @@ mod tests {
         // The final code review hands approved work off to a human.
         let code = d.teams.iter().find(|t| t.id == "code-reviewers").unwrap();
         assert_eq!(code.outputs.on_approve.as_deref(), Some("needs-human"));
+    }
+
+    #[test]
+    fn ddd_seed_implementers_team_has_implementer_role() {
+        let d = ddd_seed();
+        let imp = d.teams.iter().find(|t| t.id == "implementers").expect("implementers team exists");
+        assert_eq!(imp.role, Role::Implementer, "implementers must be tagged Implementer");
+        // Regression: producers/reviewers around it keep their roles.
+        let research = d.teams.iter().find(|t| t.id == "research").unwrap();
+        assert_eq!(research.role, Role::Producer);
+        let cr = d.teams.iter().find(|t| t.id == "code-reviewers").unwrap();
+        assert_eq!(cr.role, Role::Reviewer);
     }
 
     #[test]
