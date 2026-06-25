@@ -138,6 +138,22 @@ describe("CardDrawer", () => {
     expect(screen.getByText(/spec · a2/)).toBeInTheDocument();
   });
 
+  it("opens on the live-log tab when initialTab is set (generator card)", () => {
+    render(
+      <CardDrawer
+        task={task({ id: "gen:R-1:research", state: "running", current_stage: "research" })}
+        artifactMarkdown=""
+        initialTab="live log"
+        logSegments={[{ kind: "output", text: "scanning the repo" }]}
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    expect(screen.getByRole("tab", { name: /live log/i })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("scanning the repo")).toBeInTheDocument();
+  });
+
   it("renders output as prose and thinking dimmed with a marker", () => {
     render(
       <CardDrawer

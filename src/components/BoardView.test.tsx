@@ -73,6 +73,23 @@ describe("BoardView", () => {
     expect(onOpen).toHaveBeenCalledWith("T-1");
   });
 
+  it("shows a transient clickable generator card in the source lane while active", () => {
+    const onOpenCard = vi.fn();
+    render(
+      <BoardView
+        pipeline={pipeline()}
+        tasks={[]}
+        hasRun
+        onOpenCard={onOpenCard}
+        activeGenerators={[{ stage: "research", task_id: "gen:R-1:research" }]}
+      />,
+    );
+    const card = screen.getByText(/scanning/i);
+    expect(card).toBeInTheDocument();
+    fireEvent.click(card);
+    expect(onOpenCard).toHaveBeenCalledWith("gen:R-1:research");
+  });
+
   it("shows an empty hint when there is no pipeline", () => {
     render(<BoardView pipeline={null} tasks={[]} onOpenCard={() => {}} />);
     expect(screen.getByText(/no active pipeline/i)).toBeInTheDocument();

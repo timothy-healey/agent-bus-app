@@ -16,6 +16,9 @@ export interface BoardViewProps {
   /// Whether a run is currently scoped. When false (no run selected/started) the
   /// board shows a run-scoped empty hint rather than bare lanes.
   hasRun?: boolean;
+  /// Currently-active generator passes (LF31). The board renders a transient
+  /// clickable card in each generator's source lane while its pass is in flight.
+  activeGenerators?: { stage: string; task_id: string }[];
 }
 
 /// The board labels a work-item card by its `item_key` (the work's stable lineage
@@ -51,6 +54,7 @@ export function BoardView({
   tokensByTask = {},
   occupancy = [],
   hasRun = false,
+  activeGenerators = [],
 }: BoardViewProps) {
   if (!pipeline) {
     return (
@@ -127,6 +131,30 @@ export function BoardView({
                 </span>
               </div>
             )}
+            {l.kind === "team" &&
+              activeGenerators
+                .filter((g) => g.stage === l.id)
+                .map((g) => (
+                  <div
+                    key={g.task_id}
+                    className="abp-card"
+                    role="button"
+                    onClick={() => onOpenCard(g.task_id)}
+                    style={{
+                      border: "1px solid var(--accent-bd)",
+                      borderRadius: "var(--r-md)",
+                      padding: "10px 12px",
+                      marginBottom: 6,
+                      cursor: "pointer",
+                      background: "var(--accent-2)",
+                      fontSize: 13,
+                      color: "var(--text-2)",
+                    }}
+                  >
+                    <span className="abp-pulse" aria-hidden="true">⟳ </span>
+                    <span>{l.label} · scanning…</span>
+                  </div>
+                ))}
             {l.tasks.map((t) => (
               <Card
                 key={t.id}
