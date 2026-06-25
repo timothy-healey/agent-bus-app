@@ -67,7 +67,7 @@ function edgeStyle(kind: string, dangling: boolean): CSSProperties {
 /// dangling = danger, forward = muted. Keeps the outcome word legible against the
 /// canvas.
 function edgeLabelStyle(kind: string, dangling: boolean): CSSProperties {
-  const base: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 600 };
+  const base: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: "var(--ts-xs)", fontWeight: 600, letterSpacing: "0.02em" };
   if (dangling) return { ...base, fill: "var(--danger)" };
   if (kind === "revise") return { ...base, fill: "var(--revise)" };
   if (kind === "reject") return { ...base, fill: "var(--danger)" };
@@ -121,22 +121,31 @@ function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner
   );
 
   const edges: RFEdge[] = useMemo(
-    () => flow.edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      label: e.label,
-      // G2 — the revise back-edge renders as an explicit curved loop (a smoothstep
-      // bezier with extra curvature) so it reads as a return path, not forward flow.
-      type: e.data.loop ? "smoothstep" : "default",
-      animated: e.data.kind === "revise" || e.data.kind === "reject",
-      style: edgeStyle(e.data.kind, e.data.dangling),
-      labelStyle: edgeLabelStyle(e.data.kind, e.data.dangling),
-      labelBgStyle: { fill: "var(--surface)" },
-      labelBgPadding: [4, 2] as [number, number],
-      labelBgBorderRadius: 3,
-      ...(e.data.loop ? { pathOptions: { borderRadius: 24 } } : {}),
-    })),
+    () => flow.edges.map((e) => {
+      const labelled = e.label.length > 0;
+      return {
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        label: labelled ? e.label : undefined,
+        // G2 — the revise back-edge renders as an explicit curved loop (a smoothstep
+        // bezier with extra corner radius) so it reads as a return path, not
+        // forward flow.
+        type: e.data.loop ? "smoothstep" : "default",
+        animated: e.data.kind === "revise" || e.data.kind === "reject",
+        style: edgeStyle(e.data.kind, e.data.dangling),
+        // Only labelled edges get a chip; quiet forward hand-offs draw no box.
+        ...(labelled
+          ? {
+              labelStyle: edgeLabelStyle(e.data.kind, e.data.dangling),
+              labelBgStyle: { fill: "var(--surface)", stroke: "var(--border)", strokeWidth: 0.5 },
+              labelBgPadding: [5, 2] as [number, number],
+              labelBgBorderRadius: 3,
+            }
+          : {}),
+        ...(e.data.loop ? { pathOptions: { borderRadius: 24 } } : {}),
+      };
+    }),
     [flow],
   );
 
