@@ -104,6 +104,27 @@ describe("NewProjectWizard", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("surfaces the project switcher with delete in the left nav (G13/G14)", async () => {
+    const onDeleteProject = vi.fn().mockResolvedValue(undefined);
+    const projects = [
+      { id: "p1", name: "Alpha", root_path: "/p1", target_repo: null, skill_sources: [], active_pipeline_id: null, created_at: 0, updated_at: 0 },
+    ];
+    render(
+      <NewProjectWizard
+        open={true}
+        onClose={() => {}}
+        onCreated={() => {}}
+        projects={projects}
+        activeProjectId="p1"
+        onSelectProject={() => {}}
+        onDeleteProject={onDeleteProject}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /delete project alpha/i }));
+    fireEvent.click(screen.getByRole("button", { name: /confirm delete alpha/i }));
+    await waitFor(() => expect(onDeleteProject).toHaveBeenCalledWith("p1"));
+  });
+
   it("the review step shows the footer Create + Back actions", async () => {
     await openToReview();
     expect(screen.getByText(/prompts\/research\.md/)).toBeInTheDocument();
