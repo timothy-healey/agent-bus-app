@@ -95,7 +95,23 @@ describe("SettingsView", () => {
     render(<SettingsView {...baseProps({ projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, skill_sources: [], active_pipeline_id: null, created_at: 0, updated_at: 0 }] })} />);
     expect(screen.getByText("Alpha")).toBeInTheDocument();
     // The project row's own remove button (worktrees expander collapsed by default).
-    expect(screen.getByRole("button", { name: "remove" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "remove project Alpha" })).toBeInTheDocument();
+  });
+
+  it("project remove is guarded by a confirm that warns files are deleted but not the target repo", async () => {
+    const onRemoveProject = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView {...baseProps({
+      projects: [{ id: "p1", name: "Alpha", root_path: "/a", target_repo: null, skill_sources: [], active_pipeline_id: null, created_at: 0, updated_at: 0 }],
+      onRemoveProject,
+    })} />);
+    // First click reveals the confirm + the destructive warning; nothing removed yet.
+    fireEvent.click(screen.getByRole("button", { name: "remove project Alpha" }));
+    expect(onRemoveProject).not.toHaveBeenCalled();
+    expect(screen.getByText(/deletes this project's files/i)).toBeInTheDocument();
+    expect(screen.getByText(/target repo is NOT touched/i)).toBeInTheDocument();
+    // Confirm removes.
+    fireEvent.click(screen.getByRole("button", { name: "confirm remove Alpha" }));
+    await waitFor(() => expect(onRemoveProject).toHaveBeenCalledWith("p1"));
   });
 
   it("renders a Target repo field per project and saves it (A5)", async () => {
