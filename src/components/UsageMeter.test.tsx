@@ -4,7 +4,7 @@ import { UsageMeter } from "./UsageMeter";
 import type { UsageSnapshot } from "../ipc/usage";
 
 const base: UsageSnapshot = {
-  window_total: 1_200_000, window_budget: 2_600_000, window_pct: 0.47,
+  window_total: 66_500_000, window_budget: 190_000_000, window_pct: 0.35,
   band: "safe", burn_per_min: 18_000, window_secs: 18000,
   reset_in_secs: null, est_brake_at: null,
   by_team: [{ team_id: "research", tokens: 540_000 }], tokens_by_task: {}, braked: false, auto_meter_enabled: false,
@@ -18,8 +18,8 @@ describe("UsageMeter", () => {
 
   it("shows pct, window line and burn for a safe snapshot", () => {
     render(<UsageMeter snapshot={base} />);
-    expect(screen.getByText("47%")).toBeInTheDocument();
-    expect(screen.getByText(/5h window · 1.2M tok/)).toBeInTheDocument();
+    expect(screen.getByText("35%")).toBeInTheDocument();
+    expect(screen.getByText(/5h window · 66.5M tok/)).toBeInTheDocument();
     expect(screen.getByText(/18k\/min/)).toBeInTheDocument();
   });
 
@@ -47,6 +47,6 @@ describe("UsageMeter", () => {
     render(<UsageMeter snapshot={base} />);
     expect(screen.getByTestId("usage-meter").getAttribute("tabindex")).toBe("0");
     const bar = screen.getByRole("progressbar");
-    expect(bar.getAttribute("aria-valuenow")).toBe("47");
+    expect(bar.getAttribute("aria-valuenow")).toBe("35");
   });
 });

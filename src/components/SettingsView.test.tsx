@@ -6,7 +6,7 @@ import type { UsageSnapshot } from "../ipc/usage";
 import type { WorktreeEntry } from "../ipc/workspace";
 
 const snap: UsageSnapshot = {
-  window_total: 1000, window_budget: 2_600_000, window_pct: 0.0004, band: "safe",
+  window_total: 66_500_000, window_budget: 190_000_000, window_pct: 0.35, band: "safe",
   burn_per_min: 0, window_secs: 18000, reset_in_secs: null, est_brake_at: null,
   by_team: [], tokens_by_task: {}, braked: false, auto_meter_enabled: false,
 };
@@ -47,6 +47,11 @@ describe("SettingsView", () => {
     render(<SettingsView {...baseProps()} />);
     fireEvent.click(screen.getByRole("button", { name: /light/i }));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
+  it("pre-fills the recalibrated default budget when usage is null", () => {
+    render(<SettingsView {...baseProps({ usage: null })} />);
+    expect((screen.getByLabelText(/window budget/i) as HTMLInputElement).value).toBe("190000000");
   });
 
   it("calls onSetBudget with the entered number", async () => {

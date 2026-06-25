@@ -220,7 +220,7 @@ export function SettingsView(props: SettingsViewProps) {
   } = props;
 
   const [theme, setTheme] = useTheme();
-  const [budgetInput, setBudgetInput] = useState(String(usage?.window_budget ?? 2_600_000));
+  const [budgetInput, setBudgetInput] = useState(String(usage?.window_budget ?? 190_000_000));
   const [saving, setSaving] = useState(false);
   const [autoMeter, setAutoMeter] = useState<boolean>(usage?.auto_meter_enabled ?? false);
   const [autoSaving, setAutoSaving] = useState(false);
@@ -316,8 +316,11 @@ export function SettingsView(props: SettingsViewProps) {
             style={{ ...input, width: 160, fontVariantNumeric: "tabular-nums" }} />
           <Button variant="primary" disabled={saving} onClick={saveBudget}>save budget</Button>
         </div>
+        <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
+          counts all tokens incl. cache. tune this so the % matches claude.ai for your plan — it's an estimate, not an exact mirror.
+        </div>
         {usage && (
-          <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-3)" }}>
+          <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
             currently {formatTokens(usage.window_total)} of {formatTokens(usage.window_budget)} used this window.
           </div>
         )}
