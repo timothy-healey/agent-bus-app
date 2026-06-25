@@ -188,6 +188,134 @@ pub fn remove_worktree_inner(
     git.remove(project_root, &resolved.to_string_lossy())
 }
 
+/// The scaffolded subdirs the wizard creates under a project root, in the order
+/// this cleanup removes them. `worktrees` is removed LAST (after its git
+/// worktrees are torn down via the seam). Mirrors `paths::project_subdirs` but
+/// fixes the removal order (`worktrees` last) and is the destructive vocabulary,
+/// kept local to the cleanup so it can never drift into "wipe the whole root".
+const SCAFFOLDED_SUBDIRS: &[&str] = &[
+    "prompts",
+    "pipelines",
+    "artifacts",
+    ".agent-bus",
+    "worktrees",
+];
+
+/// Outcome of [`cleanup_project_files_inner`]: a human-readable note plus the
+/// subdirs actually removed. `skipped_for_safety` is true when the target-repo
+/// guard tripped and NO file deletion happened.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileCleanup {
+    /// Scaffolded subdirs that were removed (existed and were deleted).
+    pub removed: Vec<String>,
+    /// Worktree paths torn down via the git seam.
+    pub worktrees_removed: Vec<String>,
+    /// True when the safety guard skipped ALL file deletion (target repo == root
+    /// or nested under it). `note` explains why.
+    pub skipped_for_safety: bool,
+    /// Non-fatal notes (guard explanation, per-worktree remove failures, etc.).
+    pub note: String,
+}
+
+/// SAFETY GUARD: is the bound `target_repo` the project root itself, or nested
+/// under it? If so, removing the scaffolded subdirs would risk the real repo, so
+/// the caller MUST skip file deletion entirely. Lexical (no IO). `None`/empty
+/// target_repo → never unsafe.
+fn target_repo_collides_with_root(root_path: &str, target_repo: Option<&str>) -> bool {
+    let Some(repo) = target_repo.filter(|s| !s.trim().is_empty()) else {
+        return false;
+    };
+    let root = normalize(Path::new(root_path));
+    let repo = normalize(Path::new(repo));
+    // Collision when repo IS the root, or repo is a descendant of the root
+    // (deleting root's subdirs could nuke the repo). `starts_with` covers both
+    // (a path starts_with itself).
+    repo.starts_with(&root)
+}
+
+/// Remove a project's on-disk scaffolding with hard safety guards. Given the
+/// project's `root_path`, its (optional) bound `target_repo`, and the
+/// `WorktreeGit` seam, this:
+///   1. Lists the project's cleanup-candidate worktrees (under
+///      `<root>/worktrees/`) and `git worktree remove`s each via the seam,
+///      reusing the same path-scoping guard (`worktree_under_root`). Tolerant of
+///      none and of per-worktree failures (recorded in the note, never fatal).
+///   2. Removes ONLY the named scaffolded subdirs that resolve strictly under
+///      `root_path` (`prompts/ pipelines/ artifacts/ .agent-bus/ worktrees/`).
+///      Missing dirs are fine. It NEVER removes `root_path` itself (operator
+///      chose "scaffolded pieces", not the whole root).
+///
+/// HARD SAFETY GUARDS:
+///   * NEVER touches `target_repo` or anything under it.
+///   * If `target_repo == root_path` or is nested under `root_path`, SKIPs ALL
+///     file deletion (returns `skipped_for_safety = true` with a clear note)
+///     rather than risk the real repo. Worktree teardown is also skipped in that
+///     case (a worktree under such a root could be inside the repo).
+///   * Only ever deletes the named subdirs that resolve strictly under
+///     `root_path` (a subdir whose normalised path is not under the root is
+///     skipped — defence in depth, can't happen for literal names).
+pub fn cleanup_project_files_inner(
+    git: &dyn WorktreeGit,
+    root_path: &str,
+    target_repo: Option<&str>,
+) -> FileCleanup {
+    let mut out = FileCleanup::default();
+
+    // GUARD: refuse entirely if the bound repo is the root or under it.
+    if target_repo_collides_with_root(root_path, target_repo) {
+        out.skipped_for_safety = true;
+        out.note = format!(
+            "skipped file cleanup: target_repo ({}) is the project root or nested under it; \
+             refusing to risk the real repo",
+            target_repo.unwrap_or_default()
+        );
+        return out;
+    }
+
+    let root = normalize(Path::new(root_path));
+
+    // 1. Tear down git worktrees via the seam (path-scoped, tolerant).
+    match list_worktrees_inner(git, root_path) {
+        Ok(entries) => {
+            for entry in entries {
+                match remove_worktree_inner(git, root_path, &entry.path) {
+                    Ok(()) => out.worktrees_removed.push(entry.path),
+                    Err(e) => {
+                        out.note
+                            .push_str(&format!("worktree remove failed for {}: {e}; ", entry.path));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            // No worktrees / not a git repo / git missing: tolerant — record and
+            // carry on to the directory cleanup.
+            out.note.push_str(&format!("worktree list skipped: {e}; "));
+        }
+    }
+
+    // 2. Remove only the named scaffolded subdirs, each re-checked to resolve
+    // strictly under the root (defence in depth; never the root itself).
+    for name in SCAFFOLDED_SUBDIRS {
+        let dir = normalize(&root.join(name));
+        if dir == root || !dir.starts_with(&root) {
+            // Would not be strictly under the root — refuse (cannot happen for
+            // the literal names, but the guard is cheap and explicit).
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => out.removed.push(name.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => { /* tolerant */ }
+            Err(e) => {
+                out.note
+                    .push_str(&format!("failed to remove {}: {e}; ", dir.display()));
+            }
+        }
+    }
+
+    out
+}
+
 /// State for the worktree commands: holds the project store (to resolve a
 /// project's root) and the injected git runner.
 pub struct WorktreeState {
@@ -366,6 +494,137 @@ branch refs/heads/t1
             git.removed.lock().unwrap().is_empty(),
             "no git command on a rejected path"
         );
+    }
+
+    // --- on-disk cleanup (project delete) -------------------------------------
+
+    /// Build a project root with every scaffolded subdir + a sentinel file in
+    /// each, and a SEPARATE target_repo dir with its own sentinel. Returns
+    /// (root, target_repo).
+    fn scaffolded_project() -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("abp-clean-{}", uuid::Uuid::new_v4()));
+        let root = base.join("project");
+        let repo = base.join("target-repo");
+        for name in SCAFFOLDED_SUBDIRS {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("sentinel.txt"), b"x").unwrap();
+        }
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("sentinel.txt"), b"real-repo").unwrap();
+        (root, repo)
+    }
+
+    #[test]
+    fn cleanup_removes_scaffolded_subdirs_and_leaves_target_repo_untouched() {
+        let (root, repo) = scaffolded_project();
+        let git = FakeGit::new(""); // no worktrees reported
+        let out = cleanup_project_files_inner(
+            &git,
+            root.to_str().unwrap(),
+            Some(repo.to_str().unwrap()),
+        );
+
+        assert!(!out.skipped_for_safety, "should not skip: repo is separate");
+        // Every scaffolded subdir is gone.
+        for name in SCAFFOLDED_SUBDIRS {
+            assert!(!root.join(name).exists(), "{name} should be removed");
+        }
+        // The root itself survives (we delete pieces, not the whole root).
+        assert!(root.exists(), "root_path itself must not be removed");
+        // The target repo + its sentinel are completely untouched.
+        assert!(repo.exists(), "target_repo must survive");
+        assert!(repo.join("sentinel.txt").exists(), "target_repo contents must survive");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("sentinel.txt")).unwrap(),
+            "real-repo"
+        );
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn cleanup_skips_file_deletion_when_target_repo_equals_root() {
+        let (root, _repo) = scaffolded_project();
+        let git = FakeGit::new("");
+        // target_repo == root_path: the hard guard must skip ALL file deletion.
+        let out = cleanup_project_files_inner(
+            &git,
+            root.to_str().unwrap(),
+            Some(root.to_str().unwrap()),
+        );
+
+        assert!(out.skipped_for_safety, "guard must trip when repo == root");
+        assert!(out.removed.is_empty(), "nothing should be removed");
+        // The root's scaffolded contents all survive untouched.
+        for name in SCAFFOLDED_SUBDIRS {
+            assert!(root.join(name).join("sentinel.txt").exists(), "{name} sentinel must survive");
+        }
+        // No git worktree teardown happened either (guard returns early).
+        assert!(git.removed.lock().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn cleanup_skips_file_deletion_when_target_repo_nested_under_root() {
+        let (root, _repo) = scaffolded_project();
+        let nested = root.join("nested-repo");
+        let git = FakeGit::new("");
+        let out = cleanup_project_files_inner(
+            &git,
+            root.to_str().unwrap(),
+            Some(nested.to_str().unwrap()),
+        );
+        assert!(out.skipped_for_safety, "guard must trip when repo is under root");
+        for name in SCAFFOLDED_SUBDIRS {
+            assert!(root.join(name).exists(), "{name} must survive the skip");
+        }
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn cleanup_is_tolerant_of_missing_subdirs_and_no_target_repo() {
+        let base = std::env::temp_dir().join(format!("abp-clean-{}", uuid::Uuid::new_v4()));
+        let root = base.join("project");
+        // Only create ONE of the scaffolded subdirs; the rest are missing.
+        std::fs::create_dir_all(root.join("artifacts")).unwrap();
+        let git = FakeGit::new("");
+        let out = cleanup_project_files_inner(&git, root.to_str().unwrap(), None);
+        assert!(!out.skipped_for_safety);
+        assert_eq!(out.removed, vec!["artifacts".to_string()]);
+        assert!(!root.join("artifacts").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cleanup_tears_down_worktrees_via_the_seam() {
+        let (root, repo) = scaffolded_project();
+        let wt = format!("{}/worktrees/T-1", root.to_string_lossy());
+        let porcelain = format!("worktree {wt}\nHEAD aaaa\nbranch refs/heads/t1\n");
+        let git = FakeGit::new(&porcelain);
+        let out = cleanup_project_files_inner(
+            &git,
+            root.to_str().unwrap(),
+            Some(repo.to_str().unwrap()),
+        );
+        // The worktree under <root>/worktrees/ was removed via the git seam.
+        let calls = git.removed.lock().unwrap();
+        assert_eq!(calls.len(), 1, "expected one git worktree remove");
+        assert_eq!(calls[0].1, normalize(Path::new(&wt)).to_string_lossy());
+        assert_eq!(out.worktrees_removed, vec![wt]);
+        drop(calls);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn target_repo_collision_guard_is_lexical() {
+        assert!(target_repo_collides_with_root("/p", Some("/p")));
+        assert!(target_repo_collides_with_root("/p", Some("/p/repo")));
+        assert!(target_repo_collides_with_root("/p", Some("/p/./repo")));
+        assert!(!target_repo_collides_with_root("/p", Some("/other")));
+        assert!(!target_repo_collides_with_root("/p", None));
+        assert!(!target_repo_collides_with_root("/p", Some("   ")));
     }
 
     #[test]

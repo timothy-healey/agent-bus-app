@@ -140,15 +140,57 @@ pub async fn workspace_set_skill_sources(
         .map_err(|e| e.to_string())
 }
 
+/// OHS command: remove a project. Deletes the project's entire DB subtree (the
+/// FK-safe cascade in `ProjectStore::remove`, including the project's worker
+/// rows) AND its on-disk scaffolding (prompts/ pipelines/ artifacts/ .agent-bus/
+/// worktrees/, plus tearing down any git worktrees via the WorktreeGit seam).
+/// The bound `target_repo` is NEVER touched — and if it is the project root or
+/// nested under it, file cleanup is skipped entirely (guard in
+/// `cleanup_project_files_inner`).
+///
+/// Order matters: read the project's paths BEFORE the DB delete (the row is gone
+/// after), then run the DB cascade, then the files. File cleanup is best-effort:
+/// the DB row is already gone, so a file error is surfaced in the log but does
+/// NOT fail the command (that would leave the operator unable to retry a delete
+/// of an already-deleted project).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_remove_project(
     state: tauri::State<'_, WorkspaceState>,
+    worktrees: tauri::State<'_, crate::worktree::WorktreeState>,
     id: String,
 ) -> Result<(), String> {
-    state.store.remove(&ProjectId(id)).await.map_err(|e| match e {
+    let project_id = ProjectId(id);
+
+    // 1. Read paths BEFORE deleting (the row is gone afterwards).
+    let project = state.store.get(&project_id).await.map_err(|e| match e {
         ProjectStoreError::NotFound(_) => "not_found".to_string(),
         other => other.to_string(),
-    })
+    })?;
+    let root_path = project.root_path.to_string_lossy().into_owned();
+    let target_repo = project.target_repo.clone();
+
+    // 2. DB cascade (authoritative; the operator's delete succeeds or fails here).
+    state.store.remove(&project_id).await.map_err(|e| match e {
+        ProjectStoreError::NotFound(_) => "not_found".to_string(),
+        other => other.to_string(),
+    })?;
+
+    // 3. On-disk cleanup — best-effort. The DB row is already gone, so a file
+    // error must not fail the command (it would block re-deleting). Surface via
+    // the log; the guarded cleanup never touches target_repo.
+    let cleanup = crate::worktree::cleanup_project_files_inner(
+        worktrees.git.as_ref(),
+        &root_path,
+        target_repo.as_deref(),
+    );
+    if cleanup.skipped_for_safety || !cleanup.note.is_empty() {
+        eprintln!(
+            "workspace_remove_project: file cleanup for {root_path}: removed={:?} worktrees={:?} skipped_for_safety={} note={}",
+            cleanup.removed, cleanup.worktrees_removed, cleanup.skipped_for_safety, cleanup.note
+        );
+    }
+
+    Ok(())
 }
 
 /// Resolve `rel_path` against `root`, guaranteeing the result stays inside
