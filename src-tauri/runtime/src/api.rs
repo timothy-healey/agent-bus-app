@@ -17,9 +17,53 @@ use agent_bus_core::{ToolSpec, Verdict};
 use arc_swap::ArcSwap;
 use pipeline::model::{Pipeline, Team};
 use runners::output::{InvocationRequest, Runner, RunnerError, RunnerOutput};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Per-tool argument types for Runtime's OHS tools (T1). Each tool's
+/// `input_schema` is DERIVED from these via `schemars` (one source of truth — no
+/// drift vs the dispatcher, which deserializes the same struct). Owned by the
+/// supplier; the agentic loop validates only the published JSON schema, never
+/// these types (the ACL seal).
+pub mod args {
+    use super::{Deserialize, JsonSchema};
+
+    /// `inject_topic` / start-a-run. `topic` is the run's optional free-text
+    /// context; `target_repo` is kept for IPC shape-compatibility (the project
+    /// default applies per run).
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct InjectTopicArgs {
+        pub topic: String,
+        #[serde(default)]
+        pub target_repo: Option<String>,
+    }
+
+    /// `approve_gate` / `reject_gate` / `revise_gate` — all carry a single task id.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct GateArgs {
+        pub task_id: String,
+    }
+
+    /// `brake_on` — an optional human reason (defaults to "manual" on dispatch).
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema, Default)]
+    pub struct BrakeOnArgs {
+        #[serde(default)]
+        pub reason: Option<String>,
+    }
+
+    /// `brake_off` / `brake_state` — no arguments.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema, Default)]
+    pub struct NoArgs {}
+
+    /// `scale_team` — the team whose worker ceiling to report.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct ScaleTeamArgs {
+        pub team_id: String,
+    }
+}
 
 /// The activatable slice of runtime state — a value snapshot of the resolved
 /// activation inputs. Swapped atomically on project create/switch (and at boot).
@@ -486,6 +530,42 @@ pub fn tools() -> Vec<ToolSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inject_topic_args_round_trip_with_and_without_target_repo() {
+        let a: args::InjectTopicArgs =
+            serde_json::from_value(json!({ "topic": "03-scheduling" })).unwrap();
+        assert_eq!(a.topic, "03-scheduling");
+        assert_eq!(a.target_repo, None);
+        let b: args::InjectTopicArgs =
+            serde_json::from_value(json!({ "topic": "t", "target_repo": "/repo" })).unwrap();
+        assert_eq!(b.target_repo.as_deref(), Some("/repo"));
+        // missing the required `topic` is rejected by serde.
+        assert!(serde_json::from_value::<args::InjectTopicArgs>(json!({})).is_err());
+    }
+
+    #[test]
+    fn gate_args_round_trip_and_require_task_id() {
+        let a: args::GateArgs = serde_json::from_value(json!({ "task_id": "T-041" })).unwrap();
+        assert_eq!(a.task_id, "T-041");
+        assert!(serde_json::from_value::<args::GateArgs>(json!({})).is_err());
+    }
+
+    #[test]
+    fn brake_on_args_reason_is_optional() {
+        let a: args::BrakeOnArgs = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(a.reason, None);
+        let b: args::BrakeOnArgs =
+            serde_json::from_value(json!({ "reason": "rate-limit" })).unwrap();
+        assert_eq!(b.reason.as_deref(), Some("rate-limit"));
+    }
+
+    #[test]
+    fn scale_team_args_round_trip_and_require_team_id() {
+        let a: args::ScaleTeamArgs = serde_json::from_value(json!({ "team_id": "spec" })).unwrap();
+        assert_eq!(a.team_id, "spec");
+        assert!(serde_json::from_value::<args::ScaleTeamArgs>(json!({})).is_err());
+    }
 
     #[test]
     fn tools_are_all_runtime_slug_and_cover_canonical_actions() {

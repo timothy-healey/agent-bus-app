@@ -4,9 +4,53 @@ use crate::reanchor::{reanchor_comments as reanchor_project, ReanchoredComment};
 use crate::store::CommentStore;
 use agent_bus_core::tool_protocol::ToolSpec;
 use agent_bus_core::Verdict;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+
+/// Per-tool argument types for Review's OHS tools (T1). Each tool's
+/// `input_schema` is DERIVED from these via `schemars` (one source of truth —
+/// the dispatcher deserializes the same struct). Owned by the supplier; the
+/// agentic loop validates only the published JSON schema, never these types.
+pub mod args {
+    use super::{Deserialize, JsonSchema, Verdict};
+
+    /// `add_comment` — add an inline or direction comment to a task's artifact.
+    /// `kind` is loosely a string ("inline"/"direction") matching the command.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct AddCommentArgs {
+        pub task_id: String,
+        pub artifact_path: String,
+        pub note: String,
+        #[serde(default)]
+        pub anchor_text: Option<String>,
+        #[serde(default)]
+        pub anchor_offset: Option<i64>,
+        #[serde(default)]
+        pub kind: Option<String>,
+    }
+
+    /// `list_comments` — list all comments for a task.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct ListCommentsArgs {
+        pub task_id: String,
+    }
+
+    /// `reanchor_comments` — re-anchor a task's comments onto a viewed version.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct ReanchorCommentsArgs {
+        pub task_id: String,
+        pub version_markdown: String,
+    }
+
+    /// `record_verdict` — record a review verdict (approve/revise/reject).
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct RecordVerdictArgs {
+        pub task_id: String,
+        pub verdict: Verdict,
+    }
+}
 
 /// Managed state for the Review context.
 pub struct ReviewState {
@@ -190,6 +234,45 @@ pub fn tools() -> Vec<ToolSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_comment_args_round_trip_required_and_optional() {
+        let a: args::AddCommentArgs = serde_json::from_value(json!({
+            "task_id": "T-1", "artifact_path": "spec.md", "note": "fix this"
+        })).unwrap();
+        assert_eq!(a.task_id, "T-1");
+        assert_eq!(a.anchor_offset, None);
+        assert_eq!(a.kind, None);
+        let b: args::AddCommentArgs = serde_json::from_value(json!({
+            "task_id": "T-1", "artifact_path": "spec.md", "note": "n",
+            "anchor_text": "foo", "anchor_offset": 12, "kind": "direction"
+        })).unwrap();
+        assert_eq!(b.anchor_offset, Some(12));
+        assert_eq!(b.kind.as_deref(), Some("direction"));
+        // missing the required `note` is rejected.
+        assert!(serde_json::from_value::<args::AddCommentArgs>(
+            json!({ "task_id": "T-1", "artifact_path": "spec.md" })).is_err());
+    }
+
+    #[test]
+    fn record_verdict_args_round_trip_in_runtime_vocabulary() {
+        let a: args::RecordVerdictArgs =
+            serde_json::from_value(json!({ "task_id": "T-1", "verdict": "revise" })).unwrap();
+        assert_eq!(a.verdict, Verdict::Revise);
+        // a non-vocabulary verdict is rejected.
+        assert!(serde_json::from_value::<args::RecordVerdictArgs>(
+            json!({ "task_id": "T-1", "verdict": "maybe" })).is_err());
+    }
+
+    #[test]
+    fn reanchor_and_list_args_require_their_fields() {
+        let r: args::ReanchorCommentsArgs =
+            serde_json::from_value(json!({ "task_id": "T-1", "version_markdown": "# v" })).unwrap();
+        assert_eq!(r.version_markdown, "# v");
+        assert!(serde_json::from_value::<args::ReanchorCommentsArgs>(json!({ "task_id": "T-1" })).is_err());
+        let l: args::ListCommentsArgs = serde_json::from_value(json!({ "task_id": "T-1" })).unwrap();
+        assert_eq!(l.task_id, "T-1");
+    }
 
     #[test]
     fn tools_publishes_review_ohs_under_review_context() {
