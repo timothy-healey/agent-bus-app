@@ -142,6 +142,53 @@ describe("draftToFlow — store nodes (G1)", () => {
   });
 });
 
+describe("draftToFlow — reviewer outcome edges (G2)", () => {
+  function reviewerDraft(): DraftPipeline {
+    let d = addTeam(addTeam(addTeam(emptyDraft(), "rev", "Rev"), "w", "W"), "build", "Build");
+    d = { ...d, escalations: [{ id: "needs-human", triggers: [] }] };
+    d = setTeamRole(d, "rev", "reviewer");
+    d = connect(d, "rev", "build", "approve");
+    d = connect(d, "rev", "w", "revise");
+    d = connect(d, "rev", "needs-human", "reject");
+    return d;
+  }
+
+  it("labels a reviewer's approve / revise / decline edges by outcome", () => {
+    const { edges } = draftToFlow(reviewerDraft());
+    const byKind = Object.fromEntries(edges.filter((e) => e.source === "rev").map((e) => [e.data.kind, e.label]));
+    expect(byKind.approve).toBe("approve");
+    expect(byKind.revise).toBe("revise");
+    // reject renders as the human outcome word "decline"
+    expect(byKind.reject).toBe("decline");
+  });
+
+  it("marks the revise edge as a curved loop back to the writer", () => {
+    const { edges } = draftToFlow(reviewerDraft());
+    const revise = edges.find((e) => e.data.kind === "revise")!;
+    expect(revise.data.loop).toBe(true);
+    // forward edges are not loops
+    const approve = edges.find((e) => e.data.kind === "approve")!;
+    expect(approve.data.loop).toBe(false);
+  });
+
+  it("a reviewer's decline edge targets the needs-human escalation node", () => {
+    const { edges } = draftToFlow(reviewerDraft());
+    const decline = edges.find((e) => e.data.kind === "reject")!;
+    expect(decline.target).toBe("needs-human");
+    expect(decline.data.dangling).toBe(false);
+  });
+
+  it("a reviewer reject pointing at a missing target is flagged dangling (decline destination)", () => {
+    let d = addTeam(emptyDraft(), "rev", "Rev");
+    d = setTeamRole(d, "rev", "reviewer");
+    d = { ...d, teams: d.teams.map((t) => (t.id === "rev" ? { ...t, outputs: { on_reject: "ghost" } } : t)) };
+    const { edges } = draftToFlow(d);
+    const decline = edges.find((e) => e.data.kind === "reject")!;
+    expect(decline.label).toBe("decline");
+    expect(decline.data.dangling).toBe(true);
+  });
+});
+
 describe("reconcile — positions", () => {
   function flowOf(d: DraftPipeline) {
     return draftToFlow(d);
