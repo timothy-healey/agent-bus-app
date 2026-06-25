@@ -46,7 +46,7 @@ Likely area: graph-builder canvas — node deletion is wired in `mutations.ts` b
 
 ---
 
-### LF6 · Prompts section not recognising skills + no prefilled prompt from initial generation — `uninvestigated`
+### LF6 · Prompts section not recognising skills + no prefilled prompt from initial generation — `promoted → G4 (skills) + G5 (prompts)`
 
 > "i don't think the prompts section is actually recognising my skills. and there's no prefilled prompt based off the initial generation"
 
@@ -62,7 +62,7 @@ Likely area: node-drawer Scope editor (reads/writes/tools) — make reads/writes
 
 ---
 
-### LF8 · Model field should be a selector of available models — `uninvestigated`
+### LF8 · Model field should be a selector of available models — `promoted → G6`
 
 > "models should probably be a selector based on available models to our claude subscription"
 
