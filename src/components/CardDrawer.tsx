@@ -83,6 +83,9 @@ export function CardDrawer({
   onAccept,
   initialTab,
 }: CardDrawerProps) {
+  // For a synthetic `gen:` task this fallback is a dead path (e.g.
+  // `artifacts/gen:R-1:research.md`) — useComments short-circuits on a `gen:`
+  // id and never lists/adds/persists against it (M4), so it's harmless.
   const artifactPath = task.review_artifact ?? task.parent_artifact ?? `artifacts/${task.id}.md`;
   // Pass the viewed artifact body so the hook re-anchors comments addressed in
   // this version (B1); absent a body it falls back to v1 carry-over.
@@ -134,11 +137,16 @@ export function CardDrawer({
     ? logSegments.filter((s) => s.kind === "output").map((s) => s.text).join("")
     : (logText ?? "");
   const logBody = outputText.trim();
+  // A worker often streams thinking before any prose (the start of a reasoning
+  // turn; the whole life of a `gen:` scan). Drive loading→streaming off whether
+  // ANY segment exists (output OR thinking) so that thinking shows immediately
+  // instead of the skeleton (M2). Error/settled detection stays output-only.
+  const hasAnySegment = logSegments.length > 0 || logBody.length > 0;
   const logState: "loading" | "streaming" | "settled" | "error" | "empty" =
     /\[error\]/i.test(logBody)
       ? "error"
       : task.state === "running"
-        ? logBody
+        ? hasAnySegment
           ? "streaming"
           : "loading"
         : logBody
@@ -155,12 +163,16 @@ export function CardDrawer({
     whiteSpace: "pre-wrap",
     background: "var(--bg-2)",
   };
-  // Keep the tail of the live log in view while it streams (S1/B feel).
+  // Keep the tail of the live log in view while it streams (S1/B feel). The
+  // `segmentsFor` array is mutated in place per delta, so its reference is
+  // stable — depend on the segment count AND the last segment's length so the
+  // effect re-fires on every new delta. Note: once it fires it always yanks to
+  // the bottom (no "scrolled up to read" guard); acceptable for v1.
   useEffect(() => {
     if (tab === "live log" && logState === "streaming" && logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
-  }, [tab, logState, logSegments]);
+  }, [tab, logState, logSegments.length, logSegments[logSegments.length - 1]?.text.length]);
   const bodyWrap: CSSProperties = { flex: 1, display: "flex", minHeight: 0 };
   const actionBar: CSSProperties = {
     borderTop: "1px solid var(--border)",
