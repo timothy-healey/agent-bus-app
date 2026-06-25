@@ -48,6 +48,24 @@ describe("Terminal", () => {
     expect(container.querySelector('[data-streaming="true"]')).toBeNull();
   });
 
+  it("exposes a resize handle that grows the panel on ArrowUp", () => {
+    render(<Terminal turns={[]} contextLine="x" onSend={vi.fn()} />);
+    const handle = screen.getByRole("separator", { name: /resize terminal/i });
+    // panel is the handle's parent; default height 280.
+    const panel = handle.parentElement as HTMLElement;
+    expect(panel.style.height).toBe("280px");
+    fireEvent.keyDown(handle, { key: "ArrowUp" });
+    expect(panel.style.height).toBe("304px"); // +STEP(24)
+    fireEvent.keyDown(handle, { key: "ArrowDown" });
+    expect(panel.style.height).toBe("280px");
+  });
+
+  it("hides the resize handle when collapsed", () => {
+    render(<Terminal turns={turns} contextLine="x" onSend={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText(/collapse terminal/i));
+    expect(screen.queryByRole("separator", { name: /resize terminal/i })).not.toBeInTheDocument();
+  });
+
   it("collapses to a thin bar when the head toggle is clicked", () => {
     render(<Terminal turns={turns} contextLine="x" onSend={vi.fn()} />);
     const toggle = screen.getByLabelText(/collapse terminal/i);

@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Turn } from "../ipc/terminal";
 import { toolChip } from "../lib/toolChip";
+
+const MIN_H = 120;
+const STEP = 24;
+const maxH = () => Math.round((typeof window !== "undefined" ? window.innerHeight : 800) * 0.8);
+const clampH = (h: number) => Math.max(MIN_H, Math.min(maxH(), h));
 
 interface TerminalProps {
   turns: Turn[];
@@ -16,6 +21,25 @@ interface TerminalProps {
 export function Terminal({ turns, contextLine, onSend, streaming = "" }: TerminalProps) {
   const [value, setValue] = useState("");
   const [collapsed, setCollapsed] = useState(false);
+  // Drag-to-resize the docked terminal height (session-only). A pointer drag on
+  // the top-edge handle (or ↑/↓ when it's focused) adjusts it, clamped to [MIN_H, 80vh].
+  const [height, setHeight] = useState(280);
+  const drag = useRef<{ y: number; h: number } | null>(null);
+
+  useEffect(() => {
+    function move(e: PointerEvent) {
+      if (!drag.current) return;
+      // dragging up (smaller clientY) makes the panel taller.
+      setHeight(clampH(drag.current.h + (drag.current.y - e.clientY)));
+    }
+    function up() { drag.current = null; }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+  }, []);
 
   function submit() {
     const v = value.trim();
@@ -34,9 +58,23 @@ export function Terminal({ turns, contextLine, onSend, streaming = "" }: Termina
         color: "var(--text-2)",
         display: "flex",
         flexDirection: "column",
-        maxHeight: collapsed ? 28 : 280,
+        height: collapsed ? 28 : height,
       }}
     >
+      {!collapsed && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="resize terminal"
+          tabIndex={0}
+          onPointerDown={(e) => { drag.current = { y: e.clientY, h: height }; }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowUp") { e.preventDefault(); setHeight((h) => clampH(h + STEP)); }
+            else if (e.key === "ArrowDown") { e.preventDefault(); setHeight((h) => clampH(h - STEP)); }
+          }}
+          style={{ height: 6, cursor: "ns-resize", flexShrink: 0, touchAction: "none" }}
+        />
+      )}
       <div
         style={{
           height: 28,
