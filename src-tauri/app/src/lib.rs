@@ -1174,6 +1174,14 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+/// LH7: which brake reasons HARD-KILL in-flight work. A manual/reactive Stop
+/// kills (the operator chose to halt now); an auto-meter brake is soft only —
+/// block new claims, let in-flight finish, no kill, no re-run. Keyed off the
+/// same discriminator as brake persistence (LH6) so the two cannot drift.
+pub fn should_kill_for_reason(reason: &str) -> bool {
+    crate::brake_persist::persists_across_reboot(Some(reason))
+}
+
 /// LH6: build the boot `Brake`, restoring a persisted MANUAL/reactive brake
 /// authoritatively (come up braked, no auto-resume) but letting a persisted
 /// AUTO_METER_REASON brake stay OFF — the auto-meter sweep re-derives it from
@@ -1624,7 +1632,6 @@ pub fn run() {
                     let brake = brake.clone();
                     let pool = pool.clone();
                     let handle = handle.clone();
-                    let process_registry = process_registry.clone();
                     let brake_store = brake_store.clone();
                     let ingestor = ingestor.clone();
                     tauri::async_runtime::spawn(async move {
@@ -1663,7 +1670,9 @@ pub fn run() {
                                         brake.set_on(reason.as_str());
                                         // LH6: persist the brake row.
                                         let _ = brake_store.save(true, Some(&reason), now).await;
-                                        process_registry.kill_all();
+                                        // LH7: auto-meter is a SOFT brake — block new
+                                        // claims via the brake gate, let in-flight
+                                        // finish, NO kill, NO re-run. (No kill here.)
                                         let _ = handle.emit(crate::events::USAGE_CHANGED, ());
                                     }
                                     BrakeDecision::Release => {
@@ -1976,6 +1985,14 @@ mod migration_tests {
         assert_eq!(version, 13, "all thirteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn only_manual_reasons_trigger_a_kill() {
+        use usage_telemetry::brake_policy::AUTO_METER_REASON;
+        assert!(crate::should_kill_for_reason("manual"));
+        assert!(crate::should_kill_for_reason("rate-limit"));
+        assert!(!crate::should_kill_for_reason(AUTO_METER_REASON));
     }
 
     #[tokio::test]
