@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
-import type { FlowNodeData } from "../draftFlow";
+import type { FlowNodeData, FlowNodeKind } from "../draftFlow";
 import type { NodeKind } from "../mutations";
 import { nodeBorderColor } from "../../../lib/pipelineGraph";
 
@@ -50,7 +50,44 @@ const handleStyle: CSSProperties = {
   border: "1px solid var(--border-2)",
 };
 
-function NodeShell({ data, selected, kind }: { data: FlowNodeData; selected: boolean; kind: NodeKind }) {
+/// G1 store node — a compact, visually distinct synthetic node showing the
+/// bounded-buffer capacity (`▢▢▢ /cap`). Render-only; its drawer edits the owning
+/// team's `store.capacity`.
+const STORE_CELLS_MAX = 5;
+
+function StoreShell({ data, selected }: { data: FlowNodeData; selected: boolean }) {
+  const cap = data.capacity ?? 0;
+  const cells = "▢".repeat(Math.min(cap, STORE_CELLS_MAX));
+  const accent = nodeBorderColor("join"); // neutral structural colour (not a role)
+  return (
+    <div
+      style={{
+        minWidth: 96,
+        maxWidth: 140,
+        background: selected ? "var(--accent-2)" : "var(--surface-2)",
+        border: `1px dashed ${selected ? "var(--accent-bd)" : "var(--border-2)"}`,
+        borderRadius: "var(--r-md)",
+        padding: "var(--sp-2) var(--sp-3)",
+        fontFamily: "var(--font-mono)",
+        boxShadow: selected ? "var(--shadow-needs-you)" : "var(--shadow-card)",
+        textAlign: "center",
+      }}
+      data-node-kind="store"
+      aria-label={`store for ${data.storeTeamId ?? data.label} capacity ${cap}`}
+    >
+      <Handle type="target" position={Position.Left} style={handleStyle} />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--sp-1)" }}>
+        <span aria-hidden style={{ color: accent, fontSize: "var(--ts-base)", letterSpacing: "0.05em" }}>{cells || "▢"}</span>
+        <span style={{ color: "var(--text-2)", fontSize: "var(--ts-sm)", fontWeight: 500 }}>/{cap}</span>
+      </div>
+      <div style={{ color: "var(--text-3)", fontSize: "var(--ts-xs)", marginTop: 2 }}>store</div>
+      <Handle type="source" position={Position.Right} style={handleStyle} />
+    </div>
+  );
+}
+
+function NodeShell({ data, selected, kind }: { data: FlowNodeData; selected: boolean; kind: FlowNodeKind }) {
+  if (kind === "store") return <StoreShell data={data} selected={selected} />;
   const chrome = KIND_CHROME[kind];
   const warn = data.warnings.length > 0;
   const accent = chrome.accent(data);
@@ -85,7 +122,7 @@ function NodeShell({ data, selected, kind }: { data: FlowNodeData; selected: boo
   );
 }
 
-function makeNode(kind: NodeKind) {
+function makeNode(kind: FlowNodeKind) {
   function CanvasNode({ data, selected }: NodeProps) {
     return <NodeShell data={data as unknown as FlowNodeData} selected={!!selected} kind={kind} />;
   }
@@ -93,13 +130,15 @@ function makeNode(kind: NodeKind) {
   return CanvasNode;
 }
 
-/// The NodeKind-driven nodeTypes map handed to <ReactFlow nodeTypes={...}>.
+/// The NodeKind-driven nodeTypes map handed to <ReactFlow nodeTypes={...}>. The
+/// synthetic `store` kind (G1) joins the same map (render-only, not a model kind).
 export const nodeTypes: NodeTypes = {
   team: makeNode("team"),
   gate: makeNode("gate"),
   fork: makeNode("fork"),
   join: makeNode("join"),
   escalation: makeNode("escalation"),
+  store: makeNode("store"),
 };
 
 // Exported for direct render tests.

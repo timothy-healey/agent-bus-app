@@ -176,7 +176,14 @@ function projectStores(draft: DraftPipeline, flow: Flow): Flow {
 /// never persisted (spec §Positions).
 export function reconcile(nodes: FlowNode[], edges: FlowEdge[], positions: Record<string, XY>): FlowNode[] {
   const hasNew = nodes.some((n) => !(n.id in positions));
-  const auto = hasNew ? layout(nodes.map((n) => ({ id: n.id })), edges.map((e) => ({ source: e.source, target: e.target }))) : {};
+  const auto = hasNew
+    ? layout(
+        // Store nodes are compact (G1) — give dagre a narrower box so the extra
+        // rank sits snugly between producer and team.
+        nodes.map((n) => (n.type === "store" ? { id: n.id, width: 110, height: 48 } : { id: n.id })),
+        edges.map((e) => ({ source: e.source, target: e.target })),
+      )
+    : {};
   return nodes.map((n) => ({
     ...n,
     position: positions[n.id] ?? auto[n.id] ?? ZERO,
