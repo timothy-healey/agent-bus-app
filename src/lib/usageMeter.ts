@@ -28,3 +28,17 @@ export function resetCountdown(secs: number): string {
   const m = totalMin % 60;
   return h > 0 ? `↻ ${h}h ${m}m` : `↻ ${m}m`;
 }
+
+/// Human "time until the window crosses the brake threshold", from the snapshot's
+/// est_brake_at (an ABSOLUTE unix-seconds timestamp, window.rs::est_brake_at) and
+/// a `now` reference (unix secs). Returns null when there is no projection
+/// (est_brake_at == null, e.g. zero burn or already braked) or it is already past.
+export function brakeEta(estBrakeAt: number | null, now: number): string | null {
+  if (estBrakeAt == null) return null;
+  const secs = estBrakeAt - now;
+  if (secs <= 0) return null;
+  const totalMin = Math.round(secs / 60);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `~${h}h ${m}min` : `~${m}min`;
+}
