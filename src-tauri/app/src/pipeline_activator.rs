@@ -40,20 +40,15 @@ const LOOP_IDLE_SLEEP: Duration = Duration::from_millis(350);
 /// so each loop can build an `EngineContext` for the active run.
 #[derive(Clone)]
 pub struct WorkerDeps {
-    // NOTE (④d gap): the bounded-buffer `engine::invoke` seam does not yet thread
-    // the usage-sink / live-log / per-invocation-audit side channels the old
-    // single-task pool wired (the engine focuses on the store/backpressure model).
-    // These deps are kept on the bundle (still built at boot) so re-wiring them
-    // into the engine's invoke is a localized change; they are unused by the
-    // engine loops today. `usage-changed` is still emitted on each settling step.
-    #[allow(dead_code)]
+    // R (runtime hardening): the bounded-buffer `engine::invoke` seam now threads
+    // these three observability side-channels — the usage sink (R5), the live-log
+    // factory (R4), and the per-invocation audit store (R3) — into each run's
+    // `EngineContext` (see `ctx_builder`), so a live run is observable.
     pub usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
     pub revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
     #[allow(dead_code)]
     pub pool: sqlx::SqlitePool,
-    #[allow(dead_code)]
     pub log_sink: Option<Arc<LogSinkFactory>>,
-    #[allow(dead_code)]
     pub audit: Option<Arc<runtime::invocation_audit::InvocationAuditStore>>,
     pub keychain: Option<Arc<dyn secrets::KeychainStore>>,
     /// The Store aggregate (occupancy<=capacity; reserve/release/commit/take).
@@ -332,6 +327,9 @@ impl PipelineActivator {
         let tasks = self.tasks.clone();
         let brake = self.brake.clone();
         let revision_reader = self.deps.revision_reader.clone();
+        let usage_sink = self.deps.usage_sink.clone();
+        let log_sink = self.deps.log_sink.clone();
+        let audit = self.deps.audit.clone();
         let project_root = active.project_root.clone();
         let pipeline = active.pipeline.clone();
         let target_repo: Option<std::path::PathBuf> =
@@ -354,6 +352,9 @@ impl PipelineActivator {
             target_repo: target_repo.clone(),
             read_prompt: read_prompt.clone(),
             revision_reader: revision_reader.clone(),
+            usage_sink: usage_sink.clone(),
+            log_sink: log_sink.clone(),
+            audit: audit.clone(),
         }
     }
 }
