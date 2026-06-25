@@ -609,4 +609,75 @@ mod tests {
         // G5: prompt-body instruction present.
         assert!(p.contains("prompt_body"));
     }
+
+    #[test]
+    fn kickoff_prompt_instructs_explicit_roles_and_reviewer_routes() {
+        // G3 (Task 3): the kickoff prompt names the explicit role + the three
+        // reviewer routes + a gate + the needs-human escalation, so a generated
+        // graph arrives with a well-formed review structure by construction.
+        let p = kickoff_system_prompt();
+        assert!(p.contains("role"));
+        assert!(p.contains("reviewer"));
+        assert!(p.contains("on_revise") && p.contains("on_reject"));
+        assert!(p.contains("gate"));
+        assert!(p.contains("needs-human"));
+    }
+
+    #[tokio::test]
+    async fn kickoff_generate_emits_well_formed_review_structure() {
+        // G3 (Task 3): a generated draft carries explicit reviewer roles + all
+        // three reviewer routes (approve + revise→writer + decline→needs-human) +
+        // a gate — so B4's under-connected-reviewer warning is satisfied BY
+        // CONSTRUCTION (no per-reviewer "no revise/decline route" issue).
+        let runner = FakeChatRunner::new(vec![reply(canned_kickoff())]);
+        let draft = kickoff_generate(&runner, "sess-1", "research+writing pipeline").await;
+
+        let reviewer = draft.teams.iter().find(|t| t.id == "reviewers").unwrap();
+        // role set EXPLICITLY (not inferred from the name)
+        assert_eq!(reviewer.role, crate::model::Role::Reviewer);
+        // all three reviewer routes wired
+        assert_eq!(reviewer.outputs.on_approve.as_deref(), Some("gate-1"));
+        assert_eq!(reviewer.outputs.on_revise.as_deref(), Some("writers")); // back to its writer
+        assert_eq!(reviewer.outputs.on_reject.as_deref(), Some("needs-human")); // decline → escalation
+        // a human-review gate + a needs-human escalation arrived with the graph
+        assert!(draft.gates.iter().any(|g| g.id == "gate-1"));
+        assert!(draft.escalations.iter().any(|e| e.id == "needs-human"));
+
+        // B4's under-connected-reviewer signal is satisfied BY CONSTRUCTION: EVERY
+        // reviewer-role team has both a revise AND a decline route (the exact
+        // condition the canvas warning checks — see draftFlow `teamWarnings`).
+        for t in draft.teams.iter().filter(|t| t.role == crate::model::Role::Reviewer) {
+            assert!(t.outputs.on_revise.is_some(), "reviewer {} missing revise route", t.id);
+            assert!(t.outputs.on_reject.is_some(), "reviewer {} missing decline route", t.id);
+        }
+        // best_effort_validate (semantic, non-blocking) is also clean for the draft.
+        assert_eq!(best_effort_validate(&draft), Vec::<String>::new());
+    }
+
+    #[test]
+    fn apply_kickoff_slice_maps_roles_routes_and_prompt_bodies() {
+        use crate::draft::{apply_kickoff_slice, DraftPipeline, KickoffSlice, KickoffTeam};
+        let mut d = DraftPipeline::empty();
+        d.id = "keep".into();
+        let slice = KickoffSlice {
+            teams: vec![KickoffTeam {
+                id: "rev".into(),
+                name: "Reviewer".into(),
+                prompt_body: "You judge work.".into(),
+                role: crate::model::Role::Reviewer,
+                on_approve: Some("done".into()),
+                on_revise: Some("writers".into()),
+                on_reject: Some("needs-human".into()),
+            }],
+            gates: vec![],
+            escalations: vec![crate::model::Escalation { id: "needs-human".into(), triggers: vec![] }],
+        };
+        apply_kickoff_slice(&mut d, slice);
+        assert_eq!(d.id, "keep"); // identity preserved
+        let t = &d.teams[0];
+        assert_eq!(t.prompt_body, "You judge work.");
+        assert_eq!(t.role, crate::model::Role::Reviewer);
+        assert_eq!(t.outputs.on_revise.as_deref(), Some("writers"));
+        assert_eq!(d.escalations.len(), 1);
+    }
 }
