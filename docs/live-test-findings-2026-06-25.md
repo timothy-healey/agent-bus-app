@@ -147,3 +147,11 @@ Global `:focus-visible` used `outline-offset: 1px` (ring OUTSIDE the box) → cl
 > "the delete button is overlapping the x to the team panel"
 
 The NodeDrawer header places Delete flush-right (justify-content: space-between), and the Drawer's absolute close X (right:12) sits over it (body horizontal padding is only 20px). Added `paddingRight: var(--sp-7)` to the header so Delete clears the X. Commit on `main`.
+
+---
+
+### LF19 · Live run: generator failed — empty `--print` prompt — `fixed`
+
+> "app: generator loop step failed for `research`: runner invocation failed: ... Error: Input must be provided either through stdin or as a prompt argument when using --print"
+
+First real `claude` invocation. A run is topic-less (the prompts are the work), so `compose_invocation_message(topic="")` yielded an empty user message → `claude --print` rejects an empty prompt. Only bit the LIVE CLI (FakeRunner ignores the message). Fixed: `engine::invoke` falls back to a non-empty directive (`fallback_user_message`) — "Begin…" for the source, or "Process this work item; read your input artifact at <path>…" for a transformer. The real instructions stay in the system prompt (responsibility + output contract). Commit on `main`.

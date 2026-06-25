@@ -1165,6 +1165,23 @@ fn stage_store_capacity(ctx: &EngineContext, stage: &str) -> u32 {
         .unwrap_or(pipeline::model::DEFAULT_STORE_CAPACITY)
 }
 
+/// A non-empty positional prompt for `claude --print` when the run is topic-less
+/// and there is no revise bundle. The agent's real instructions are in the system
+/// prompt; this only triggers the turn and points at the input artifact (a
+/// transformer) or kicks off generation (the source, which has no parent artifact).
+pub fn fallback_user_message(task: &Task) -> String {
+    let key = task.item_key.as_deref().unwrap_or(&task.id.0);
+    match task.parent_artifact.as_deref() {
+        Some(artifact) => format!(
+            "Process this work item (key: {key}). Read your input artifact at {artifact}, \
+             then follow your responsibility prompt and the output contract."
+        ),
+        None => "Begin. Follow your responsibility prompt and the output contract to produce \
+                 your output now."
+            .to_string(),
+    }
+}
+
 /// Invoke the runner for a work-item and parse its emitted item list. Builds the
 /// scope (granting the artifact-dir write access), opens + settles the
 /// per-invocation audit (R3), publishes usage to the kernel sink (R5), and streams
@@ -1196,13 +1213,22 @@ async fn invoke(
     // persisted revise feedback bundle on a re-claim (attempts > 1) — the gate
     // `revise` / join collect-all-revise-once feedback path. Reuses the
     // revision-bundle CONSUMER unchanged (Runtime-local seam).
-    let user_message = crate::revision::compose_invocation_message(
+    let mut user_message = crate::revision::compose_invocation_message(
         &task.topic,
         task.attempts,
         ctx.revision_reader.as_deref(),
         &task.id.0,
     )
     .await;
+    // A run is topic-less by design (the prompts ARE the work — the Start insight),
+    // so on a fresh pass the composed message can be empty. `claude --print` rejects
+    // an empty prompt ("Input must be provided…"), so fall back to a minimal,
+    // non-empty directive — the agent's real instructions live in the system prompt
+    // (responsibility + output contract); this just triggers the turn and points at
+    // the input artifact when there is one.
+    if user_message.trim().is_empty() {
+        user_message = fallback_user_message(task);
+    }
 
     let effective = team.effective_runner();
     let req = InvocationRequest {
@@ -1495,6 +1521,20 @@ mod tests {
 
     fn approve_out() -> RunnerOutput {
         RunnerOutput { verdict: agent_bus_core::Verdict::Approve, artifact_path: None, final_text: String::new(), usage: RunnerUsage::default() }
+    }
+
+    #[test]
+    fn fallback_user_message_is_never_empty_for_a_topic_less_run() {
+        // source/generator: no parent artifact → a non-empty kickoff directive.
+        let src = Task::work_item("p".into(), "pl".into(), "r".into(), "alpha".into(), "research".into(), None, None, 100);
+        let m = fallback_user_message(&src);
+        assert!(!m.trim().is_empty());
+        assert!(m.contains("Begin"));
+        // transformer: has an input artifact → directive points at it.
+        let item = Task::work_item("p".into(), "pl".into(), "r".into(), "alpha".into(), "spec-writers".into(), Some("artifacts/research/alpha-v1.md".into()), None, 100);
+        let m2 = fallback_user_message(&item);
+        assert!(m2.contains("artifacts/research/alpha-v1.md"));
+        assert!(m2.contains("alpha")); // the item key
     }
 
     #[test]
