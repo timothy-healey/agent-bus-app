@@ -86,7 +86,7 @@ impl ClaudeCliRunner {
     fn run_once(
         &self,
         req: &InvocationRequest,
-        forward: &mut dyn FnMut(&str),
+        forward: &mut dyn FnMut(&crate::output::LogDelta),
     ) -> Result<RunnerOutput, RunnerError> {
         let mut argv = vec![CLAUDE_BIN.to_string()];
         argv.extend(build_args(req));
@@ -111,7 +111,7 @@ impl Default for ClaudeCliRunner {
 #[async_trait]
 impl Runner for ClaudeCliRunner {
     async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError> {
-        self.run_once(req, &mut |_d: &str| {})
+        self.run_once(req, &mut |_d: &crate::output::LogDelta| {})
     }
 
     async fn invoke_stream(
@@ -119,7 +119,7 @@ impl Runner for ClaudeCliRunner {
         req: &InvocationRequest,
         sink: &LogSink,
     ) -> Result<RunnerOutput, RunnerError> {
-        let mut forward = |d: &str| sink(d);
+        let mut forward = |d: &crate::output::LogDelta| sink(d);
         self.run_once(req, &mut forward)
     }
 }
@@ -223,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_stream_forwards_prose_deltas_and_returns_same_output() {
-        use crate::output::LogSink;
+        use crate::output::{LogDelta, LogSink};
         use std::sync::{Arc, Mutex};
         // The assistant prose carries the verdict (as in the real stream-json
         // sample); the result line is authoritative but is NOT streamed as a delta.
@@ -235,7 +235,7 @@ mod tests {
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, _cwd| Ok(canned.to_string())));
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
-        let sink: LogSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let sink: LogSink = Box::new(move |d: &LogDelta| s.lock().unwrap().push(d.text.clone()));
         let out = runner.invoke_stream(&req(), &sink).await.unwrap();
         // final output identical to the non-streaming path
         assert_eq!(out.verdict, Verdict::Approve);
@@ -248,7 +248,7 @@ mod tests {
         let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve\nARTIFACT: a.md","usage":{"input_tokens":5,"output_tokens":7}}"#;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, _cwd| Ok(canned.to_string())));
         let plain = runner.invoke(&req()).await.unwrap();
-        let noop: crate::output::LogSink = Box::new(|_d: &str| {});
+        let noop: crate::output::LogSink = Box::new(|_d: &crate::output::LogDelta| {});
         let streamed = runner.invoke_stream(&req(), &noop).await.unwrap();
         assert_eq!(plain, streamed);
     }
