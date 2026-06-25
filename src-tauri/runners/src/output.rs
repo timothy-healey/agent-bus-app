@@ -39,6 +39,13 @@ pub enum RunnerError {
     /// must release the held task and (Plan 5) set the brake on this.
     #[error("rate limited: {0}")]
     RateLimited(String),
+    /// The requested model is not found / unavailable to this account (G6). A
+    /// distinct class so the operator surface can say "model unavailable — pick
+    /// another" instead of a generic failure (full card-side detail is L3's job;
+    /// here we ensure the class + a clear message exist). Distinguished from a
+    /// generic `Other` by the provider's not-found/unavailable signal.
+    #[error("model unavailable: {0}")]
+    ModelUnavailable(String),
     /// The subprocess could not be spawned (binary missing, etc.).
     #[error("spawn failed: {0}")]
     Spawn(String),
@@ -56,6 +63,48 @@ impl RunnerError {
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, RunnerError::RateLimited(_))
     }
+
+    /// True when the failure is a model-not-found/unavailable (G6) — surfaced as
+    /// "model unavailable — pick another" rather than a generic error.
+    pub fn is_model_unavailable(&self) -> bool {
+        matches!(self, RunnerError::ModelUnavailable(_))
+    }
+
+    /// Classify a provider error message into a distinct class. Rate/quota/429 →
+    /// `RateLimited`; a not-found/unavailable/unknown-model signal →
+    /// `ModelUnavailable`; otherwise `Other`. Shared by the CLI (stderr) and API
+    /// (error envelope) runners so both classify the same way (G6). `lower` is
+    /// the lowercased text to inspect; `msg` is the original message to carry.
+    pub fn classify(lower: &str, msg: String) -> RunnerError {
+        if lower.contains("rate") || lower.contains("429") || lower.contains("quota") {
+            RunnerError::RateLimited(msg)
+        } else if is_model_unavailable_signal(lower) {
+            RunnerError::ModelUnavailable(msg)
+        } else {
+            RunnerError::Other(msg)
+        }
+    }
+}
+
+/// True when the lowercased provider text signals a model-not-found / unavailable
+/// condition (G6). Pure, so it is shared + unit-tested. Requires a `model`
+/// mention paired with a specific not-found/unavailable phrase. Deliberately
+/// does NOT trip on the bare word "invalid" (the generic `invalid_request_error`
+/// type contains it) — only on "invalid model"/"model ... invalid", to avoid
+/// mis-classifying unrelated validation errors as a model problem.
+pub fn is_model_unavailable_signal(lower: &str) -> bool {
+    if !lower.contains("model") {
+        return false;
+    }
+    lower.contains("not found")
+        || lower.contains("not_found")
+        || lower.contains("unknown")
+        || lower.contains("does not exist")
+        || lower.contains("not available")
+        || lower.contains("unavailable")
+        || lower.contains("invalid model")
+        || lower.contains("model is invalid")
+        || lower.contains("404")
 }
 
 /// What the runner needs to perform one invocation. A plain owned struct so the
@@ -145,6 +194,38 @@ mod tests {
         assert!(RunnerError::RateLimited("429".into()).is_rate_limited());
         assert!(!RunnerError::Spawn("no binary".into()).is_rate_limited());
         assert!(!RunnerError::NoResult.is_rate_limited());
+    }
+
+    #[test]
+    fn classify_maps_model_unavailable_distinctly() {
+        // API not_found_error referencing the model
+        let e = RunnerError::classify(
+            "not_found_error model: claude-x not found",
+            "model: claude-x not found".into(),
+        );
+        assert!(e.is_model_unavailable(), "got {e:?}");
+        assert!(!e.is_rate_limited());
+        // CLI-style "unknown model"
+        assert!(RunnerError::classify("error: unknown model 'claude-x'", "x".into()).is_model_unavailable());
+        // a 404 mentioning the model
+        assert!(RunnerError::classify("model claude-x 404", "x".into()).is_model_unavailable());
+    }
+
+    #[test]
+    fn classify_keeps_rate_limit_and_other_separate() {
+        assert!(RunnerError::classify("429 rate limit", "x".into()).is_rate_limited());
+        // a generic validation error mentioning "model" but not a not-found signal
+        let e = RunnerError::classify("invalid_request_error bad model", "bad model".into());
+        assert!(matches!(e, RunnerError::Other(_)), "got {e:?}");
+        assert!(!e.is_model_unavailable());
+    }
+
+    #[test]
+    fn model_unavailable_signal_ignores_bare_invalid() {
+        // the generic invalid_request_error type must not trip the model signal
+        assert!(!is_model_unavailable_signal("invalid_request_error something about a model"));
+        // but an explicit "invalid model" does
+        assert!(is_model_unavailable_signal("invalid model name"));
     }
 
     #[test]

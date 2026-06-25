@@ -78,11 +78,12 @@ pub fn parse_response(raw: &str, model: &str) -> Result<RunnerOutput, RunnerErro
             .and_then(|e| e.get("type"))
             .and_then(|t| t.as_str())
             .unwrap_or("");
+        // Classify the error envelope distinctly: rate/quota → RateLimited,
+        // model-not-found/unavailable → ModelUnavailable (G6), else → Other.
+        // The error `type` (e.g. "not_found_error") + message both feed the
+        // signal — a 404/not_found_error referencing the model is unavailable.
         let lower = format!("{kind} {msg}").to_lowercase();
-        if lower.contains("rate") || lower.contains("429") || lower.contains("quota") {
-            return Err(RunnerError::RateLimited(msg));
-        }
-        return Err(RunnerError::Other(msg));
+        return Err(RunnerError::classify(&lower, msg));
     }
 
     // Concatenate all text content blocks.
@@ -276,6 +277,14 @@ mod tests {
         let err = parse_response(raw, "m").unwrap_err();
         assert!(matches!(err, RunnerError::Other(_)));
         assert!(!err.is_rate_limited());
+    }
+
+    #[test]
+    fn not_found_model_error_body_maps_to_model_unavailable() {
+        let raw = r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-nope not found"}}"#;
+        let err = parse_response(raw, "m").unwrap_err();
+        assert!(matches!(err, RunnerError::ModelUnavailable(_)), "got {err:?}");
+        assert!(err.is_model_unavailable());
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ pub mod claude_cli;
 pub mod command;
 pub mod fake;
 pub mod output;
+pub mod probe;
 pub mod scope;
 pub mod stream_json;
 
