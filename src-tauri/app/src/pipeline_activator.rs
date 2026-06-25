@@ -315,6 +315,13 @@ impl PipelineActivator {
     /// A cheap per-poll `EngineContext` builder closure: captures the resolved
     /// active pipeline + this loop's runner; takes the current `run_id`. Only Arc
     /// clones per poll. `self`-free so it moves into the spawned task.
+    ///
+    /// R (runtime hardening): this is the composition-root wiring of the three
+    /// observability side-channels — it threads `WorkerDeps`'s `usage_sink` (R5),
+    /// `log_sink` (R4), and `audit` (R3), all built once at boot, into every run's
+    /// `EngineContext`, so the engine's `invoke` records the per-invocation audit +
+    /// usage and streams live-log prose to the `task-log` events (the loop also
+    /// emits `task-changed`/`usage-changed` on each settling step).
     fn ctx_builder(
         &self,
         active: ActivePipeline,
