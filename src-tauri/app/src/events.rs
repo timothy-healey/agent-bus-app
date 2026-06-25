@@ -16,6 +16,10 @@ pub const USAGE_CHANGED: &str = "usage-changed";
 pub const TASK_LOG: &str = "task-log";
 /// Display-only streamed assistant prose fragment for the terminal (D8).
 pub const CONVERSATION_DELTA: &str = "conversation-delta";
+/// A generator (source) pass started or settled (LF31). Payload:
+/// `{ run_id, stage, task_id, active }`. The frontend renders a transient
+/// clickable source card while `active`.
+pub const GENERATOR_STATUS: &str = "generator-status";
 
 #[cfg(test)]
 mod tests {
@@ -26,7 +30,7 @@ mod tests {
     /// breaks every frontend subscription.
     #[test]
     fn all_event_names_are_tauri_legal() {
-        for name in [TASK_CHANGED, RUN_CHANGED, USAGE_CHANGED, TASK_LOG, CONVERSATION_DELTA] {
+        for name in [TASK_CHANGED, RUN_CHANGED, USAGE_CHANGED, TASK_LOG, CONVERSATION_DELTA, GENERATOR_STATUS] {
             assert!(!name.is_empty(), "event name must be non-empty");
             assert!(
                 name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '/' | ':' | '_')),

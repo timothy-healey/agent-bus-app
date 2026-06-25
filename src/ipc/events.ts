@@ -17,6 +17,8 @@ export const EVENTS = {
   taskLog: "task-log",
   /// Display-only streamed assistant prose fragment for the terminal (D8).
   conversationDelta: "conversation-delta",
+  /// A generator (source) pass started/settled (LF31). Payload {run_id, stage, task_id, active}.
+  generatorStatus: "generator-status",
 } as const;
 
 export type EventName = (typeof EVENTS)[keyof typeof EVENTS];
