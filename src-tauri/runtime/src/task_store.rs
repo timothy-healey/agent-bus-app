@@ -243,16 +243,18 @@ impl TaskStore {
     }
 
     /// Crash recovery (spec F4): release any task stuck in `running` back to
-    /// `queued` on startup, since v1 keeps no live invocation record. Returns
-    /// the count released.
-    pub async fn release_orphaned_running(&self, now_unix: i64) -> Result<u64, TaskStoreError> {
-        let res = sqlx::query(
-            "UPDATE tasks SET state='queued', updated_at=? WHERE state='running'",
-        )
-        .bind(now_unix)
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected())
+    /// `queued` on startup, since v1 keeps no live invocation record. Returns the
+    /// re-queued task rows so the composition root can reset their worktrees
+    /// (WT2) — runtime stays git-unaware.
+    pub async fn release_orphaned_running(&self, now_unix: i64) -> Result<Vec<Task>, TaskStoreError> {
+        // Snapshot the running rows BEFORE flipping them (we need their
+        // worktree_path; the UPDATE does not return rows in sqlite).
+        let running = self.list_by_state(TaskState::Running).await?;
+        sqlx::query("UPDATE tasks SET state='queued', updated_at=? WHERE state='running'")
+            .bind(now_unix)
+            .execute(&self.pool)
+            .await?;
+        Ok(running)
     }
 }
 
@@ -451,7 +453,21 @@ mod tests {
         store.insert(&t).await.unwrap();
         store.claim_next_for_stage("research", 200).await.unwrap().unwrap();
         let released = store.release_orphaned_running(300).await.unwrap();
-        assert_eq!(released, 1);
+        assert_eq!(released.len(), 1);
+        assert_eq!(store.get(&t.id).await.unwrap().state, TaskState::Queued);
+    }
+
+    #[tokio::test]
+    async fn release_orphaned_running_returns_requeued_rows_with_worktree_path() {
+        let store = TaskStore::new(fresh_pool().await);
+        let mut t = Task::work_item("p".into(), "pl".into(), "R-1".into(), "alpha".into(), "implementers".into(), None, None, 100);
+        t.state = TaskState::Running;
+        t.worktree_path = Some("/p/worktrees/R-1/alpha".into());
+        store.insert(&t).await.unwrap();
+        let requeued = store.release_orphaned_running(300).await.unwrap();
+        assert_eq!(requeued.len(), 1);
+        assert_eq!(requeued[0].id, t.id);
+        assert_eq!(requeued[0].worktree_path.as_deref(), Some("/p/worktrees/R-1/alpha"));
         assert_eq!(store.get(&t.id).await.unwrap().state, TaskState::Queued);
     }
 }
