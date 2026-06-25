@@ -1,9 +1,12 @@
 import type { UsageSnapshot } from "../ipc/usage";
 import { formatTokens } from "../lib/cost";
-import { bandColorVar, formatBurn, resetCountdown, windowLine } from "../lib/usageMeter";
+import { bandColorVar, brakeEta, formatBurn, resetCountdown, windowLine } from "../lib/usageMeter";
 
 export interface UsageMeterProps {
   snapshot: UsageSnapshot | null;
+  /// Epoch seconds reference for the brake-ETA projection (est_brake_at is an
+  /// absolute timestamp). Defaults to the wall clock; tests pass a fixed value.
+  now?: number;
 }
 
 // The one sanctioned gradient (DESIGN.md §Usage meter): --running -> --warn ->
@@ -13,7 +16,7 @@ export interface UsageMeterProps {
 const GRADIENT =
   "linear-gradient(90deg, var(--running) 0%, var(--warn) 60%, var(--danger) 90%)";
 
-export function UsageMeter({ snapshot }: UsageMeterProps) {
+export function UsageMeter({ snapshot, now = Math.floor(Date.now() / 1000) }: UsageMeterProps) {
   const pct = snapshot ? Math.round(snapshot.window_pct * 100) : 0;
   const band = snapshot?.band ?? "safe";
   const color = bandColorVar(band);
@@ -99,6 +102,14 @@ export function UsageMeter({ snapshot }: UsageMeterProps) {
           {!braked && (
             <Row label="burn rate (1-min avg)" value={`${formatTokens(Math.round(snapshot.burn_per_min))} tok/min`} />
           )}
+          {!braked && brakeEta(snapshot.est_brake_at, now) && (
+            <Row label="brake at budget" value={`in ${brakeEta(snapshot.est_brake_at, now)}`} />
+          )}
+          {!braked && snapshot.reset_in_secs != null && (
+            <Row label="window resets in" value={resetCountdown(snapshot.reset_in_secs)} />
+          )}
+          {/* Deferred (needs backend plumbing, see plan FE3): 10-min burn avg and
+              per-team burn/effort are NOT on UsageSnapshot — do not fake them. */}
           <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
             <div style={{ color: "var(--text-3)", fontSize: 10.5, marginBottom: 6 }}>by team</div>
             {snapshot.by_team.length === 0 ? (

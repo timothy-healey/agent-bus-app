@@ -49,4 +49,38 @@ describe("UsageMeter", () => {
     const bar = screen.getByRole("progressbar");
     expect(bar.getAttribute("aria-valuenow")).toBe("35");
   });
+
+  it("shows the brake-ETA row when est_brake_at is in the future", () => {
+    // now passed explicitly for determinism; est_brake_at 30 min ahead
+    render(<UsageMeter snapshot={{ ...base, est_brake_at: 1000 + 1800 }} now={1000} />);
+    expect(screen.getByText(/brake at budget/i)).toBeInTheDocument();
+    expect(screen.getByText(/~30min/)).toBeInTheDocument();
+  });
+
+  it("omits the brake-ETA row when est_brake_at is null", () => {
+    render(<UsageMeter snapshot={{ ...base, est_brake_at: null }} now={1000} />);
+    expect(screen.queryByText(/brake at budget/i)).toBeNull();
+  });
+
+  it("shows a window-reset row when reset_in_secs is present and not braked", () => {
+    render(<UsageMeter snapshot={{ ...base, reset_in_secs: 1440 }} now={1000} />);
+    expect(screen.getByText(/window resets in/i)).toBeInTheDocument();
+    expect(screen.getByText(/↻ 24m/)).toBeInTheDocument();
+  });
+
+  it("renders every team row in the tooltip (complete breakdown)", () => {
+    render(
+      <UsageMeter
+        snapshot={{ ...base, by_team: [
+          { team_id: "research", tokens: 540_000 },
+          { team_id: "writers", tokens: 120_000 },
+          { team_id: "reviewers", tokens: 30_000 },
+        ] }}
+        now={1000}
+      />,
+    );
+    expect(screen.getByText("research")).toBeInTheDocument();
+    expect(screen.getByText("writers")).toBeInTheDocument();
+    expect(screen.getByText("reviewers")).toBeInTheDocument();
+  });
 });
