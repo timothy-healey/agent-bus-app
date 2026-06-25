@@ -85,6 +85,12 @@ pub struct Task {
     /// (Runtime redesign ④b). `None` for legacy tasks.
     #[serde(default)]
     pub item_key: Option<String>,
+    /// The per-work-item git worktree this item runs in (worktree isolation /
+    /// WT1). Set when the item reaches its first Implementer-role stage; copied
+    /// onto children so downstream stages (code-review, revise→implement) share
+    /// the same tree. `None` for read-only stages and legacy tasks.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -127,6 +133,7 @@ impl Task {
             join_target: None,
             run_id: None,
             item_key: None,
+            worktree_path: None,
         }
     }
 
@@ -165,6 +172,7 @@ impl Task {
             join_target: None,
             run_id: Some(run_id),
             item_key: Some(item_key),
+            worktree_path: None,
         }
     }
 
@@ -198,6 +206,7 @@ impl Task {
             join_target: Some(join_target.to_string()),
             run_id: parent.run_id.clone(),
             item_key: parent.item_key.clone(),
+            worktree_path: parent.worktree_path.clone(),
         }
     }
 
@@ -268,6 +277,22 @@ mod tests {
 
     fn t() -> Task {
         Task::injected("p".into(), "pipe".into(), "research".into(), "topic".into(), Some("/repo".into()), 100)
+    }
+
+    #[test]
+    fn injected_and_work_item_have_no_worktree_path() {
+        let t = t();
+        assert_eq!(t.worktree_path, None);
+        let wi = Task::work_item("p".into(), "pl".into(), "r".into(), "k".into(), "stage".into(), None, None, 100);
+        assert_eq!(wi.worktree_path, None);
+    }
+
+    #[test]
+    fn forked_sibling_inherits_worktree_path() {
+        let mut parent = t();
+        parent.worktree_path = Some("/p/worktrees/R-1/alpha".into());
+        let sib = Task::forked(&parent, "lane-a", "G-1", "join-1", 500);
+        assert_eq!(sib.worktree_path.as_deref(), Some("/p/worktrees/R-1/alpha"));
     }
 
     #[test]
