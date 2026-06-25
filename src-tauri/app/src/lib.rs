@@ -1044,6 +1044,26 @@ impl ToolDispatcher for RootDispatcher {
                     Err(e) => err(e),
                 }
             }
+            "list_invocations" => {
+                let args = parse_args!(runtime::api::args::TaskActionArgs);
+                match runtime::api::list_invocations_inner(&self.runtime, &args.task_id).await {
+                    Ok(rows) => serde_json::to_value(rows).map(ok).unwrap_or_else(err),
+                    Err(e) => err(e),
+                }
+            }
+            "retry_task" | "force_advance" | "abandon_task" | "accept_task" => {
+                let args = parse_args!(runtime::api::args::TaskActionArgs);
+                let res = match req.tool_name.as_str() {
+                    "retry_task" => runtime::api::retry_task_inner(&self.runtime, &args.task_id).await,
+                    "force_advance" => runtime::api::force_advance_inner(&self.runtime, &args.task_id).await,
+                    "accept_task" => runtime::api::accept_task_inner(&self.runtime, &args.task_id).await,
+                    _ => runtime::api::abandon_task_inner(&self.runtime, &args.task_id).await,
+                };
+                match res {
+                    Ok(task) => { let _ = self.app.emit(crate::events::TASK_CHANGED, &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
+                    Err(e) => err(e),
+                }
+            }
             "brake_on" => {
                 let args = parse_args!(runtime::api::args::BrakeOnArgs);
                 let s = self.runtime.brake.clone();
@@ -1285,6 +1305,7 @@ pub fn run() {
                     ledger.clone(),
                     fanout.clone(),
                     revision_reader.clone(),
+                    Some(invocation_audit.clone()),
                     runtime::api::ActivePipeline {
                         pipeline: Arc::new(pipe),
                         project_id: project_id.clone(),
@@ -1496,6 +1517,11 @@ pub fn run() {
             runtime::api::reject_gate,
             runtime::api::revise_gate,
             runtime::api::list_tasks,
+            runtime::api::list_invocations,
+            runtime::api::retry_task,
+            runtime::api::force_advance,
+            runtime::api::abandon_task,
+            runtime::api::accept_task,
             runtime::api::list_runs,
             runtime::api::run_store_occupancy,
             runtime::api::brake_on,

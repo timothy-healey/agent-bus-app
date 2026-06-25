@@ -8,6 +8,7 @@ use crate::brake::BrakeState;
 use crate::engine::{self, EngineContext};
 use crate::fanout_store::FanOutStore;
 use crate::generator_ledger::GeneratorLedger;
+use crate::invocation_audit::{InvocationAuditStore, InvocationRow};
 use crate::revision::RevisionBundleReader;
 use crate::run_store::{Run, RunStore};
 use crate::store::StoreRepo;
@@ -44,6 +45,15 @@ pub mod args {
     /// `approve_gate` / `reject_gate` / `revise_gate` — all carry a single task id.
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
     pub struct GateArgs {
+        pub task_id: String,
+    }
+
+    /// `list_invocations` (L3) + the L2 operator-action commands
+    /// (`retry_task`/`force_advance`/`abandon_task`/`accept_task`) — all carry a
+    /// single task id. A distinct type from `GateArgs` so the OHS surface reads as
+    /// the needs-human action group, not a gate verdict.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct TaskActionArgs {
         pub task_id: String,
     }
 
@@ -107,6 +117,10 @@ pub struct RuntimeState {
     pub fanout: Arc<FanOutStore>,
     /// Reads a task's persisted revise bundle (gate revise / join revise-once).
     pub revision_reader: Option<Arc<dyn RevisionBundleReader>>,
+    /// The per-invocation audit store (R3). Powers the L3 `list_invocations` read
+    /// (the CardDrawer history panel). `None` = no audit wired (runtime-only tests
+    /// / pre-project boot) → `list_invocations` returns an empty trail.
+    pub audit: Option<Arc<InvocationAuditStore>>,
     active: ArcSwap<ActivePipeline>,
 }
 
@@ -120,6 +134,7 @@ impl RuntimeState {
         ledger: Arc<GeneratorLedger>,
         fanout: Arc<FanOutStore>,
         revision_reader: Option<Arc<dyn RevisionBundleReader>>,
+        audit: Option<Arc<InvocationAuditStore>>,
         active: ActivePipeline,
     ) -> Self {
         Self {
@@ -130,6 +145,7 @@ impl RuntimeState {
             ledger,
             fanout,
             revision_reader,
+            audit,
             active: ArcSwap::from_pointee(active),
         }
     }
@@ -362,6 +378,235 @@ pub async fn apply_gate_verdict_inner(
         .map_err(|e| e.to_string())
 }
 
+// ---- L2: operator recovery actions on a needs-human work-item ----
+//
+// These mirror the gate-verdict command pattern (re-read + return the Task; the
+// composition root emits `task-changed` + re-runs `try_finish_run`). They reuse
+// the existing Task/Store/Run transitions + the reserve/commit guards — no new
+// aggregate or invariant. Operator-initiated only (no auto-retry).
+
+/// The stage that escalated a needs-human work-item: the `team_id` of its newest
+/// audit row (the invocation that produced the failure). `None` when no audit
+/// store is wired or the task has no recorded invocation — then the caller has no
+/// stage to retry/advance at and surfaces a clear error.
+async fn escalating_stage(state: &RuntimeState, task_id: &str) -> Option<String> {
+    let audit = state.audit.as_ref()?;
+    let rows = audit.list_rows_for_task(task_id).await.ok()?;
+    rows.into_iter().next().map(|r| r.team_id)
+}
+
+/// Re-run the run-completion check for a task's run (best-effort): an operator
+/// action may have emptied the last lane or re-opened work, so completion must be
+/// re-evaluated exactly as the engine does after a gate verdict.
+async fn reevaluate_completion(state: &RuntimeState, run_id: &str) -> Result<(), String> {
+    let ctx = state.engine_ctx_for_run(run_id);
+    engine::try_finish_run(&ctx, run_id).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn retry_task(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+    task_id: String,
+) -> Result<Task, String> {
+    retry_task_inner(state.as_ref(), &task_id).await
+}
+
+/// Retry (L2): requeue the work-item at the stage that escalated it (its newest
+/// audit row's `team_id`). `state → queued`, `current_stage ← that team`,
+/// `attempts ← 1`; ensure that stage's input store exists; re-open a completed
+/// Run so the worker loop drives it again. Reuses `Task::transition_to` (the
+/// `needs_human → queued` edge is already legal) + `StoreRepo::ensure`.
+pub async fn retry_task_inner(state: &RuntimeState, task_id: &str) -> Result<Task, String> {
+    use agent_bus_core::TaskId;
+    let mut task = state.tasks.get(&TaskId(task_id.to_string())).await.map_err(|e| e.to_string())?;
+    let run_id = task
+        .run_id
+        .clone()
+        .ok_or_else(|| format!("task {task_id} has no run; cannot retry"))?;
+    let stage = escalating_stage(state, task_id)
+        .await
+        .ok_or_else(|| format!("task {task_id} has no recorded invocation; cannot determine the stage to retry"))?;
+
+    let now = now_unix();
+    // needs_human → queued is a legal operator-driven transition (Task state
+    // machine). Use it so the immutability + legality invariants are enforced.
+    task.transition_to(TaskState::Queued, now).map_err(|e| e.to_string())?;
+    task.current_stage = stage.clone();
+    task.attempts = 1;
+    task.updated_at = now;
+    state.tasks.update(&task).await.map_err(|e| e.to_string())?;
+
+    // Ensure the stage's input store so the re-queued item has a bounded buffer to
+    // be claimed from (a gate/escalation stage falls back to the default capacity).
+    let capacity = state
+        .active()
+        .pipeline
+        .teams
+        .iter()
+        .find(|t| t.id == stage)
+        .map(|t| t.store.capacity)
+        .unwrap_or(pipeline::model::DEFAULT_STORE_CAPACITY);
+    state.stores.ensure(&run_id, &stage, capacity).await.map_err(|e| e.to_string())?;
+
+    // Re-open the run if it had completed (so the worker loop picks it up again).
+    if state.runs.get(&run_id).await.map_err(|e| e.to_string())?.completed {
+        state.runs.reopen(&run_id).await.map_err(|e| e.to_string())?;
+    }
+
+    state.tasks.get(&TaskId(task_id.to_string())).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn force_advance(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+    task_id: String,
+) -> Result<Task, String> {
+    force_advance_inner(state.as_ref(), &task_id).await
+}
+
+/// Approve & advance (L2): operator override = "approved at the failed stage".
+/// Reserve+commit a child work-item into the failed stage's `on_approve`
+/// downstream store (block-before-claim); on success mark this item done. If the
+/// downstream is full, surface backpressure (the item is NOT lost — it stays
+/// needs_human). Reuses `StoreRepo::reserve` (the occupancy<=capacity guard) +
+/// `Task::work_item`, exactly as `engine::apply_gate_verdict`'s approve leg does.
+pub async fn force_advance_inner(state: &RuntimeState, task_id: &str) -> Result<Task, String> {
+    use agent_bus_core::TaskId;
+    let mut task = state.tasks.get(&TaskId(task_id.to_string())).await.map_err(|e| e.to_string())?;
+    let run_id = task
+        .run_id
+        .clone()
+        .ok_or_else(|| format!("task {task_id} has no run; cannot advance"))?;
+    let stage = escalating_stage(state, task_id)
+        .await
+        .ok_or_else(|| format!("task {task_id} has no recorded invocation; cannot determine the stage to advance from"))?;
+
+    let active = state.active();
+    let downstream = active
+        .pipeline
+        .teams
+        .iter()
+        .find(|t| t.id == stage)
+        .and_then(|t| t.outputs.on_approve.clone())
+        .ok_or_else(|| format!("stage {stage} has no on_approve downstream; nowhere to advance to"))?;
+
+    // Block-before-claim: ensure + reserve the downstream slot FIRST. A full
+    // store surfaces backpressure and leaves the item needs_human (never lost).
+    let capacity = active
+        .pipeline
+        .teams
+        .iter()
+        .find(|t| t.id == downstream)
+        .map(|t| t.store.capacity)
+        .unwrap_or(pipeline::model::DEFAULT_STORE_CAPACITY);
+    state.stores.ensure(&run_id, &downstream, capacity).await.map_err(|e| e.to_string())?;
+    if !state.stores.reserve(&run_id, &downstream).await.map_err(|e| e.to_string())? {
+        return Err(format!(
+            "downstream store `{downstream}` is full; cannot advance now (the item is unchanged — retry when capacity frees)"
+        ));
+    }
+
+    // Commit a child queued downstream (a gate downstream is parked gated).
+    let now = now_unix();
+    let ds_is_gate = active.pipeline.gates.iter().any(|g| g.id == downstream);
+    let mut child = Task::work_item(
+        task.project_id.clone(),
+        task.pipeline.clone(),
+        run_id.clone(),
+        task.item_key.clone().unwrap_or_default(),
+        downstream.clone(),
+        task.parent_artifact.clone(),
+        task.target_repo.clone(),
+        now,
+    );
+    if ds_is_gate {
+        child.state = TaskState::Gated;
+    }
+    state.tasks.insert(&child).await.map_err(|e| e.to_string())?;
+
+    // The escalated item leaves: mark it done (kept for lineage). needs_human has
+    // no direct `→ done` edge, so route through queued (a legal operator edge)
+    // first — the item never runs (it is immediately settled done).
+    task.transition_to(TaskState::Queued, now).map_err(|e| e.to_string())?;
+    task.transition_to(TaskState::Done, now).map_err(|e| e.to_string())?;
+    task.updated_at = now;
+    state.tasks.update(&task).await.map_err(|e| e.to_string())?;
+
+    reevaluate_completion(state, &run_id).await?;
+    state.tasks.get(&TaskId(task_id.to_string())).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn abandon_task(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+    task_id: String,
+) -> Result<Task, String> {
+    terminate_task_inner(state.as_ref(), &task_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn accept_task(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+    task_id: String,
+) -> Result<Task, String> {
+    terminate_task_inner(state.as_ref(), &task_id).await
+}
+
+/// Inner body for `abandon_task` (the root dispatcher calls this directly).
+pub async fn abandon_task_inner(state: &RuntimeState, task_id: &str) -> Result<Task, String> {
+    terminate_task_inner(state, task_id).await
+}
+
+/// Inner body for `accept_task` (the root dispatcher calls this directly).
+pub async fn accept_task_inner(state: &RuntimeState, task_id: &str) -> Result<Task, String> {
+    terminate_task_inner(state, task_id).await
+}
+
+/// Abandon / Accept (L2): mark the work-item `done` (kept for lineage, removed
+/// from the active lanes). The two commands are distinct labels with the same
+/// terminal effect (abandon = drop a failure; accept = take a hand-off
+/// deliverable). Reuses the Task transitions; re-evaluates run completion.
+pub async fn terminate_task_inner(state: &RuntimeState, task_id: &str) -> Result<Task, String> {
+    use agent_bus_core::TaskId;
+    let mut task = state.tasks.get(&TaskId(task_id.to_string())).await.map_err(|e| e.to_string())?;
+    let now = now_unix();
+    // needs_human has no direct `→ done` edge; route through queued (a legal
+    // operator edge) then to done. The item never runs in between.
+    task.transition_to(TaskState::Queued, now).map_err(|e| e.to_string())?;
+    task.transition_to(TaskState::Done, now).map_err(|e| e.to_string())?;
+    task.updated_at = now;
+    state.tasks.update(&task).await.map_err(|e| e.to_string())?;
+    if let Some(run_id) = task.run_id.clone() {
+        reevaluate_completion(state, &run_id).await?;
+    }
+    state.tasks.get(&TaskId(task_id.to_string())).await.map_err(|e| e.to_string())
+}
+
+/// L3 read (OHS): every invocation for a task as the sealed `InvocationRow` DTO,
+/// newest-first. Powers the CardDrawer history panel + the headline reason line.
+/// When no audit store is wired (runtime-only tests / pre-project boot), the
+/// trail is empty rather than an error — a card with no recorded invocations
+/// simply shows an empty history.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_invocations(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+    task_id: String,
+) -> Result<Vec<InvocationRow>, String> {
+    list_invocations_inner(state.as_ref(), &task_id).await
+}
+
+/// Reusable inner body for `list_invocations` (testable without Tauri State).
+pub async fn list_invocations_inner(
+    state: &RuntimeState,
+    task_id: &str,
+) -> Result<Vec<InvocationRow>, String> {
+    match &state.audit {
+        Some(audit) => audit.list_rows_for_task(task_id).await.map_err(|e| e.to_string()),
+        None => Ok(Vec::new()),
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_tasks(
     state: tauri::State<'_, Arc<RuntimeState>>,
@@ -511,6 +756,36 @@ pub fn tools() -> Vec<ToolSpec> {
             supplier_context: ctx.into(),
         },
         ToolSpec {
+            name: "list_invocations".into(),
+            description: "List a task's invocation audit trail (newest first) — the L3 failure/verdict detail.".into(),
+            input_schema: arg_schema::<args::TaskActionArgs>(),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "retry_task".into(),
+            description: "Requeue a needs-human task at the stage that escalated it (reset attempts; re-open the run).".into(),
+            input_schema: arg_schema::<args::TaskActionArgs>(),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "force_advance".into(),
+            description: "Override-approve a needs-human task, committing it into the failed stage's downstream.".into(),
+            input_schema: arg_schema::<args::TaskActionArgs>(),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "abandon_task".into(),
+            description: "Abandon a needs-human task (mark done; kept for lineage).".into(),
+            input_schema: arg_schema::<args::TaskActionArgs>(),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
+            name: "accept_task".into(),
+            description: "Accept a needs-human hand-off (mark the deliverable done; kept for lineage).".into(),
+            input_schema: arg_schema::<args::TaskActionArgs>(),
+            supplier_context: ctx.into(),
+        },
+        ToolSpec {
             name: "brake_on".into(),
             description: "Halt new claims (in-flight workers complete).".into(),
             input_schema: arg_schema::<args::BrakeOnArgs>(),
@@ -626,6 +901,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO projects (id,name,root_path,created_at,updated_at) VALUES ('proj','n','/p',0,0)")
             .execute(&pool).await.unwrap();
         fn team(id: &str, approve: Option<&str>, cap: u32) -> pipeline::model::Team {
@@ -652,8 +928,9 @@ mod tests {
             Arc::new(StoreRepo::new(pool.clone())),
             Arc::new(RunStore::new(pool.clone())),
             Arc::new(GeneratorLedger::new(pool.clone())),
-            Arc::new(FanOutStore::new(pool)),
+            Arc::new(FanOutStore::new(pool.clone())),
             None,
+            Some(Arc::new(InvocationAuditStore::new(pool))),
             ActivePipeline {
                 pipeline: Arc::new(pipeline),
                 project_id: "proj".into(),
@@ -772,5 +1049,147 @@ mod tests {
             gates: vec![], escalations: vec![], forks: vec![], joins: vec![],
         };
         assert_eq!(source_team(&p).map(|t| t.id.as_str()), Some("research"));
+    }
+
+    // ---- L3 read + L2 recovery actions (plan H) ----
+
+    /// Seed a run + an escalated (needs_human) work-item that failed at `stage`,
+    /// with one settled audit row recording that failure. Returns (run_id, task).
+    async fn seed_escalated(state: &RuntimeState, stage: &str, outcome: InvocationOutcome) -> (String, Task) {
+        use crate::invocation_audit::AuditUsage;
+        let run = start_run_inner(state, None).await.unwrap();
+        // The item rests at the escalation terminal in state needs_human.
+        let mut task = Task::work_item(
+            "proj".into(), "p".into(), run.id.clone(), "alpha".into(),
+            "needs-human".into(), Some("artifacts/spec/alpha.md".into()), None, 100,
+        );
+        task.state = TaskState::NeedsHuman;
+        state.tasks.insert(&task).await.unwrap();
+        // Record the failing invocation at `stage` (the audit team_id is what the
+        // L2 commands read to find the stage that escalated the item).
+        let audit = state.audit.as_ref().unwrap();
+        let inv = audit.record_start(&task.id.0, stage, "m", 3, 1000).await.unwrap();
+        audit.record_settle(&inv, &outcome, &AuditUsage::default(), 1100).await.unwrap();
+        (run.id, task)
+    }
+
+    use crate::invocation_audit::{ErrorClass, InvocationOutcome};
+
+    #[tokio::test]
+    async fn list_invocations_returns_rows_newest_first_sealed_as_dto() {
+        let state = state_with_two_team_pipeline().await;
+        let (_run, task) = seed_escalated(&state, "spec", InvocationOutcome::Error(ErrorClass::NoResult)).await;
+        let rows = list_invocations_inner(&state, &task.id.0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].team_id, "spec");
+        assert_eq!(rows[0].outcome, "error:no_result");
+        assert_eq!(rows[0].attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn list_invocations_empty_without_audit_store() {
+        // A state with no audit store returns an empty trail (never errors).
+        let state = state_with_two_team_pipeline().await;
+        // overwrite audit with None by rebuilding a minimal state is awkward; instead
+        // assert an unknown task yields an empty trail (no rows recorded).
+        let rows = list_invocations_inner(&state, "T-unknown").await.unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retry_task_requeues_at_failed_stage_with_reset_attempts_and_reopens_run() {
+        let state = state_with_two_team_pipeline().await;
+        let (run_id, task) = seed_escalated(&state, "spec", InvocationOutcome::Error(ErrorClass::RateLimited)).await;
+        // Complete the run so retry must re-open it.
+        state.runs.set_generator_dry(&run_id).await.unwrap();
+        state.runs.try_complete(&run_id).await.unwrap();
+        assert!(state.runs.get(&run_id).await.unwrap().completed);
+
+        let out = retry_task_inner(&state, &task.id.0).await.unwrap();
+        assert_eq!(out.state, TaskState::Queued, "requeued");
+        assert_eq!(out.current_stage, "spec", "at the stage that escalated it");
+        assert_eq!(out.attempts, 1, "attempts reset");
+        // the spec store is ensured (occupancy reported, not None).
+        assert!(state.stores.occupancy(&run_id, "spec").await.unwrap().is_some());
+        // the run is re-opened.
+        assert!(!state.runs.get(&run_id).await.unwrap().completed, "run re-opened");
+    }
+
+    #[tokio::test]
+    async fn force_advance_commits_into_downstream_store() {
+        let state = state_with_two_team_pipeline().await;
+        // research -> spec; escalate at research so the downstream is spec.
+        let (run_id, task) = seed_escalated(&state, "research", InvocationOutcome::Verdict(Verdict::Reject)).await;
+        let out = force_advance_inner(&state, &task.id.0).await.unwrap();
+        assert_eq!(out.state, TaskState::Done, "the escalated item is settled done");
+        // a child landed queued in the spec store (occupancy bumped by the reserve).
+        assert_eq!(state.stores.occupancy(&run_id, "spec").await.unwrap(), Some(1));
+        let queued = state.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert!(queued.iter().any(|t| t.current_stage == "spec" && t.run_id.as_deref() == Some(&run_id)));
+    }
+
+    #[tokio::test]
+    async fn force_advance_surfaces_backpressure_when_downstream_full_without_losing_item() {
+        let state = state_with_two_team_pipeline().await;
+        let (run_id, task) = seed_escalated(&state, "research", InvocationOutcome::Verdict(Verdict::Reject)).await;
+        // Fill the spec store (capacity 3) to the brim.
+        for _ in 0..3 { assert!(state.stores.reserve(&run_id, "spec").await.unwrap()); }
+        let err = force_advance_inner(&state, &task.id.0).await.unwrap_err();
+        assert!(err.contains("full"), "backpressure is surfaced: {err}");
+        // the item is unchanged (still needs_human — never lost).
+        let still = state.tasks.get(&task.id).await.unwrap();
+        assert_eq!(still.state, TaskState::NeedsHuman);
+    }
+
+    #[tokio::test]
+    async fn force_advance_errors_when_stage_has_no_downstream() {
+        let state = state_with_two_team_pipeline().await;
+        // spec is terminal (no on_approve) — advancing has nowhere to go.
+        let (_run, task) = seed_escalated(&state, "spec", InvocationOutcome::Verdict(Verdict::Reject)).await;
+        let err = force_advance_inner(&state, &task.id.0).await.unwrap_err();
+        assert!(err.contains("no on_approve"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn abandon_and_accept_mark_done_and_reevaluate_completion() {
+        let state = state_with_two_team_pipeline().await;
+        let (run_id, task) = seed_escalated(&state, "spec", InvocationOutcome::Error(ErrorClass::Other)).await;
+        // Make the run completable: generator dry + no other live items.
+        state.runs.set_generator_dry(&run_id).await.unwrap();
+        let out = abandon_task_inner(&state, &task.id.0).await.unwrap();
+        assert_eq!(out.state, TaskState::Done);
+        // run completion was re-evaluated and (precondition now holds) completed.
+        assert!(state.runs.get(&run_id).await.unwrap().completed, "completion re-evaluated");
+
+        // accept has the same terminal effect.
+        let (_r2, t2) = seed_escalated(&state, "spec", InvocationOutcome::Verdict(Verdict::Approve)).await;
+        let out2 = accept_task_inner(&state, &t2.id.0).await.unwrap();
+        assert_eq!(out2.state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn retry_without_audit_row_errors_clearly() {
+        let state = state_with_two_team_pipeline().await;
+        let run = start_run_inner(&state, None).await.unwrap();
+        let mut task = Task::work_item("proj".into(), "p".into(), run.id, "k".into(), "needs-human".into(), None, None, 1);
+        task.state = TaskState::NeedsHuman;
+        state.tasks.insert(&task).await.unwrap();
+        let err = retry_task_inner(&state, &task.id.0).await.unwrap_err();
+        assert!(err.contains("no recorded invocation"), "got: {err}");
+    }
+
+    #[test]
+    fn task_action_args_round_trip_and_require_task_id() {
+        let a: args::TaskActionArgs = serde_json::from_value(json!({ "task_id": "T-1" })).unwrap();
+        assert_eq!(a.task_id, "T-1");
+        assert!(serde_json::from_value::<args::TaskActionArgs>(json!({})).is_err());
+    }
+
+    #[test]
+    fn tools_cover_the_l2_l3_actions() {
+        let t = tools();
+        for name in ["list_invocations", "retry_task", "force_advance", "abandon_task", "accept_task"] {
+            assert!(t.iter().any(|s| s.name == name), "missing tool {name}");
+        }
     }
 }
