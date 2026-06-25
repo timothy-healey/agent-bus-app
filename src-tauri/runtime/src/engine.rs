@@ -253,6 +253,13 @@ fn role_str(team: &Team) -> &'static str {
     }
 }
 
+/// The stable invocation id a generator pass runs under (LF31): `gen:<run>:<stage>`.
+/// The live-log sink keys on this, so the frontend's transient generator card can
+/// open the same stream. Contains a `:` (Tauri-legal) but NO `.`. Pure.
+pub fn generator_task_id(run_id: &str, source_stage: &str) -> String {
+    format!("gen:{run_id}:{source_stage}")
+}
+
 /// The human-readable topic for a produced work-item (LF32): the agent's
 /// `DESCRIPTION:` when present, else a de-kebabbed title derived from the slug
 /// (`item_key`) — hyphens/underscores to spaces, first letter capitalised. Pure.
@@ -917,7 +924,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
         output_contract("generator", &dir, &found_vec)
     );
     // The generator pass uses a transient source task purely to drive one invoke.
-    let pass_task = Task::work_item(
+    let mut pass_task = Task::work_item(
         run.project_id.clone(),
         ctx.pipeline.id.clone(),
         ctx.run_id.clone(),
@@ -927,6 +934,9 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
         ctx.target_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
         now_unix(),
     );
+    // Run under the stable gen:<run>:<stage> id so the live-log sink keys on it and
+    // the frontend's transient generator card opens the same stream (LF31).
+    pass_task.id = agent_bus_core::TaskId(generator_task_id(&ctx.run_id, &source_team.id));
     let items = invoke(ctx, source_team, &pass_task, system_prompt).await?;
 
     // 4. Filter to NEW keys (not already found), de-duplicate within the batch,
@@ -1588,6 +1598,11 @@ mod tests {
 
     fn approve_out() -> RunnerOutput {
         RunnerOutput { verdict: agent_bus_core::Verdict::Approve, artifact_path: None, final_text: String::new(), usage: RunnerUsage::default() }
+    }
+
+    #[test]
+    fn generator_task_id_is_stable_per_run_and_source_stage() {
+        assert_eq!(generator_task_id("R-7", "research"), "gen:R-7:research");
     }
 
     #[test]
