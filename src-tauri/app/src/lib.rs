@@ -1305,6 +1305,13 @@ pub fn run() {
                     .await
                     .expect("could not run migrations");
 
+                // LH4: durable live-process store. Built now (pool ready) and
+                // attached to the registry so the spawner persists a record per
+                // spawned pgid; the boot reap (below, before recovery) clears it.
+                let live_processes =
+                    Arc::new(process_records::LiveProcessStore::new(pool.clone()));
+                process_registry.set_live_store(live_processes.clone());
+
                 // Workspace state (Plan 1).
                 let project_store = Arc::new(ProjectStore::new(pool.clone()));
                 handle.manage(WorkspaceState { store: project_store.clone() });
@@ -1345,6 +1352,11 @@ pub fn run() {
                 let tasks = Arc::new(TaskStore::new(pool.clone()));
                 let invocation_audit = Arc::new(runtime::invocation_audit::InvocationAuditStore::new(pool.clone()));
                 let brake = Arc::new(Brake::new());
+
+                // LH4: reap any crash-orphaned `claude` groups from a prior
+                // session BEFORE re-queueing their tasks, so the re-run has no
+                // surviving competitor. Best-effort; clears the records.
+                process_records::reap_orphans(&live_processes).await;
 
                 // F4 crash recovery: release any tasks stuck in `running`.
                 let _ = tasks.release_orphaned_running(now_unix()).await;

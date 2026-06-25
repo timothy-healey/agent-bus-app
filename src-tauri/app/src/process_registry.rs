@@ -87,6 +87,7 @@ impl ProcessRegistry {
 
     /// Builder: attach a `LiveProcessStore` so the spawner persists a record per
     /// spawned pgid (LH4). Used in tests; production wires via `set_live_store`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_live_store(self, store: Arc<crate::process_records::LiveProcessStore>) -> Self {
         *self.live_store.lock().unwrap() = Some(store);
         self
