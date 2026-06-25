@@ -7,10 +7,36 @@ use crate::cc_log::CcUsageStore;
 use crate::snapshot::{compute_snapshot, UsageConfig, UsageSnapshot};
 use crate::worker_log::WorkerUsageStore;
 use agent_bus_core::ToolSpec;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Per-tool argument types for Usage Telemetry's OHS tools (T1). Each tool's
+/// `input_schema` is DERIVED from these via `schemars` (one source of truth —
+/// the dispatcher deserializes the same struct). Owned by the supplier; the
+/// agentic loop validates only the published JSON schema, never these types.
+pub mod args {
+    use super::{Deserialize, JsonSchema};
+
+    /// `usage_snapshot` — no arguments.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema, Default)]
+    pub struct UsageSnapshotArgs {}
+
+    /// `usage_set_budget` — the rolling-window token budget (the denominator).
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct SetBudgetArgs {
+        pub budget: i64,
+    }
+
+    /// `usage_set_auto_meter` — enable/disable the reactive auto-meter brake.
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+    pub struct SetAutoMeterArgs {
+        pub enabled: bool,
+    }
+}
 
 /// Shared Telemetry state held by Tauri's state manager. `braked` is read from a
 /// callback the root installs (so Telemetry doesn't depend on Runtime's type).
@@ -156,6 +182,23 @@ mod tests {
         assert!(load_config(&pool).await.auto_meter_enabled);
         set_auto_meter_inner(&pool, false).await.unwrap();
         assert!(!load_config(&pool).await.auto_meter_enabled);
+    }
+
+    #[test]
+    fn set_budget_args_round_trip_and_require_budget() {
+        let a: args::SetBudgetArgs = serde_json::from_value(json!({ "budget": 5_000_000 })).unwrap();
+        assert_eq!(a.budget, 5_000_000);
+        assert!(serde_json::from_value::<args::SetBudgetArgs>(json!({})).is_err());
+        // a non-integer budget is rejected by serde.
+        assert!(serde_json::from_value::<args::SetBudgetArgs>(json!({ "budget": "lots" })).is_err());
+    }
+
+    #[test]
+    fn set_auto_meter_args_round_trip_and_require_bool() {
+        let a: args::SetAutoMeterArgs = serde_json::from_value(json!({ "enabled": true })).unwrap();
+        assert!(a.enabled);
+        assert!(serde_json::from_value::<args::SetAutoMeterArgs>(json!({})).is_err());
+        assert!(serde_json::from_value::<args::SetAutoMeterArgs>(json!({ "enabled": "yes" })).is_err());
     }
 
     #[test]
