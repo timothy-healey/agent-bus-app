@@ -39,4 +39,15 @@ describe("canvas node renderers", () => {
     expect(screen.getByText("Plan review")).toBeInTheDocument();
     expect(screen.getByText("human gate")).toBeInTheDocument();
   });
+
+  it("nodeTypes includes the synthetic store renderer (G1)", () => {
+    expect(nodeTypes.store).toBeTypeOf("function");
+  });
+
+  it("a store node renders its capacity glyph + accessible label", () => {
+    renderShell({ kind: "store", label: "store · spec-writers", warnings: [], capacity: 3, storeTeamId: "spec-writers" }, "store");
+    // capacity readout (e.g. "/3") appears
+    expect(screen.getByText(/\/3/)).toBeInTheDocument();
+    expect(screen.getByText("store")).toBeInTheDocument();
+  });
 });
