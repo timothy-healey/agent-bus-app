@@ -163,3 +163,11 @@ First real `claude` invocation. A run is topic-less (the prompts are the work), 
 > "does exiting the app send a signal to stop ongoing work?"
 
 No graceful shutdown. The per-team worker loops die with the process (no new claims), but an in-flight `claude` invocation is spawned via blocking `std::process::Command::output()` (no kill handle / process group / death-signal), so it ORPHANS and keeps running after quit — potentially still writing the worktree (implementers mutate the target repo). Brake only blocks new claims; it doesn't kill a running subprocess. On restart `release_orphaned_running` recovers the DB row but doesn't reap the process (risking a double-run). Fix would need: a Tauri `RunEvent::ExitRequested` handler that brakes + reaps children; killable spawns (`.spawn()` + tracked child handles, kill-on-exit; Linux PR_SET_PDEATHSIG / kill the process group); and brake-kills-running semantics. Likely roadmap item(s).
+
+---
+
+### LF21 · React-Flow zoom controls look default / unreadable on dark — `fixed`
+
+> "the styling of the zoom controls on the graph look default and aren't readable around our styling. let's apply app styling to the controls"
+
+global.css HAD overrides for `.react-flow__controls*` but they tied the library's `dist/style.css` on specificity (single class) and lost the cascade. Re-prefixed them with the `.react-flow` ancestor (0,2,x > the lib's 0,1,x) so they reliably win, and covered bg/border/disabled + the icon fill (`svg`/`path`/`*`) so the controls read on the dark surface. Commit on `main`.

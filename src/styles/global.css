@@ -153,18 +153,28 @@ code, .mono {
 
 /* React Flow (graph builder) — bind the library chrome to the design tokens so
    the canvas reads as part of the app, not a third-party widget. */
-.react-flow__controls {
+/* Prefixed with `.react-flow` (specificity 0,2,x) so these reliably beat the
+   library's own `dist/style.css` (0,1,x) regardless of bundle import order —
+   the un-prefixed rules tied on specificity and lost the cascade. */
+.react-flow .react-flow__controls {
   box-shadow: var(--shadow-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
 }
-.react-flow__controls-button {
+.react-flow .react-flow__controls-button {
   background: var(--surface-2);
+  border: none;
   border-bottom: 1px solid var(--border);
-  color: var(--text-2);
+  color: var(--text);
+  width: 26px;
+  height: 26px;
 }
-.react-flow__controls-button:hover {
-  background: var(--surface-3);
-}
-.react-flow__controls-button svg { fill: var(--text-2); }
+.react-flow .react-flow__controls-button:hover { background: var(--surface-3); }
+.react-flow .react-flow__controls-button:disabled { opacity: 0.4; }
+.react-flow .react-flow__controls-button svg,
+.react-flow .react-flow__controls-button svg path,
+.react-flow .react-flow__controls-button svg * { fill: var(--text); }
 .react-flow__edge-text { font-family: var(--font-mono); font-size: var(--ts-xs); fill: var(--text-3); }
 .react-flow__edge-textbg { fill: var(--bg-2); }
 .react-flow__attribution { display: none; }
