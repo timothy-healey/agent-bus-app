@@ -325,7 +325,7 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { dr
     try {
       const next = await regenerateTeamPrompt(sessionId, draft, id);
       if (next === null) {
-        setRegenError("No prompt was generated — try again.");
+        setRegenError("No prompt was generated. Try again.");
       } else {
         onChange(setPromptBody(draft, id, next));
       }
@@ -372,7 +372,7 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { dr
           Type <code style={{ fontFamily: "var(--font-mono)" }}>/</code> to insert an installed skill or command.
         </div>
         {regenError && (
-          <div role="alert" aria-live="polite" style={{ marginTop: "var(--sp-1)", fontSize: "var(--ts-xs)", color: "var(--danger)" }}>
+          <div role="alert" style={{ marginTop: "var(--sp-1)", fontSize: "var(--ts-xs)", color: "var(--danger)" }}>
             {regenError}
           </div>
         )}
