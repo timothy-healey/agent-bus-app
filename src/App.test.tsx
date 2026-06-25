@@ -9,6 +9,12 @@ const tasks = [
     state: "gated", attempts: 1, parent_artifact: null, review_artifact: null,
     created_at: 0, updated_at: 0,
   },
+  {
+    id: "T-99", project_id: "p", pipeline: "p", topic: "Escalated item",
+    target_repo: null, target_scope: null, current_stage: "needs-human",
+    state: "needs_human", attempts: 3, parent_artifact: null, review_artifact: null,
+    created_at: 0, updated_at: 0, run_id: "R-1",
+  },
 ];
 
 vi.mock("./hooks/useTasks", () => ({
@@ -48,9 +54,18 @@ vi.mock("./ipc/pipeline", () => ({
 }));
 
 const approveMock = vi.fn();
+const listInvocationsMock = vi.fn();
+const retryTaskMock = vi.fn();
+const acceptTaskMock = vi.fn();
 vi.mock("./ipc/runtime", async (orig) => {
   const actual = await (orig as any)();
-  return { ...actual, approveGate: (...a: unknown[]) => approveMock(...a) };
+  return {
+    ...actual,
+    approveGate: (...a: unknown[]) => approveMock(...a),
+    listInvocations: (...a: unknown[]) => listInvocationsMock(...a),
+    retryTask: (...a: unknown[]) => retryTaskMock(...a),
+    acceptTask: (...a: unknown[]) => acceptTaskMock(...a),
+  };
 });
 vi.mock("./ipc/review", () => ({
   recordVerdict: vi.fn().mockResolvedValue({ task_id: "T-40", verdict: "approve", comment_count: 0 }),
@@ -77,11 +92,16 @@ import App from "./App";
 describe("App board integration", () => {
   beforeEach(() => {
     approveMock.mockReset();
+    listInvocationsMock.mockReset().mockResolvedValue([
+      { invocation_id: "I-1", team_id: "implementers", model: "m", attempts: 3, started_at: 0, settled_at: 1, outcome: "error:rate_limited", input_tokens: 0, output_tokens: 0 },
+    ]);
+    retryTaskMock.mockReset().mockResolvedValue({ id: "T-99", state: "queued" });
+    acceptTaskMock.mockReset().mockResolvedValue({ id: "T-99", state: "done" });
     const pl = {
       id: "pl", name: "PL", description: "", schema_version: 2,
       teams: [{ id: "plan-writers", name: "Plan Writers" }],
       gates: [{ id: "gate-2-plan", label: "Gate 2", downstream: "implementers" }],
-      escalations: [], forks: [], joins: [],
+      escalations: [{ id: "needs-human", triggers: [] }], forks: [], joins: [],
     };
     loadPipelineMock.mockReset().mockResolvedValue(pl);
   });
@@ -94,6 +114,29 @@ describe("App board integration", () => {
     await waitFor(() =>
       expect(screen.getAllByText("T-40").length).toBeGreaterThan(1),
     );
+  });
+
+  it("opens a needs_human card and fires retry through the recovery handler", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Escalated item")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Escalated item"));
+    // the failure action set renders (the audit trail's latest is an error).
+    const retry = await screen.findByRole("button", { name: /retry/i });
+    fireEvent.click(retry);
+    await waitFor(() => expect(retryTaskMock).toHaveBeenCalledWith("T-99"));
+  });
+
+  it("surfaces a recovery-action failure as a dismissible alert (no unhandled rejection)", async () => {
+    retryTaskMock.mockRejectedValueOnce(new Error("downstream is full"));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Escalated item")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Escalated item"));
+    const retry = await screen.findByRole("button", { name: /retry/i });
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/downstream is full/i));
+    // dismissible
+    fireEvent.click(screen.getByLabelText("dismiss action error"));
+    await waitFor(() => expect(screen.queryByText(/downstream is full/i)).not.toBeInTheDocument());
   });
 
   it("docks the god terminal at the bottom", async () => {
