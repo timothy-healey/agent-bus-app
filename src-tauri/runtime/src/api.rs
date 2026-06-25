@@ -127,6 +127,11 @@ impl RuntimeState {
             target_repo,
             read_prompt: Arc::new(|_t: &Team| String::new()),
             revision_reader: self.revision_reader.clone(),
+            // The gate-verdict context never invokes the runner, so the
+            // observability side-channels are not needed here.
+            usage_sink: None,
+            log_sink: None,
+            audit: None,
         }
     }
 }

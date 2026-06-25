@@ -155,6 +155,18 @@ pub struct EngineContext {
     /// Reads a task's persisted revise bundle (revise-once feedback; ④c gate
     /// revise + join revise-once). `None` = no bundle composed (fresh-run text).
     pub revision_reader: Option<Arc<dyn RevisionBundleReader>>,
+    /// Where settled usage is published (the kernel UsageSink seam, D2/R5). `None`
+    /// = drop usage (runtime-only tests / pre-project boot). Best-effort: a
+    /// telemetry write never fails a settle. PRESERVED idiom from the deleted pool.
+    pub usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
+    /// Per-task live-log sink factory (R4 streaming). When `Some`, the engine uses
+    /// `invoke_stream` so assistant prose deltas flow to the composition root's
+    /// `task-log` events; `None` = the non-streaming `invoke`. Display-only — the
+    /// deltas never influence settle/route.
+    pub log_sink: Option<Arc<crate::log_sink::LogSinkFactory>>,
+    /// Per-invocation audit store (R3). `None` = no audit (runtime-only tests /
+    /// pre-project boot). Best-effort: an audit write never fails a settle.
+    pub audit: Option<Arc<crate::invocation_audit::InvocationAuditStore>>,
 }
 
 impl EngineContext {
@@ -1354,6 +1366,9 @@ pub(crate) mod test_support {
             target_repo: None,
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
             revision_reader: None,
+            usage_sink: None,
+            log_sink: None,
+            audit: None,
         }
     }
 
