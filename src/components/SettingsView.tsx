@@ -233,6 +233,10 @@ export function SettingsView(props: SettingsViewProps) {
   const [gitEmail, setGitEmail] = useState(gitConfig.author_email);
   const [gitSaving, setGitSaving] = useState(false);
 
+  // Which project's delete is awaiting confirm (destructive: also wipes the
+  // project's on-disk scaffolding, so it gets a danger + confirm step).
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+
   async function toggleAutoMeter(next: boolean) {
     setAutoMeter(next);
     setAutoSaving(true);
@@ -373,8 +377,30 @@ export function SettingsView(props: SettingsViewProps) {
                 </div>
                 <div style={{ fontSize: 11, color: "var(--text-3)" }}>{p.root_path}</div>
               </div>
-              <Button onClick={() => onRemoveProject(p.id)}>remove</Button>
+              {confirmRemoveId === p.id ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <Button
+                    variant="danger"
+                    aria-label={`confirm remove ${p.name}`}
+                    onClick={async () => {
+                      await onRemoveProject(p.id);
+                      setConfirmRemoveId(null);
+                    }}
+                  >
+                    confirm remove
+                  </Button>
+                  <Button variant="ghost" onClick={() => setConfirmRemoveId(null)}>cancel</Button>
+                </div>
+              ) : (
+                <Button aria-label={`remove project ${p.name}`} onClick={() => setConfirmRemoveId(p.id)}>remove</Button>
+              )}
             </div>
+            {confirmRemoveId === p.id && (
+              <div style={{ fontSize: 11, color: "var(--text-3)", marginTop: 4 }}>
+                Also deletes this project's files (prompts, pipelines, artifacts,
+                worktrees). The target repo is NOT touched.
+              </div>
+            )}
             <ProjectTargetRepo project={p} onSave={(path) => onSetTargetRepo(p.id, path)} />
             <ProjectSkillSources project={p} onSave={(sources) => onSetSkillSources(p.id, sources)} />
             <ProjectWorktrees project={p} onList={onListWorktrees} onRemove={onRemoveWorktree} />

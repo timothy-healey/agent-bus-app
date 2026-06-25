@@ -53,7 +53,11 @@ export function ProjectSwitcher({ projects, activeProjectId, onSelect, onDelete 
       {onDelete && active && (
         confirming ? (
           <div style={confirmRow}>
-            <span style={confirmText}>Delete “{active.name}”?</span>
+            <span style={confirmText}>
+              Delete “{active.name}”? This also deletes the project's files
+              (prompts, pipelines, artifacts, worktrees). The target repo is NOT
+              touched.
+            </span>
             <Button variant="danger" size="sm" onClick={doDelete} aria-label={`confirm delete ${active.name}`}>delete</Button>
             <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>cancel</Button>
           </div>
