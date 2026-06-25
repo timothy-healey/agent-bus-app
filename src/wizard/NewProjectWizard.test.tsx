@@ -36,7 +36,7 @@ async function openToReview(targetRepo?: string) {
   fireEvent.click(screen.getByRole("button", { name: /generate/i }));
   // generate advances to the Canvas step (its palette is the tell)
   await screen.findByRole("button", { name: /add team/i });
-  fireEvent.click(screen.getByRole("button", { name: /next/i })); // canvas -> review
+  fireEvent.click(screen.getByRole("button", { name: /continue/i })); // canvas -> review
   return { onCreated };
 }
 

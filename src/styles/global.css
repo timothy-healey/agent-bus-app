@@ -90,6 +90,11 @@ code, .mono {
 .abp-icon-delete { transition: color var(--dur-fast) var(--ease-out); }
 .abp-icon-delete:hover { color: var(--danger); }
 
+/* Left-nav step tree (AuthoringLayout, G14): hover lift + clear current marker */
+.abp-navstep { transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out); }
+.abp-navstep:hover:not(:disabled):not([aria-current="step"]) { background: var(--surface-2); color: var(--text); }
+.abp-navstep:disabled { opacity: 0.6; }
+
 /* Loading skeleton (DESIGN.md §States: skeleton lines, never spinners in content) */
 .abp-skeleton {
   height: 0.7em;

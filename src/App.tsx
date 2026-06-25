@@ -34,7 +34,31 @@ export default function App() {
   // A1: the seeded draft for the in-app pipeline editor (null = closed).
   const [editorSeed, setEditorSeed] = useState<DraftPipeline | null>(null);
 
-  const activeProject: Project | null = projects[0] ?? null;
+  // The selected active project (G13/G14). Defaults to the newest (projects[0],
+  // newest-first) and falls back to it whenever the selection no longer exists
+  // (e.g. after a delete) — so the switcher can move between projects and a
+  // delete lands on the next project (or the empty state when none remain).
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const activeProject: Project | null =
+    projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null;
+
+  // Switch the active project (G14): select it locally + (re)activate its runtime
+  // so `/inject` targets it (the activate path is idempotent — R6).
+  const selectProject = useCallback((id: string) => {
+    setSelectedProjectId(id);
+    void activateProject(id);
+  }, []);
+
+  // Delete a project (G13): remove it, reload, then let the active-project
+  // fallback land on the next project (or the empty state when none remain).
+  const handleDeleteProject = useCallback(
+    async (id: string) => {
+      await removeProject(id);
+      setSelectedProjectId((cur) => (cur === id ? null : cur));
+      reload();
+    },
+    [reload],
+  );
 
   const { tasks, reload: reloadTasks, tasksByRun } = useTasks();
   // ④e: the board is run-scoped. useRuns tracks the project's runs + the selected
@@ -190,6 +214,8 @@ export default function App() {
   const onCreated = useCallback(
     (p: Project) => {
       setWizardOpen(false);
+      // Land on the freshly-created project (G14 selection).
+      setSelectedProjectId(p.id);
       // Trigger RUNTIME activation for the new project so `/inject` targets it
       // (runtime re-activation fix — activation is no longer boot-only). Reload
       // the project list regardless of the activation result.
@@ -273,7 +299,7 @@ export default function App() {
             onSaveGitConfig={async (n, e) => { const c = await setGitConfig(n, e); setGitConfigState(c); return c; }}
             projects={projects}
             activeProjectId={activeProject?.id ?? null}
-            onRemoveProject={async (id) => { await removeProject(id); await reload(); }}
+            onRemoveProject={handleDeleteProject}
             onSetTargetRepo={async (id, targetRepo) => { await workspaceSetTargetRepo(id, targetRepo); await reload(); }}
             onSetSkillSources={async (id, sources) => { await workspaceSetSkillSources(id, sources); await reload(); }}
             onListWorktrees={(id) => listWorktrees(id)}
@@ -337,12 +363,19 @@ export default function App() {
             setEditorSeed(null);
             reloadPipeline();
           }}
+          projects={projects}
+          onSelectProject={(id) => { setEditorSeed(null); selectProject(id); }}
+          onDeleteProject={handleDeleteProject}
         />
       )}
       <NewProjectWizard
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
         onCreated={onCreated}
+        projects={projects}
+        activeProjectId={activeProject?.id ?? null}
+        onSelectProject={(id) => { setWizardOpen(false); selectProject(id); }}
+        onDeleteProject={handleDeleteProject}
       />
     </div>
   );
