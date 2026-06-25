@@ -104,6 +104,33 @@ impl StoreRepo {
                 .await?;
         Ok(row.map(|(o, c)| o >= c).unwrap_or(false))
     }
+
+    /// Boot/resume reconciliation: for every store of `run_id`, set `occupancy`
+    /// to the count of work-items actually resident at that stage — the truth
+    /// from `tasks`. Residency = a work-item parked at `current_stage = <stage>`
+    /// in a state that occupies a slot: `queued`, `running`, `gated`, `revising`,
+    /// `joining`. (`done` left the store; `needs_human` was routed to the
+    /// escalation stage and its slot released.) This clears reservations leaked by
+    /// a killed/crashed worker (occupancy incremented at `reserve`, never released)
+    /// so a resumed run is not falsely backpressured. Run AFTER
+    /// `TaskStore::release_orphaned_running` so just-requeued items are counted.
+    pub async fn reconcile_occupancy(&self, run_id: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE stores
+                SET occupancy = (
+                    SELECT COUNT(*) FROM tasks
+                     WHERE tasks.run_id = stores.run_id
+                       AND tasks.current_stage = stores.stage
+                       AND tasks.state IN
+                           ('queued','running','gated','revising','joining')
+                )
+              WHERE run_id = ?",
+        )
+        .bind(run_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -196,5 +223,87 @@ mod tests {
         }
         assert_eq!(winners, CAP, "exactly capacity reservers win");
         assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(CAP));
+    }
+
+    async fn insert_task(pool: &SqlitePool, id: &str, run_id: &str, stage: &str, state: &str) {
+        sqlx::query(
+            "INSERT INTO tasks
+               (id, project_id, pipeline, topic, current_stage, state, attempts,
+                created_at, updated_at, run_id)
+             VALUES (?,?,?,?,?,?,0,100,100,?)",
+        )
+        .bind(id)
+        .bind("p")
+        .bind("pipe")
+        .bind("topic")
+        .bind(stage)
+        .bind(state)
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_sets_occupancy_to_resident_count() {
+        let pool = fresh_pool().await;
+        let repo = StoreRepo::new(pool.clone());
+        repo.ensure("R1", "spec", 5).await.unwrap();
+        // Inflate occupancy as a kill/crash would leave it.
+        repo.reserve("R1", "spec").await.unwrap();
+        repo.reserve("R1", "spec").await.unwrap();
+        repo.reserve("R1", "spec").await.unwrap();
+        assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(3));
+
+        // Reality: 2 resident items at `spec` (queued + running), 1 done (left),
+        // 1 needs_human (left), and one item at a different stage.
+        insert_task(&pool, "t-queued", "R1", "spec", "queued").await;
+        insert_task(&pool, "t-running", "R1", "spec", "running").await;
+        insert_task(&pool, "t-done", "R1", "spec", "done").await;
+        insert_task(&pool, "t-nh", "R1", "spec", "needs_human").await;
+        insert_task(&pool, "t-other", "R1", "plan", "queued").await;
+
+        repo.reconcile_occupancy("R1").await.unwrap();
+        assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn reconcile_clears_a_fully_leaked_reservation_to_zero() {
+        let pool = fresh_pool().await;
+        let repo = StoreRepo::new(pool.clone());
+        repo.ensure("R1", "spec", 3).await.unwrap();
+        repo.reserve("R1", "spec").await.unwrap();
+        repo.reserve("R1", "spec").await.unwrap();
+        assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(2));
+        // No resident tasks at all -> occupancy must drop to 0.
+        repo.reconcile_occupancy("R1").await.unwrap();
+        assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn reconcile_counts_gated_revising_joining_as_resident() {
+        let pool = fresh_pool().await;
+        let repo = StoreRepo::new(pool.clone());
+        repo.ensure("R1", "gate-1", 9).await.unwrap();
+        insert_task(&pool, "g1", "R1", "gate-1", "gated").await;
+        insert_task(&pool, "g2", "R1", "gate-1", "revising").await;
+        insert_task(&pool, "g3", "R1", "gate-1", "joining").await;
+        repo.reconcile_occupancy("R1").await.unwrap();
+        assert_eq!(repo.occupancy("R1", "gate-1").await.unwrap(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn reconcile_only_touches_the_given_run() {
+        let pool = fresh_pool().await;
+        let repo = StoreRepo::new(pool.clone());
+        repo.ensure("R1", "spec", 5).await.unwrap();
+        repo.ensure("R2", "spec", 5).await.unwrap();
+        repo.reserve("R2", "spec").await.unwrap(); // R2 leaked
+        repo.reserve("R2", "spec").await.unwrap();
+        insert_task(&pool, "a", "R1", "spec", "queued").await;
+        repo.reconcile_occupancy("R1").await.unwrap();
+        assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(1));
+        // R2 untouched by an R1 reconcile.
+        assert_eq!(repo.occupancy("R2", "spec").await.unwrap(), Some(2));
     }
 }
