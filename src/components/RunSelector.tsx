@@ -9,6 +9,12 @@ export interface RunSelectorProps {
   activeRun: Run | null;
   onSelect: (runId: string) => void;
   onStartRun: () => void;
+  /// True when the run is stopped (braked) — swaps the control to a Resume affordance.
+  braked: boolean;
+  /// Halt the active run (brake on). Shown while a run is running and not braked.
+  onStop: () => void;
+  /// Resume after a Stop (brake off). Shown while braked.
+  onResume: () => void;
   /// True while a Start is in flight — disables the button + shows progress.
   starting?: boolean;
   /// True during the initial runs fetch — shows a quiet "loading runs…" instead
@@ -29,7 +35,7 @@ export function runOptionLabel(run: Run, isActive: boolean): string {
 /// the work (the A6 insight). The topbar brake toggle is Stop. When there are no
 /// runs yet, the selector is replaced by an inline "no runs yet" hint so Start is
 /// the obvious next action.
-export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun, starting = false, loading = false }: RunSelectorProps) {
+export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun, braked, onStop, onResume, starting = false, loading = false }: RunSelectorProps) {
   const bar: CSSProperties = {
     display: "flex",
     alignItems: "center",
@@ -55,6 +61,15 @@ export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun
     minWidth: 180,
   };
   const empty: CSSProperties = { fontSize: "var(--ts-sm)", color: "var(--text-3)" };
+  const status: CSSProperties = {
+    fontSize: "var(--ts-sm)",
+    color: "var(--text-3)",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "var(--sp-1)",
+  };
+
+  const isRunning = !braked && activeRun != null && !activeRun.completed;
 
   return (
     <div style={bar}>
@@ -79,10 +94,28 @@ export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun
           ))}
         </select>
       )}
-      <div style={{ marginLeft: "auto" }}>
-        <Button variant="primary" size="sm" onClick={onStartRun} disabled={starting}>
-          {starting ? "starting…" : "Start run"}
-        </Button>
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "var(--sp-3)" }}>
+        {braked ? (
+          <>
+            <span style={status}>stopped</span>
+            <Button variant="primary" size="sm" onClick={onResume}>
+              Resume
+            </Button>
+          </>
+        ) : isRunning ? (
+          <>
+            <span style={status}>
+              <span aria-hidden="true" style={{ color: "var(--running)" }}>●</span> Running
+            </span>
+            <Button variant="danger" size="sm" onClick={onStop}>
+              Stop
+            </Button>
+          </>
+        ) : (
+          <Button variant="primary" size="sm" onClick={onStartRun} disabled={starting}>
+            {starting ? "starting…" : "Start run"}
+          </Button>
+        )}
       </div>
     </div>
   );
