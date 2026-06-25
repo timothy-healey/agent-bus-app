@@ -133,6 +133,11 @@ pub struct InvocationRequest {
     /// behavior. The AnthropicApiRunner ignores it (no subprocess to confine).
     /// Live confinement is structural-only (unverified) — NOT a proven boundary.
     pub sandbox_profile: Option<String>,
+    /// The directory the child `claude` process runs in (LF26). The composition
+    /// root resolves this to the work-item's working dir (worktree for
+    /// implementers, target repo otherwise). `None` = inherit the parent's cwd
+    /// (the pre-LF26 behaviour, kept for the plain `.output()` spawner + tests).
+    pub working_dir: Option<String>,
 }
 
 /// A display-only log sink. The streaming worker path forwards each assistant
@@ -251,6 +256,7 @@ mod tests {
             thinking_budget: 0, system_prompt: String::new(), user_message: String::new(),
             settings_path: String::new(), add_dirs: vec![],
             sandbox_profile: None,
+            working_dir: None,
         };
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let s = seen.clone();
