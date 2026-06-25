@@ -41,6 +41,21 @@ export interface FlowEdgeData {
   kind: RouteKind;
   /// true when the target node id does not exist in the draft (dangling route).
   dangling: boolean;
+  /// G2 — true for a reviewer's revise back-edge, rendered as an explicit curved
+  /// loop back to the writer (visually distinct from forward flow).
+  loop: boolean;
+}
+
+/// G2 — the human-facing outcome word for an edge. A reviewer's three verdicts
+/// read approve / revise / **decline** (the engine escalates a reject); forward
+/// hand-offs are unlabelled to keep the graph quiet.
+export function outcomeLabel(kind: RouteKind): string {
+  switch (kind) {
+    case "approve": return "approve";
+    case "revise": return "revise";
+    case "reject": return "decline";
+    case "hand-off": return "";
+  }
 }
 
 export interface FlowEdge {
@@ -92,8 +107,8 @@ export function draftToFlow(draft: DraftPipeline): Flow {
       id: `${source}::${kind}::${target}`,
       source,
       target,
-      label: kind,
-      data: { kind, dangling: !known.has(target) },
+      label: outcomeLabel(kind),
+      data: { kind, dangling: !known.has(target), loop: kind === "revise" },
     });
   };
 
@@ -163,7 +178,7 @@ function projectStores(draft: DraftPipeline, flow: Flow): Flow {
       source: storeId,
       target: teamId,
       label: "",
-      data: { kind: "hand-off", dangling: false },
+      data: { kind: "hand-off", dangling: false, loop: false },
     });
   }
 
