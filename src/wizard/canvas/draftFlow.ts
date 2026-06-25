@@ -10,18 +10,29 @@ import { layout, type XY } from "./layout";
 /// drafts gracefully). Positions are NOT set here; `reconcile` assigns them so the
 /// structure stays derived from the draft while positions stay local.
 
+/// The synthetic store kind is a RENDER-ONLY canvas node (G1) — it is projected
+/// from `Team.store`, not a model `NodeKind`. The renderer map keys on this union
+/// so a store node slots into the NodeKind-driven renderer table without changing
+/// the authoring model.
+export type FlowNodeKind = NodeKind | "store";
+
 export interface FlowNodeData {
-  kind: NodeKind;
+  kind: FlowNodeKind;
   label: string;
   /// behavioural role for teams (producer/reviewer); undefined for other kinds.
   role?: "producer" | "reviewer";
   /// best-effort, derived-from-draft warnings (e.g. "no prompt yet").
   warnings: string[];
+  /// G1 store nodes only: the owning team's WIP capacity (for the glyph).
+  capacity?: number;
+  /// G1 store nodes only: the owning team's id (drawer edits its store.capacity;
+  /// the board keys live occupancy by it).
+  storeTeamId?: string;
 }
 
 export interface FlowNode {
   id: string;
-  type: NodeKind;
+  type: FlowNodeKind;
   position: XY;
   data: FlowNodeData;
 }
@@ -53,10 +64,15 @@ function teamWarnings(t: DraftTeam): string[] {
   return w;
 }
 
+/// Forward-flow edge kinds — these advance new work *into* a team, so they pass
+/// through the team's input store. Returns (revise/reject) are NOT buffered work
+/// and stay direct.
+const FORWARD_KINDS: ReadonlySet<RouteKind> = new Set<RouteKind>(["hand-off", "approve"]);
+
 export function draftToFlow(draft: DraftPipeline): Flow {
   const nodes: FlowNode[] = [];
   const known = new Set<string>();
-  const push = (id: string, type: NodeKind, label: string, extra: Partial<FlowNodeData> = {}) => {
+  const push = (id: string, type: FlowNodeKind, label: string, extra: Partial<FlowNodeData> = {}) => {
     nodes.push({ id, type, position: ZERO, data: { kind: type, label, warnings: [], ...extra } });
     known.add(id);
   };
@@ -95,7 +111,63 @@ export function draftToFlow(draft: DraftPipeline): Flow {
     addEdge(j.id, j.downstream, "hand-off");
   }
 
-  return { nodes, edges };
+  return projectStores(draft, { nodes, edges });
+}
+
+/// G1 — derived store projection. For each team that has at least one inbound
+/// FORWARD edge (the produced-work it consumes), synthesize a `store:<team-id>`
+/// node carrying the team's WIP capacity, reroute every forward edge that targeted
+/// the team to target the store, and add a single `store → team` edge. The source
+/// team (no inbound forward edge) gets no store. Returns/escalations are left
+/// direct. This is a render-only projection — `to_pipeline`/`from_pipeline` and the
+/// draft are unaffected.
+function projectStores(draft: DraftPipeline, flow: Flow): Flow {
+  const teamIds = new Set(draft.teams.map((t) => t.id));
+  // Teams that actually receive forward work.
+  const consumers = new Set<string>();
+  for (const e of flow.edges) {
+    if (teamIds.has(e.target) && FORWARD_KINDS.has(e.data.kind)) consumers.add(e.target);
+  }
+  if (consumers.size === 0) return flow;
+
+  const capacityOf = (teamId: string) => draft.teams.find((t) => t.id === teamId)?.store?.capacity ?? 8;
+
+  const storeNodes: FlowNode[] = [...consumers].map((teamId) => ({
+    id: `store:${teamId}`,
+    type: "store" as const,
+    position: ZERO,
+    data: {
+      kind: "store" as const,
+      label: `store · ${teamId}`,
+      warnings: [],
+      capacity: capacityOf(teamId),
+      storeTeamId: teamId,
+    },
+  }));
+
+  const edges: FlowEdge[] = [];
+  for (const e of flow.edges) {
+    if (teamIds.has(e.target) && FORWARD_KINDS.has(e.data.kind)) {
+      // Reroute the producer → team edge to producer → store:team.
+      const storeId = `store:${e.target}`;
+      edges.push({ ...e, id: `${e.source}::${e.data.kind}::${storeId}`, target: storeId });
+    } else {
+      edges.push(e);
+    }
+  }
+  // One store → team edge per store (the buffered work flowing on to the team).
+  for (const teamId of consumers) {
+    const storeId = `store:${teamId}`;
+    edges.push({
+      id: `${storeId}::store::${teamId}`,
+      source: storeId,
+      target: teamId,
+      label: "",
+      data: { kind: "hand-off", dangling: false },
+    });
+  }
+
+  return { nodes: [...flow.nodes, ...storeNodes], edges };
 }
 
 /// Merge the derived structure with the LOCAL position map: nodes already in
