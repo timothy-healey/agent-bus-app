@@ -326,6 +326,15 @@ pub fn best_effort_validate(draft: &DraftPipeline) -> Vec<String> {
         if !known.contains(j.downstream.as_str()) {
             issues.push(format!("join '{}' downstream '{}' is unknown", j.id, j.downstream));
         }
+        // AU1 — mirror the hard `QuorumOutOfRange` rule so an out-of-range quorum
+        // (1..=lanes) surfaces live in the banner, not only on Save. Same wording
+        // as `PipelineValidationError::QuorumOutOfRange`'s Display so the two agree.
+        if let Some(q) = j.quorum {
+            let lanes = j.waits_for.len() as u32;
+            if q < 1 || q > lanes {
+                issues.push(format!("join '{}' quorum {} out of range (must be 1..={})", j.id, q, lanes));
+            }
+        }
     }
     for g in &draft.gates {
         if !known.contains(g.downstream.as_str()) {
@@ -701,6 +710,59 @@ mod tests {
         d.teams.push(a);
         d.teams.push(b);
         assert_eq!(best_effort_validate(&d), Vec::<String>::new());
+    }
+
+    // AU1 — best-effort mirrors the hard `QuorumOutOfRange` rule (quorum must be
+    // 1..=waits_for.len()) so an out-of-range quorum surfaces in the live banner,
+    // not only on Save. Helper builds a two-lane join draft with a given quorum.
+    fn quorum_draft(quorum: Option<u32>) -> DraftPipeline {
+        use crate::model::{Fork, Join};
+        let mut d = DraftPipeline::empty();
+        for id in ["entry", "lane-a", "lane-b", "after"] {
+            let mut t = DraftTeam::new(id, id);
+            t.prompt_body = "x".into();
+            d.teams.push(t);
+        }
+        d.teams[0].outputs.on_approve = Some("fork-1".into());
+        d.forks.push(Fork { id: "fork-1".into(), lanes: vec!["lane-a".into(), "lane-b".into()] });
+        d.joins.push(Join {
+            id: "join-1".into(),
+            waits_for: vec!["lane-a".into(), "lane-b".into()],
+            downstream: "after".into(),
+            cancel_on_reject: false,
+            quorum,
+        });
+        d
+    }
+
+    #[test]
+    fn best_effort_is_silent_on_an_in_range_quorum() {
+        // 1 and == lanes are both in range → no issue.
+        assert!(!best_effort_validate(&quorum_draft(Some(1))).iter().any(|i| i.contains("out of range")));
+        assert!(!best_effort_validate(&quorum_draft(Some(2))).iter().any(|i| i.contains("out of range")));
+    }
+
+    #[test]
+    fn best_effort_is_silent_when_quorum_is_unset() {
+        assert!(!best_effort_validate(&quorum_draft(None)).iter().any(|i| i.contains("out of range")));
+    }
+
+    #[test]
+    fn best_effort_flags_a_quorum_of_zero() {
+        let issues = best_effort_validate(&quorum_draft(Some(0)));
+        assert!(
+            issues.iter().any(|i| i.contains("join-1") && i.contains("quorum 0 out of range (must be 1..=2)")),
+            "issues were: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn best_effort_flags_a_quorum_above_the_lane_count() {
+        let issues = best_effort_validate(&quorum_draft(Some(3)));
+        assert!(
+            issues.iter().any(|i| i.contains("join-1") && i.contains("quorum 3 out of range (must be 1..=2)")),
+            "issues were: {issues:?}"
+        );
     }
 
     fn complete_draft() -> DraftPipeline {
