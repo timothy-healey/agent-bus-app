@@ -4,7 +4,7 @@ import { Topbar } from "./Topbar";
 import type { UsageSnapshot } from "../ipc/usage";
 
 const snap: UsageSnapshot = {
-  window_total: 1_200_000, window_budget: 2_600_000, window_pct: 0.47, band: "safe",
+  window_total: 66_500_000, window_budget: 190_000_000, window_pct: 0.35, band: "safe",
   burn_per_min: 18_000, window_secs: 18000, reset_in_secs: null, est_brake_at: null,
   by_team: [], tokens_by_task: {}, braked: false, auto_meter_enabled: false,
 };
@@ -22,7 +22,7 @@ describe("Topbar", () => {
 
   it("renders the usage meter pct when a snapshot is given", () => {
     render(<Topbar activeProject={null} onNewProject={() => {}} usage={snap} brakeOn={false} onToggleBrake={() => {}} />);
-    expect(screen.getByText("47%")).toBeInTheDocument();
+    expect(screen.getByText("35%")).toBeInTheDocument();
   });
 
   it("shows brake off and toggles on click", () => {
