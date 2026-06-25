@@ -37,14 +37,12 @@ use thiserror::Error;
 /// overrides the project-level default (A5). The SINGLE precedence fn so the rule
 /// lives in one place (vet F2). Pure.
 ///
-/// PRESERVED from the deleted single-task `pool` module at the ④d cleanup. NOTE
-/// (correctness gap): the bounded-buffer engine's worker `invoke` (below) binds
-/// `${target_repo}` from `EngineContext.target_repo` (the project-level default)
-/// ONLY — it does NOT yet consult `task.target_repo`, so this precedence rule is
-/// NOT applied by the live engine today. Work-items carry no `target_repo` in v1
-/// (see `EngineContext.target_repo` doc), so the gap is currently latent; this fn
-/// is kept as the canonical precedence home for when the engine threads a
-/// per-item `target_repo` override into the PathVars build.
+/// PRESERVED from the deleted single-task `pool` module at the ④d cleanup. The
+/// bounded-buffer engine's worker `invoke` (below) calls this to build the
+/// PathVars `${target_repo}` (R, ④d gap closed): a work-item's own `target_repo`
+/// overrides the project-level default. Work-items carry no per-item `target_repo`
+/// in v1, so the override is latent today, but the precedence rule is applied by
+/// the live engine rather than binding the project default alone.
 pub fn effective_target_repo(
     task_target: Option<&str>,
     project_default: Option<&std::path::Path>,
@@ -1178,8 +1176,12 @@ async fn invoke(
 ) -> Result<Vec<OutputItem>, EngineError> {
     let now = now_unix();
     let mut vars = PathVars::new(&ctx.project_root).with_task_id(&task.id.0);
-    if let Some(repo) = &ctx.target_repo {
-        vars = vars.with_target_repo(repo.clone());
+    // `${target_repo}` binds to the task's own value, else the project-level
+    // default (A5) — task overrides project, via the single precedence fn. (Work-
+    // items carry no per-item target_repo in v1, so this is latent today, but the
+    // rule is now applied by the live engine rather than only by the deleted pool.)
+    if let Some(repo) = effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref()) {
+        vars = vars.with_target_repo(repo);
     }
     // Grant write access to this stage's artifact dir (the L1 write-access fix):
     // inject it into the team scope's writes for this invocation.
@@ -2251,5 +2253,71 @@ mod tests {
         assert_eq!(sanitize_key(""), "item");
         assert_eq!(sanitize_key("///"), "item");
         assert_eq!(sanitize_key("a.b"), "a-b");
+    }
+
+    // ---- Task 2: ${target_repo} task>project precedence in the engine ----
+
+    /// A producer team whose scope READS `${target_repo}` so the resolved repo
+    /// surfaces in the invocation's `add_dirs` (observable via FakeRunner.received).
+    fn team_reading_target_repo(id: &str) -> Team {
+        let mut t = team(id, None, Role::Producer, 8);
+        t.scope.reads.push("${target_repo}".into());
+        t
+    }
+
+    #[tokio::test]
+    async fn invoke_binds_task_target_repo_over_the_project_default() {
+        let p = pipeline(vec![team_reading_target_repo("research")]);
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: alpha")));
+        let mut ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
+        // Project default repo set on the context.
+        ctx.target_repo = Some(PathBuf::from("/proj-repo"));
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        // The work-item carries its OWN target_repo — it must win.
+        let item = Task::work_item(
+            "proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(),
+            "research".into(), None, Some("/task-repo".into()), 100,
+        );
+        ctx.tasks.insert(&item).await.unwrap();
+
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let received = recorder.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let add_dirs = &received[0].add_dirs;
+        assert!(
+            add_dirs.iter().any(|d| d == "/task-repo"),
+            "task repo must win; add_dirs = {add_dirs:?}"
+        );
+        assert!(
+            !add_dirs.iter().any(|d| d == "/proj-repo"),
+            "project default must NOT appear when the task overrides it; add_dirs = {add_dirs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_falls_back_to_the_project_default_target_repo() {
+        let p = pipeline(vec![team_reading_target_repo("research")]);
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: alpha")));
+        let mut ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
+        ctx.target_repo = Some(PathBuf::from("/proj-repo"));
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        // The work-item carries NO target_repo → the project default applies.
+        let item = Task::work_item(
+            "proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(),
+            "research".into(), None, None, 100,
+        );
+        ctx.tasks.insert(&item).await.unwrap();
+
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let received = recorder.received.lock().unwrap();
+        assert!(
+            received[0].add_dirs.iter().any(|d| d == "/proj-repo"),
+            "project default must apply when the task carries none; add_dirs = {:?}",
+            received[0].add_dirs
+        );
     }
 }
