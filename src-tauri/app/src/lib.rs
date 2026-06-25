@@ -53,6 +53,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (12, include_str!("../migrations/012_runtime_stores.sql")),
         (13, include_str!("../migrations/013_lifecycle_hardening.sql")),
         (14, include_str!("../migrations/014_task_worktree.sql")),
+        (15, include_str!("../migrations/015_usage_budget_recalibrate.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -2175,9 +2176,34 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 14, "all fourteen migrations recorded");
+        assert_eq!(version, 15, "all fifteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+
+    // LF34: migration 015 bumps existing installs off the old input+output-only
+    // default budget (2_600_000) to the all-tokens calibration (190_000_000),
+    // but never clobbers a value the operator tuned in Settings.
+    #[tokio::test]
+    async fn migration_015_bumps_legacy_budget_but_preserves_tuned() {
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        // legacy install: row exists at the old default
+        let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/005_usage.sql")).execute(&pool).await.unwrap();
+        // simulate an OLD install whose 005 had seeded 2_600_000 (override the fresh 190M):
+        sqlx::query("UPDATE usage_config SET window_budget = 2600000 WHERE id = 1").execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/015_usage_budget_recalibrate.sql")).execute(&pool).await.unwrap();
+        let b: i64 = sqlx::query_scalar("SELECT window_budget FROM usage_config WHERE id = 1").fetch_one(&pool).await.unwrap();
+        assert_eq!(b, 190_000_000); // legacy default bumped
+
+        // a tuned install is NOT clobbered
+        let pool2 = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/005_usage.sql")).execute(&pool2).await.unwrap();
+        sqlx::query("UPDATE usage_config SET window_budget = 5000000 WHERE id = 1").execute(&pool2).await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/015_usage_budget_recalibrate.sql")).execute(&pool2).await.unwrap();
+        let b2: i64 = sqlx::query_scalar("SELECT window_budget FROM usage_config WHERE id = 1").fetch_one(&pool2).await.unwrap();
+        assert_eq!(b2, 5_000_000); // user-tuned value preserved
     }
 
     #[test]
