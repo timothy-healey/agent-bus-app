@@ -23,6 +23,8 @@ import {
   setTeamRole,
   setTeamStoreCapacity,
   setTeamWorkers,
+  setJoinQuorum,
+  setJoinCancelOnReject,
 } from "../draft";
 
 /// The node drawer (vet F1): a generic right-side container whose CONTENTS are
@@ -529,7 +531,6 @@ function ForkEditor({ draft, id }: { draft: DraftPipeline; id: string }) {
 function JoinEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void }) {
   const j = draft.joins.find((x) => x.id === id);
   if (!j) return null;
-  const setJoin = (patch: Partial<typeof j>) => onChange({ ...draft, joins: draft.joins.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
   const m = j.waits_for.length;
 
   return (
@@ -559,7 +560,7 @@ function JoinEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string;
             placeholder={`all ${m}`}
             onChange={(e) => {
               const v = e.target.value === "" ? undefined : Math.max(1, Number(e.target.value) || 1);
-              setJoin({ quorum: v });
+              onChange(setJoinQuorum(draft, id, v));
             }}
             style={{ ...inp, width: 80 }}
           />
@@ -575,7 +576,7 @@ function JoinEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string;
             aria-label={`early cancel for ${id}`}
             checked={!!j.cancel_on_reject}
             disabled={j.quorum != null}
-            onChange={(e) => setJoin({ cancel_on_reject: e.target.checked })}
+            onChange={(e) => onChange(setJoinCancelOnReject(draft, id, e.target.checked))}
           />
           Cancel outstanding lanes the moment one fails
         </label>
