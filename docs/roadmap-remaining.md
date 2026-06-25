@@ -6,7 +6,7 @@ Single consolidated list of everything still deferred as of 2026-06-25, after th
 
 Status legend: `backlog` · `in progress` · `done`.
 
-## Lifecycle hardening — `in progress`
+## Lifecycle hardening — `done` (tag `plan-lifecycle-hardening`)
 Deferred from the lifecycle chunk as beyond-spec (analyses in `docs/research/lifecycle-candidates/`).
 All build on chunk 1's `ProcessRegistry` / killable spawner / brake wiring.
 
@@ -19,12 +19,14 @@ All build on chunk 1's `ProcessRegistry` / killable spawner / brake wiring.
 - **LH7 · Auto-meter no-kill policy** — `backlog` — the budget auto-brake must NOT kill-and-re-run in-flight work (pay-kill-pay loop); make the kill reason-aware (manual kills, auto soft-brakes). (LF20-11-auto-meter-no-kill-rerun-loop, LF20-12-auto-meter-kill-policy)
 - **LH8 · Killed-task stays re-runnable** — `backlog` — a live Stop-kill must leave the worker task non-terminal (retain claim / re-queue), not terminal `Failed`, or resume finds nothing to recover. (LF20-14-stop-kill-nonterminal-task-state)
 
-## Worktree isolation — `in progress`
+## Worktree isolation — `done` (tag `plan-worktree-isolation`)
 - **WT1 · Per-task git worktree creation for implementers** — `backlog` — per-task worktree *creation does not exist* (S2 honest note); workers run under `--add-dir` scopes and chunk 1 anchors them to the target repo. Before the pipeline reaches the `implement` stage, implementers need an isolated worktree (committed, never pushed) so they don't mutate the target repo directly. Extends chunk-1's `working_dir` resolution.
 - **WT2 · Worktree reset/hygiene on resume** — `backlog` — a killed mid-write `claude` leaves a dirty worktree; reset it to a clean baseline before the re-queued task re-runs. Pairs with LH8 + S2 cleanup. (LF20-14-worktree-hygiene-on-requeue, LF20-16-worktree-reset-on-resume)
 
 ## Open findings
-- **LF25** — `backlog` — `generator_ledger` records candidate keys *before* the work-item commits, so a key whose commit fails/backpressures is "found" but never stored → lost on resume. Fix: record after commit.
+- **LF25** — `done` (commit `874cca1`, in `plan-run-lifecycle-ux`) — generator ledger now records keys AFTER each work-item commits, so an uncommitted (backpressured) key is re-emittable on a later pass.
+- **LF33** — `done` (tag `plan-run-lifecycle-ux`) — frontend Start now emits `run-changed` + is idempotent (one active run); board/control auto-refresh, no run proliferation. Run dropdown demoted to history.
+- **LF34** — `done` (tag `plan-usage-cache-count`) — usage window total counts all tokens incl. cache; default budget recalibrated to ~190M; budget calibratable in Settings. A tunable estimate, not an exact claude.ai mirror.
 
 ## Authoring-UI deferrals (backend done, UI pending)
 - **AU1 · P2/P3 join authoring controls** — `backlog` — `cancel_on_reject` toggle + quorum (N-of-M) control in the wizard (runtime supports both).
