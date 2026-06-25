@@ -14,6 +14,8 @@ import { formatAge } from "../lib/age";
 import { rovingTabKey } from "../lib/roving";
 
 type Tab = "artifact" | "live log" | "review" | "lineage" | "history";
+// Module-scope so the ref-array index (FE2 roving tabindex) maps to a stable order.
+const TAB_ORDER: Tab[] = ["artifact", "live log", "review", "lineage", "history"];
 
 export interface CardDrawerProps {
   task: Task;
@@ -92,7 +94,6 @@ export function CardDrawer({
   // this version (B1); absent a body it falls back to v1 carry-over.
   const { reanchored, add, remove } = useComments(task.id, artifactPath, artifactMarkdown);
   const [tab, setTab] = useState<Tab>(initialTab ?? "artifact");
-  const TAB_ORDER: Tab[] = ["artifact", "live log", "review", "lineage", "history"];
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   function onTabKeyDown(e: React.KeyboardEvent<HTMLButtonElement>) {
     const next = rovingTabKey(e.key, TAB_ORDER.indexOf(tab), TAB_ORDER.length);
