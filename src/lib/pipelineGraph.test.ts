@@ -162,6 +162,34 @@ describe("forkNestingDepths", () => {
     expect(d.get("inner")).toBe(2);
   });
 
+  it("resolves nesting through a team hop before the nested fork", () => {
+    // outer lane "oa" is a TEAM that hands off (on_approve) to the inner fork —
+    // exercising the team->on_approve->fork path of the lane-walk, not just a
+    // direct fork-as-lane-entry. Mirrors validate.rs's multi-hop reachability.
+    const p = pipe({
+      schema_version: 2,
+      teams: [
+        tm("oa", "inner"),
+        tm("ia", "inner-join"),
+        tm("ib", "inner-join"),
+        tm("mid", "outer-join"),
+        tm("lb", "outer-join"),
+        tm("after"),
+      ],
+      forks: [
+        { id: "outer", lanes: ["oa", "lb"] },
+        { id: "inner", lanes: ["ia", "ib"] },
+      ],
+      joins: [
+        { id: "inner-join", waits_for: ["ia", "ib"], downstream: "mid" },
+        { id: "outer-join", waits_for: ["oa", "lb"], downstream: "after" },
+      ],
+    });
+    const d = forkNestingDepths(p);
+    expect(d.get("outer")).toBe(1);
+    expect(d.get("inner")).toBe(2); // reached via oa's on_approve, one hop in
+  });
+
   it("caps nesting depth at MAX_NESTING_DEPTH (3) even for a deeper chain", () => {
     // f1 lane -> f2 lane -> f3 lane -> f4 (would be depth 4, must clamp to 3).
     const p = pipe({

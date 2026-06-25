@@ -91,7 +91,7 @@ export function PipelineGraph({ pipeline }: { pipeline: Pipeline }) {
                 fill="var(--text-3)"
                 style={{ fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: "0.04em" }}
               >
-                {`${grp.forkId} · nested ·${grp.depth}`}
+                {`${grp.forkId} · nested · ${grp.depth}`}
               </text>
             </g>
           );
