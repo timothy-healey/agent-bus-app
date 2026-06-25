@@ -1,0 +1,15 @@
+{
+  "name": "agent-bus-app-playwright",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Local, macOS-runnable Playwright frontend E2E for agent-bus-app. Drives the real React app in Chromium against a mocked Tauri IPC (the E2E Vite alias build). Own dep island; fenced out of the default toolchain. See README.md.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "install:chromium": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
