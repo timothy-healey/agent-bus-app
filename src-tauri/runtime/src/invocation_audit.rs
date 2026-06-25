@@ -8,6 +8,7 @@
 
 use agent_bus_core::Verdict;
 use runners::output::RunnerError;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use thiserror::Error;
 
@@ -87,6 +88,52 @@ pub struct AuditUsage {
     pub output_tokens: u64,
     pub cache_creation: u64,
     pub cache_read: u64,
+}
+
+/// The L3 read DTO — one settled (or in-flight) invocation as the CardDrawer
+/// history panel surfaces it. This is the ONLY shape that crosses the Runtime OHS
+/// for `list_invocations`: the audit idiom (the split `outcome_kind` / `outcome`
+/// columns, the raw usage struct) stays sealed behind it. `outcome` is the single
+/// encoded string the frontend classifier reads: `verdict:approve|revise|reject`
+/// for a settled model verdict, `error:<class>` for an operational failure, or
+/// empty for an in-flight (not-yet-settled) row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvocationRow {
+    pub invocation_id: String,
+    pub team_id: String,
+    pub model: String,
+    pub attempts: u32,
+    pub started_at: i64,
+    pub settled_at: Option<i64>,
+    /// `verdict:<x>` / `error:<class>` / `""` (in-flight). See the struct doc.
+    pub outcome: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl From<InvocationAudit> for InvocationRow {
+    fn from(a: InvocationAudit) -> Self {
+        // Compose the single encoded `outcome` string from the split audit
+        // columns: a verdict row carries `outcome_kind = "verdict"` + a bare
+        // `approve|revise|reject`; an error row already stores `error:<class>`.
+        // An unsettled row (both NULL) encodes as the empty string.
+        let outcome = match (a.outcome_kind.as_deref(), a.outcome.as_deref()) {
+            (Some("verdict"), Some(v)) => format!("verdict:{v}"),
+            (_, Some(o)) => o.to_string(),
+            _ => String::new(),
+        };
+        InvocationRow {
+            invocation_id: a.invocation_id,
+            team_id: a.team_id,
+            model: a.model,
+            attempts: a.attempts,
+            started_at: a.started_at,
+            settled_at: a.settled_at,
+            outcome,
+            input_tokens: a.usage.input_tokens,
+            output_tokens: a.usage.output_tokens,
+        }
+    }
 }
 
 /// One audit row as read back (for tests / a future viewer).
@@ -234,6 +281,23 @@ impl InvocationAuditStore {
         .await?;
         Ok(rows.into_iter().map(row_to_audit).collect())
     }
+
+    /// The L3 read: every invocation for a task as the sealed `InvocationRow`
+    /// DTO, NEWEST FIRST (the card's headline reason is `rows[0]`). The audit
+    /// idiom does not leak — only `InvocationRow` crosses the OHS.
+    pub async fn list_rows_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<InvocationRow>, InvocationAuditError> {
+        let rows = sqlx::query_as::<_, AuditRow>(&format!(
+            "{} WHERE task_id = ? ORDER BY started_at DESC",
+            Self::SELECT
+        ))
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_audit).map(InvocationRow::from).collect())
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +366,71 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].started_at, 10);
         assert_eq!(rows[1].started_at, 20);
+    }
+
+    #[tokio::test]
+    async fn list_rows_for_task_is_newest_first_and_encodes_outcome() {
+        let store = InvocationAuditStore::new(fresh_pool().await);
+        // oldest: a settled approve verdict with usage.
+        let i1 = store.record_start("T-row", "research", "m1", 1, 10).await.unwrap();
+        let usage = AuditUsage { model: "m1".into(), input_tokens: 7, output_tokens: 3, cache_creation: 0, cache_read: 0 };
+        store.record_settle(&i1, &InvocationOutcome::Verdict(Verdict::Approve), &usage, 11).await.unwrap();
+        // newest: a settled error (the headline reason).
+        let i2 = store.record_start("T-row", "writers", "m2", 2, 20).await.unwrap();
+        let err = RunnerError::ModelUnavailable("nope".into());
+        store.record_settle(&i2, &InvocationOutcome::Error(ErrorClass::of(&err)), &AuditUsage::default(), 21).await.unwrap();
+
+        let rows = store.list_rows_for_task("T-row").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        // newest-first: the error row leads (the card's headline).
+        assert_eq!(rows[0].team_id, "writers");
+        assert_eq!(rows[0].outcome, "error:model_unavailable");
+        assert_eq!(rows[0].attempts, 2);
+        // the verdict row encodes with the `verdict:` prefix + carries usage.
+        assert_eq!(rows[1].team_id, "research");
+        assert_eq!(rows[1].outcome, "verdict:approve");
+        assert_eq!(rows[1].input_tokens, 7);
+        assert_eq!(rows[1].output_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn list_rows_in_flight_row_encodes_empty_outcome() {
+        let store = InvocationAuditStore::new(fresh_pool().await);
+        store.record_start("T-if", "research", "m", 1, 10).await.unwrap();
+        let rows = store.list_rows_for_task("T-if").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "", "an unsettled row has no outcome yet");
+        assert_eq!(rows[0].settled_at, None);
+    }
+
+    #[test]
+    fn invocation_row_wire_contract_serializes_camel_free_snake_fields() {
+        // Wire-contract: the JSON the OHS emits carries exactly these snake_case
+        // fields (the TS `InvocationRow` mirrors them). Seals the DTO shape.
+        let row = InvocationRow {
+            invocation_id: "I-1".into(),
+            team_id: "research".into(),
+            model: "claude-opus-4-8".into(),
+            attempts: 2,
+            started_at: 100,
+            settled_at: Some(110),
+            outcome: "verdict:reject".into(),
+            input_tokens: 50,
+            output_tokens: 12,
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["invocation_id"], "I-1");
+        assert_eq!(v["team_id"], "research");
+        assert_eq!(v["model"], "claude-opus-4-8");
+        assert_eq!(v["attempts"], 2);
+        assert_eq!(v["started_at"], 100);
+        assert_eq!(v["settled_at"], 110);
+        assert_eq!(v["outcome"], "verdict:reject");
+        assert_eq!(v["input_tokens"], 50);
+        assert_eq!(v["output_tokens"], 12);
+        // round-trips back intact.
+        let back: InvocationRow = serde_json::from_value(v).unwrap();
+        assert_eq!(back, row);
     }
 
     #[test]
