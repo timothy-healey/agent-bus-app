@@ -52,6 +52,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (11, include_str!("../migrations/011_skill_sources.sql")),
         (12, include_str!("../migrations/012_runtime_stores.sql")),
         (13, include_str!("../migrations/013_lifecycle_hardening.sql")),
+        (14, include_str!("../migrations/014_task_worktree.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -1320,6 +1321,12 @@ pub fn run() {
             sql: include_str!("../migrations/013_lifecycle_hardening.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 14,
+            description: "task worktree_path — per-work-item git worktree isolation",
+            sql: include_str!("../migrations/014_task_worktree.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     // Live child process-group registry (LF20): the killable spawners register
@@ -1982,11 +1989,19 @@ mod migration_tests {
         .unwrap();
         assert_eq!(lh_tables, 2, "migration 013 created live_processes + brake_state");
 
+        let worktree_path_cols: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('tasks') WHERE name='worktree_path'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(worktree_path_cols, 1, "migration 014 tasks.worktree_path present exactly once");
+
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 13, "all thirteen migrations recorded");
+        assert_eq!(version, 14, "all fourteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
