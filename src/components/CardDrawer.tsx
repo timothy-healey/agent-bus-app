@@ -155,7 +155,9 @@ export function CardDrawer({
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div style={head}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+        {/* paddingRight clears the Drawer's absolute close ✕ (top:10/right:12) so
+            the stage·attempts text never sits under it (LF30). */}
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, paddingRight: "var(--sp-7)" }}>
           <span style={{ color: "var(--accent)", fontSize: 12 }}>{task.id}</span>
           <span style={{ color: "var(--text-3)", fontSize: 11 }}>
             {task.current_stage} · a{task.attempts}
