@@ -170,6 +170,20 @@ export async function onTaskLog(cb: (log: TaskLog) => void): Promise<UnlistenFn>
   return await listen<TaskLog>(EVENTS.taskLog, (e) => cb(e.payload));
 }
 
+/// A generator (source) pass started/settled (LF31). The transient board card
+/// reads this. Mirrors the Rust `generator-status` payload.
+export interface GeneratorStatus {
+  run_id: string;
+  stage: string;
+  task_id: string;
+  active: boolean;
+}
+
+/// Subscribe to backend generator (source) pass status events (LF31).
+export async function onGeneratorStatus(cb: (s: GeneratorStatus) => void): Promise<UnlistenFn> {
+  return await listen<GeneratorStatus>(EVENTS.generatorStatus, (e) => cb(e.payload));
+}
+
 /// Subscribe to backend `run-changed` events (a run started/completed — ④e). The
 /// payload is the affected run id; the board + run selector refetch.
 export async function onRunChanged(cb: (runId: string) => void): Promise<UnlistenFn> {
