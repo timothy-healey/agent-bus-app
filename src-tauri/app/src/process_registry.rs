@@ -4,53 +4,96 @@
 //! SIGKILL). Deliberately lives in the `app` crate: no Runner/ChatRunner ACL
 //! trait ever gains process types — process control is a root concern.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+/// What the spawner must do after attempting to register a freshly-spawned child.
+pub enum RegisterDecision {
+    /// The pgid was recorded; proceed normally (deregister on completion).
+    Registered,
+    /// A kill is in progress (latch set): the spawner must immediately kill the
+    /// child it just spawned and NOT track it. Closes the spawn-after-snapshot
+    /// and register-after-spawn TOCTOU windows.
+    KillImmediately,
+}
+
+/// The lock-guarded interior of the registry: the live process-group map plus
+/// the kill latch. One critical section orders the latch read/write with the
+/// map so a register cannot race past an in-progress kill (LH1).
+#[derive(Default)]
+struct Inner {
+    /// pgid -> owned child handle (LH2: held until reaped, so kill_all never
+    /// signals a recycled pgid). For LH1a the value is `()`, upgraded in LH2a.
+    groups: HashMap<i32, ()>,
+    /// Latch: while set, no new child may register (it self-kills instead).
+    killing: bool,
+}
 
 /// Shared registry of live child process-group ids (pgid == leader pid because
 /// the spawner sets `.process_group(0)`). Cloned behind an `Arc` at the root.
 #[derive(Default)]
 pub struct ProcessRegistry {
-    /// The set of currently-live process-group ids.
-    groups: Mutex<HashSet<i32>>,
+    /// The live process-group map + kill latch, behind one lock.
+    inner: Mutex<Inner>,
 }
 
 impl ProcessRegistry {
     pub fn new() -> Self {
         Self {
-            groups: Mutex::new(HashSet::new()),
+            inner: Mutex::new(Inner::default()),
         }
+    }
+
+    /// Set the killing latch (called at the start of kill_all / kill_workers).
+    pub fn begin_killing(&self) {
+        self.inner.lock().unwrap().killing = true;
+    }
+
+    /// Clear the latch — re-enable normal spawning (wire on brake-off / resume).
+    pub fn end_killing(&self) {
+        self.inner.lock().unwrap().killing = false;
+    }
+
+    /// Register a freshly-spawned pgid under the lock. If the latch is set the
+    /// spawner is told to self-kill its child instead of tracking it.
+    pub fn register_pgid(&self, pgid: i32) -> RegisterDecision {
+        let mut g = self.inner.lock().unwrap();
+        if g.killing {
+            return RegisterDecision::KillImmediately;
+        }
+        g.groups.insert(pgid, ());
+        RegisterDecision::Registered
     }
 
     /// Record a live child process-group id (the spawner calls this right after
     /// spawn). Idempotent — re-registering the same pgid is a no-op.
     pub fn register(&self, pgid: i32) {
-        self.groups.lock().unwrap().insert(pgid);
+        self.inner.lock().unwrap().groups.insert(pgid, ());
     }
 
     /// Drop a process-group id once its child has been waited on. A pgid that is
     /// not present is fine (best-effort).
     pub fn deregister(&self, pgid: i32) {
-        self.groups.lock().unwrap().remove(&pgid);
+        self.inner.lock().unwrap().groups.remove(&pgid);
     }
 
     /// Count of currently-registered groups (test/inspection helper).
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.groups.lock().unwrap().len()
+        self.inner.lock().unwrap().groups.len()
     }
 
     /// Whether the registry currently holds no live groups (test/inspection
     /// helper).
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.groups.lock().unwrap().is_empty()
+        self.inner.lock().unwrap().groups.is_empty()
     }
 
     /// Snapshot of the live pgids (used by `kill_all` so the kill loop does not
     /// hold the lock while sleeping).
     fn snapshot(&self) -> Vec<i32> {
-        self.groups.lock().unwrap().iter().copied().collect()
+        self.inner.lock().unwrap().groups.keys().copied().collect()
     }
 
     /// Best-effort graceful kill of every registered process GROUP: SIGTERM the
@@ -62,7 +105,7 @@ impl ProcessRegistry {
     pub fn kill_all(&self) {
         let pgids = self.snapshot();
         if pgids.is_empty() {
-            self.groups.lock().unwrap().clear();
+            self.inner.lock().unwrap().groups.clear();
             return;
         }
         #[cfg(unix)]
@@ -108,7 +151,7 @@ impl ProcessRegistry {
             );
         }
         // Drain regardless of platform/outcome — these handles are spent.
-        self.groups.lock().unwrap().clear();
+        self.inner.lock().unwrap().groups.clear();
     }
 }
 
@@ -221,6 +264,24 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_under_a_set_latch_returns_kill_immediately() {
+        let reg = ProcessRegistry::new();
+        reg.begin_killing(); // latch on
+        // A spawner that registers while the latch is set is told to self-kill.
+        assert!(matches!(reg.register_pgid(4321), RegisterDecision::KillImmediately));
+        assert_eq!(reg.len(), 0, "a latched register must not retain the pgid");
+    }
+
+    #[test]
+    fn register_clears_to_registered_after_latch_off() {
+        let reg = ProcessRegistry::new();
+        reg.begin_killing();
+        reg.end_killing(); // latch off (brake-off / resume)
+        assert!(matches!(reg.register_pgid(99), RegisterDecision::Registered));
+        assert_eq!(reg.len(), 1);
+    }
 
     #[test]
     fn register_then_deregister_leaves_the_set_empty() {
