@@ -16,20 +16,28 @@ describe("RunSelector", () => {
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
 
-  it("lists the runs and marks the active one", () => {
+  it("shows a history dropdown (labeled history) only when completed runs exist", () => {
     const runs = [run("R-aaaaaaaa"), run("R-bbbbbbbb", true)];
     render(<RunSelector runs={runs} selectedRun={runs[0]} activeRun={runs[0]} onSelect={() => {}} onStartRun={() => {}} braked={false} onStop={() => {}} onResume={() => {}} />);
-    const select = screen.getByRole("combobox", { name: /run/i }) as HTMLSelectElement;
+    const select = screen.getByRole("combobox", { name: /history/i }) as HTMLSelectElement;
     expect(select.value).toBe("R-aaaaaaaa");
     expect(screen.getByText(/aaaaaaaa · active/i)).toBeInTheDocument();
     expect(screen.getByText(/bbbbbbbb · completed/i)).toBeInTheDocument();
   });
 
-  it("calls onSelect with the chosen run id", () => {
-    const runs = [run("R-aaaaaaaa"), run("R-bbbbbbbb")];
+  it("hides the dropdown when the only run is the active one (no past runs to inspect)", () => {
+    const runs = [run("R-aaaaaaaa")];
+    render(<RunSelector runs={runs} selectedRun={runs[0]} activeRun={runs[0]} onSelect={() => {}} onStartRun={() => {}} braked={false} onStop={() => {}} onResume={() => {}} />);
+    // no past (completed) runs -> no history dropdown; the ● Running control carries the state.
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.getByText(/running/i)).toBeInTheDocument();
+  });
+
+  it("calls onSelect with the chosen run id from the history dropdown", () => {
+    const runs = [run("R-aaaaaaaa"), run("R-bbbbbbbb", true)];
     const onSelect = vi.fn();
     render(<RunSelector runs={runs} selectedRun={runs[0]} activeRun={runs[0]} onSelect={onSelect} onStartRun={() => {}} braked={false} onStop={() => {}} onResume={() => {}} />);
-    fireEvent.change(screen.getByRole("combobox", { name: /run/i }), { target: { value: "R-bbbbbbbb" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /history/i }), { target: { value: "R-bbbbbbbb" } });
     expect(onSelect).toHaveBeenCalledWith("R-bbbbbbbb");
   });
 
