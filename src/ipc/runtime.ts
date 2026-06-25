@@ -32,6 +32,9 @@ export interface Task {
   /// The work-item's stable candidate/lineage key (④b). The board labels cards by
   /// this (fallback to topic/id). `null` for legacy tasks.
   item_key?: string | null;
+  /// The per-work-item git worktree the task runs in (worktree isolation). `null`
+  /// for read-only stages and legacy tasks. Surfaced for a future diff viewer.
+  worktree_path?: string | null;
 }
 
 export interface BrakeState {
