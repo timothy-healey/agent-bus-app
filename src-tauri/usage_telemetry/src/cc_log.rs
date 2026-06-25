@@ -53,11 +53,13 @@ impl CcUsageStore {
         Ok(new)
     }
 
-    /// Window total: SUM(input+output) for rows newer than since_ts. This is the
-    /// v1 window-total source (D3).
+    /// Window total: all tokens incl. cache (input+output+cache_creation+
+    /// cache_read) for rows newer than since_ts — the throughput basis the
+    /// rate-limit window meters; cache_read dominates real usage (LF34). This is
+    /// the v1 window-total source (D3).
     pub async fn window_tokens(&self, since_ts: i64) -> Result<u64, CcUsageError> {
         let (t,): (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
+            "SELECT COALESCE(SUM(input_tokens + output_tokens + cache_creation + cache_read), 0)
              FROM cc_usage_log WHERE ts > ?",
         )
         .bind(since_ts)
@@ -66,8 +68,9 @@ impl CcUsageStore {
         Ok(t as u64)
     }
 
-    /// Tokens (input+output) in the last `secs` seconds before `now` — the burn
-    /// rate's numerator (D7).
+    /// All tokens incl. cache (input+output+cache_creation+cache_read) in the
+    /// last `secs` seconds before `now` — the burn rate's numerator (D7), on the
+    /// same all-tokens basis as the window total (LF34).
     pub async fn recent_tokens(&self, now_ts: i64, secs: i64) -> Result<u64, CcUsageError> {
         self.window_tokens(now_ts - secs).await
     }
@@ -121,11 +124,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_tokens_sums_input_plus_output_in_window() {
+    async fn window_tokens_sums_all_token_classes_in_window() {
         let store = CcUsageStore::new(fresh_pool().await);
         store.ingest(&parse_transcript(SAMPLE)).await.unwrap();
-        // msg_aaa: 1200+300=1500 ; msg_bbb: 500+120=620 ; total 2120
-        assert_eq!(store.window_tokens(0).await.unwrap(), 2120);
+        // all tokens incl. cache — msg_aaa: 1200+300+40+10=1550 ; msg_bbb:
+        // 500+120+0+0=620 ; total 2170 (the +50 over the old 2120 is the
+        // cache_creation+cache_read on msg_aaa).
+        assert_eq!(store.window_tokens(0).await.unwrap(), 2170);
+    }
+
+    #[tokio::test]
+    async fn window_tokens_includes_cache() {
+        let store = CcUsageStore::new(fresh_pool().await);
+        store.ingest(&parse_transcript(SAMPLE)).await.unwrap();
+        // msg_aaa: 1200+300+40+10 = 1550 ; msg_bbb: 500+120+0+0 = 620 ; total 2170
+        // (the +50 over the old 2120 is the cache_creation+cache_read on msg_aaa)
+        assert_eq!(store.window_tokens(0).await.unwrap(), 2170);
     }
 
     #[tokio::test]
