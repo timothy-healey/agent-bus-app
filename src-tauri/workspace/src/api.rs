@@ -214,22 +214,62 @@ pub fn resolve_under_root(root: &str, rel_path: &str) -> Result<PathBuf, String>
     Ok(out)
 }
 
-/// Read an artifact file (spec/plan/critique markdown) by a project-root-relative
-/// path. The path is constrained to the project root — Review's reading surface,
-/// published as a Workspace OHS command.
+/// The absolute, app-owned artifact base for `project_id` under the Tauri
+/// app-data dir: `<app_data>/projects/<project_id>/artifacts` (LF26). The single
+/// place this layout is spelled so the engine, the reader, and the delete cascade
+/// agree. PURE.
+pub fn artifact_base_for(app_data: &Path, project_id: &str) -> PathBuf {
+    app_data.join("projects").join(project_id).join("artifacts")
+}
+
+/// Resolve `path` against the artifact `base`, allowing an ABSOLUTE path only
+/// when it is inside `base`, or a relative path resolved under `base`. Rejects
+/// anything that escapes the base (the new escape guard for the app-owned base,
+/// replacing `resolve_under_root`'s reject-all-absolutes for artifacts). PURE.
+pub fn resolve_under_base(base: &Path, path: &str) -> Result<PathBuf, String> {
+    let p = Path::new(path);
+    let candidate = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        let mut out = base.to_path_buf();
+        for comp in p.components() {
+            match comp {
+                Component::Normal(c) => out.push(c),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err("artifact path may not escape the artifact base".into());
+                }
+            }
+        }
+        out
+    };
+    if !candidate.starts_with(base) {
+        return Err("artifact path is outside the project artifact base".into());
+    }
+    Ok(candidate)
+}
+
+/// Read an artifact file (spec/plan/critique markdown) by path. Artifacts live at
+/// the absolute, app-owned base `<app_data>/projects/<id>/artifacts` (LF26); the
+/// path (absolute under the base, or relative to it) is escape-guarded to that
+/// base. Review's reading surface, published as a Workspace OHS command.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn read_artifact(
+    app: tauri::AppHandle,
     state: tauri::State<'_, WorkspaceState>,
     project_id: String,
     path: String,
 ) -> Result<String, String> {
-    let project = state
+    use tauri::Manager;
+    // Confirm the project exists (keeps the not-found behaviour).
+    let _ = state
         .store
-        .get(&ProjectId(project_id))
+        .get(&ProjectId(project_id.clone()))
         .await
         .map_err(|e| e.to_string())?;
-    let root = project.root_path.to_string_lossy();
-    let full = resolve_under_root(&root, &path)?;
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let base = artifact_base_for(&app_data, &project_id);
+    let full = resolve_under_base(&base, &path)?;
     std::fs::read_to_string(&full).map_err(|e| e.to_string())
 }
 
@@ -431,6 +471,23 @@ mod tests {
     use crate::project::Project;
     use crate::store::ProjectStore;
     use std::sync::Arc as StdArc;
+
+    #[test]
+    fn artifact_base_for_project_is_app_data_projects_id_artifacts() {
+        let base = super::artifact_base_for(std::path::Path::new("/data"), "proj-7");
+        assert_eq!(base, std::path::PathBuf::from("/data/projects/proj-7/artifacts"));
+    }
+
+    #[test]
+    fn resolve_under_base_accepts_absolute_inside_and_rejects_outside() {
+        let base = std::path::PathBuf::from("/data/projects/p/artifacts");
+        let ok = super::resolve_under_base(&base, "/data/projects/p/artifacts/spec/k-v1.md").unwrap();
+        assert_eq!(ok, std::path::PathBuf::from("/data/projects/p/artifacts/spec/k-v1.md"));
+        assert!(super::resolve_under_base(&base, "/etc/passwd").is_err());
+        // a relative path is still accepted, resolved under the base
+        let rel = super::resolve_under_base(&base, "spec/k-v1.md").unwrap();
+        assert_eq!(rel, std::path::PathBuf::from("/data/projects/p/artifacts/spec/k-v1.md"));
+    }
 
     async fn state_with_project(root: &std::path::Path) -> (WorkspaceState, String) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
