@@ -21,14 +21,15 @@ impl StreamAccumulator {
         Self::default()
     }
 
-    /// Feed one stream-json line (already a parsed Value). Returns the prose text
-    /// *this* event added (empty for non-prose events) so a streaming caller can
-    /// forward it; the accumulator keeps the running full text for the final
-    /// RunnerOutput. Returns Err only on a recognised rate-limit error event.
+    /// Feed one stream-json line (already a parsed Value). Returns the tagged
+    /// `LogDelta`s this event produced (empty for non-prose events) so a streaming
+    /// caller can forward them; the accumulator keeps the running full text for the
+    /// final RunnerOutput (Output blocks only — thinking is display-only and never
+    /// accumulated). Returns Err only on a recognised rate-limit error event.
     /// (Mirrors `llm_chat::stream_json`'s `feed`, by design — separate ACL; vet F3.)
-    pub fn feed(&mut self, v: &Value) -> Result<String, RunnerError> {
+    pub fn feed(&mut self, v: &Value) -> Result<Vec<crate::output::LogDelta>, RunnerError> {
         let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let mut delta = String::new();
+        let mut deltas: Vec<crate::output::LogDelta> = Vec::new();
 
         // Rate-limit detection: an error event whose message mentions rate/429.
         if ty == "error" || v.get("is_error").and_then(|b| b.as_bool()) == Some(true) {
@@ -53,14 +54,30 @@ impl StreamAccumulator {
                     .and_then(|c| c.as_array())
                 {
                     for block in content {
-                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                delta.push_str(t);
+                        match block.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => {
+                                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                    self.text.push_str(t);
+                                    deltas.push(crate::output::LogDelta {
+                                        kind: crate::output::LogKind::Output,
+                                        text: t.to_string(),
+                                    });
+                                }
                             }
+                            Some("thinking") => {
+                                if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
+                                    // Thinking is forwarded for display ONLY — never
+                                    // pushed into self.text (verdict/item parsing).
+                                    deltas.push(crate::output::LogDelta {
+                                        kind: crate::output::LogKind::Thinking,
+                                        text: t.to_string(),
+                                    });
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
-                self.text.push_str(&delta);
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                     self.add_usage(u);
                 }
@@ -87,7 +104,7 @@ impl StreamAccumulator {
             }
             _ => {}
         }
-        Ok(delta)
+        Ok(deltas)
     }
 
     fn add_usage(&mut self, u: &Value) {
@@ -318,7 +335,7 @@ pub fn parse_stream(raw: &str, model: &str) -> Result<RunnerOutput, RunnerError>
 pub fn parse_stream_streaming(
     raw: &str,
     model: &str,
-    on_delta: &mut dyn FnMut(&str),
+    on_delta: &mut dyn FnMut(&crate::output::LogDelta),
 ) -> Result<RunnerOutput, RunnerError> {
     let mut acc = StreamAccumulator::new();
     for line in raw.lines() {
@@ -328,9 +345,8 @@ pub fn parse_stream_streaming(
         }
         let v: Value = serde_json::from_str(line)
             .map_err(|e| RunnerError::Other(format!("bad stream-json line: {e}")))?;
-        let delta = acc.feed(&v)?;
-        if !delta.is_empty() {
-            on_delta(&delta);
+        for d in acc.feed(&v)? {
+            on_delta(&d);
         }
     }
     acc.finish(model)
@@ -390,21 +406,37 @@ mod tests {
     }
 
     #[test]
-    fn feed_returns_prose_delta_for_assistant_event_only() {
+    fn feed_tags_text_as_output_and_thinking_as_thinking_and_excludes_thinking_from_final() {
+        use crate::output::{LogDelta, LogKind};
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","model":"m"}"#, "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"let me reason"},{"type":"text","text":"VERDICT: approve"}]}}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#
+        );
+        let mut seen: Vec<LogDelta> = vec![];
+        let out = parse_stream_streaming(raw, "m", &mut |d: &LogDelta| seen.push(d.clone())).unwrap();
+        // both channels were forwarded, in document order (thinking before text)
+        assert_eq!(seen, vec![
+            LogDelta { kind: LogKind::Thinking, text: "let me reason".into() },
+            LogDelta { kind: LogKind::Output, text: "VERDICT: approve".into() },
+        ]);
+        // the verdict parsed from OUTPUT only; thinking never reached final_text
+        assert_eq!(out.verdict, agent_bus_core::Verdict::Approve);
+        assert!(!out.final_text.contains("let me reason"));
+    }
+
+    #[test]
+    fn feed_returns_output_delta_for_assistant_text_only() {
+        use crate::output::{LogDelta, LogKind};
         let mut acc = StreamAccumulator::new();
-        let sys: Value = serde_json::from_str(
-            r#"{"type":"system","subtype":"init","model":"m"}"#,
-        ).unwrap();
+        let sys: Value = serde_json::from_str(r#"{"type":"system","subtype":"init","model":"m"}"#).unwrap();
         let asst: Value = serde_json::from_str(
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello "}]}}"#,
         ).unwrap();
-        let res: Value = serde_json::from_str(
-            r#"{"type":"result","subtype":"success","result":"hello world"}"#,
-        ).unwrap();
-        assert_eq!(acc.feed(&sys).unwrap(), "");
-        assert_eq!(acc.feed(&asst).unwrap(), "hello ");
-        // the result line carries authoritative text but is NOT a streamed delta
-        assert_eq!(acc.feed(&res).unwrap(), "");
+        let res: Value = serde_json::from_str(r#"{"type":"result","subtype":"success","result":"hello world"}"#).unwrap();
+        assert!(acc.feed(&sys).unwrap().is_empty());
+        assert_eq!(acc.feed(&asst).unwrap(), vec![LogDelta { kind: LogKind::Output, text: "hello ".into() }]);
+        assert!(acc.feed(&res).unwrap().is_empty());
     }
 
     #[test]
@@ -481,13 +513,15 @@ ARTIFACT: artifacts/specs/gamma.md";
 
     #[test]
     fn streaming_parse_forwards_only_assistant_prose_and_returns_same_output() {
-        let mut deltas: Vec<String> = vec![];
-        let out = parse_stream_streaming(SAMPLE, "fallback-model", &mut |d| deltas.push(d.to_string())).unwrap();
+        use crate::output::{LogDelta, LogKind};
+        let mut deltas: Vec<LogDelta> = vec![];
+        let out = parse_stream_streaming(SAMPLE, "fallback-model", &mut |d| deltas.push(d.clone())).unwrap();
         // identical final output to the whole-buffer parse
         let plain = parse_stream(SAMPLE, "fallback-model").unwrap();
         assert_eq!(out, plain);
         // the two assistant lines streamed their prose; the result line did not
-        assert_eq!(deltas, vec![
+        let texts: Vec<String> = deltas.iter().filter(|d| d.kind == LogKind::Output).map(|d| d.text.clone()).collect();
+        assert_eq!(texts, vec![
             "Analysing the repository.\n".to_string(),
             "VERDICT: approve\nARTIFACT: artifacts/analyses/T-1-v1.md".to_string(),
         ]);

@@ -288,7 +288,7 @@ mod tests {
         };
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let s = seen.clone();
-        let sink: LogSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
+        let sink: LogSink = Box::new(move |d: &LogDelta| s.lock().unwrap().push(d.text.clone()));
         // FakeRunner gets a streaming override in a later task; even with it, a
         // FakeRunner built without scripted deltas forwards nothing.
         let result = fake.invoke_stream(&req, &sink).await.unwrap();
