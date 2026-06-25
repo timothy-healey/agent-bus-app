@@ -9,6 +9,7 @@
 pub mod event;
 pub mod worker_log;
 pub mod cc_log;
+pub mod ingest;
 pub mod transcript;
 pub mod window;
 pub mod brake_policy;
