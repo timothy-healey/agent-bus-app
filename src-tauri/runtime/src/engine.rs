@@ -1007,15 +1007,14 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
         return Ok(StepOutcome::Retired);
     }
 
-    // Record the new keys in the ledger (dedup source of truth), then reserve +
-    // commit each into the downstream store as a work-item.
-    ctx.ledger.record_keys(&ctx.run_id, &source_team.id, &new_keys).await?;
+    // Reserve + commit each new key into the downstream store as a work-item,
+    // recording it in the ledger (dedup source of truth) only AFTER it commits.
     let mut committed: Vec<String> = Vec::new();
     for key in &new_keys {
         // Reserve the slot (block-before-commit). If a racing consumer filled the
         // store between the K computation and now, stop — backpressure for the
-        // rest. The recorded ledger key stays (it is genuinely a found candidate);
-        // a future pass will see it in `found` and skip re-emitting it.
+        // rest. Keys not yet committed are NOT recorded, so a future pass is free
+        // to re-emit them once there is room.
         if !ctx.stores.reserve(&ctx.run_id, &downstream).await? {
             break;
         }
@@ -1035,6 +1034,9 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
         );
         child.topic = topic_for_item(emitted.and_then(|i| i.description.as_deref()), key);
         ctx.tasks.insert(&child).await?;
+        // Record AFTER the commit so the ledger only ever holds keys that were
+        // genuinely placed downstream.
+        ctx.ledger.record_keys(&ctx.run_id, &source_team.id, std::slice::from_ref(key)).await?;
         committed.push(key.clone());
     }
 
@@ -2577,6 +2579,53 @@ mod tests {
         assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Generated { keys: vec!["only".into()] });
         assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Retired);
         assert_eq!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn generate_records_only_committed_keys_when_the_commit_loop_breaks_early() {
+        // The ledger is recorded AFTER each commit, so a key that is computed but
+        // never committed (the reserve loop breaks on backpressure) is NOT burned
+        // into the ledger — a future pass can re-emit it.
+        //
+        // We force a mid-loop break deterministically: team "spec" advertises a
+        // store capacity of 3 (so K = 3), but the actual store is ensured at
+        // capacity 2. This models a racing consumer that filled a slot between the
+        // K computation and the reserve loop — the third reserve fails.
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", None, Role::Producer, 3),
+        ]);
+        let runner = Arc::new(FakeRunner::new(vec![
+            Ok(items_out("KEY: a\nKEY: b\nKEY: c")),
+            Ok(items_out("KEY: c\nKEY: f")),
+        ]));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 2).await.unwrap(); // only 2 real slots
+        let source = &ctx.pipeline.teams[0];
+
+        // pass 1: K = 3, batch [a,b,c]; reserve a,b succeed then c fails -> break.
+        let o1 = generate_once(&ctx, source).await.unwrap();
+        match o1 {
+            StepOutcome::Generated { keys } => assert_eq!(keys, vec!["a", "b"]),
+            other => panic!("expected Generated, got {other:?}"),
+        }
+        // Only the committed keys are in the ledger; c was found but not committed.
+        let mut found: Vec<String> =
+            ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().into_iter().collect();
+        found.sort();
+        assert_eq!(found, vec!["a", "b"]);
+
+        // drain the store so there is room again
+        ctx.stores.release(&ctx.run_id, "spec").await.unwrap();
+        ctx.stores.release(&ctx.run_id, "spec").await.unwrap();
+
+        // pass 2: found {a,b}; batch [c,f] -> c is NOT deduped (never recorded), so
+        // both c and f are emitted. c was genuinely re-emittable.
+        let o2 = generate_once(&ctx, source).await.unwrap();
+        match o2 {
+            StepOutcome::Generated { keys } => assert_eq!(keys, vec!["c", "f"]),
+            other => panic!("expected Generated, got {other:?}"),
+        }
     }
 
     #[tokio::test]
