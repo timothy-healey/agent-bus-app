@@ -73,6 +73,19 @@ pub enum EngineError {
     NoRoute(String),
 }
 
+/// The git-unaware worktree seam (worktree isolation). The engine resolves an
+/// implementer's working dir through this; the app implements it over
+/// `workspace::worktree::GitCli`; tests inject a fake. Mirrors the `Runner`
+/// injection — no `git` idiom crosses into `runtime`.
+pub trait WorktreeProvider: Send + Sync {
+    /// Idempotent: ensure a worktree for (run_id, item_key) off `target_repo`'s
+    /// current HEAD exists; return its absolute path. Branch
+    /// `agent-bus/<run_id>/<item_key>`.
+    fn ensure(&self, run_id: &str, item_key: &str, target_repo: &str) -> Result<String, String>;
+    /// Reset a worktree to its branch baseline (discard a killed mid-write tree).
+    fn reset(&self, worktree_path: &str) -> Result<(), String>;
+}
+
 /// What one engine step did — surfaced so the driver + tests can assert behaviour.
 /// Mirrors the spec's worker-loop outcomes (idle / backpressure / settled / dry).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +184,10 @@ pub struct EngineContext {
     /// Per-invocation audit store (R3). `None` = no audit (runtime-only tests /
     /// pre-project boot). Best-effort: an audit write never fails a settle.
     pub audit: Option<Arc<crate::invocation_audit::InvocationAuditStore>>,
+    /// The injected worktree seam (worktree isolation). `None` in pure runtime
+    /// tests and topic-less runs ⇒ implementer stages fall back to the target-repo
+    /// `working_dir`, preserving chunk-1 behavior.
+    pub worktree_provider: Option<std::sync::Arc<dyn WorktreeProvider>>,
 }
 
 impl EngineContext {
@@ -249,7 +266,7 @@ fn now_unix() -> i64 {
 fn role_str(team: &Team) -> &'static str {
     match team.role {
         pipeline::model::Role::Reviewer => "reviewer",
-        pipeline::model::Role::Producer => "producer",
+        pipeline::model::Role::Producer | pipeline::model::Role::Implementer => "producer",
     }
 }
 
@@ -1518,6 +1535,7 @@ pub(crate) mod test_support {
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/008_nested_groups.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/014_task_worktree.sql")).execute(&pool).await.unwrap();
         pool
     }
 
@@ -1596,6 +1614,7 @@ pub(crate) mod test_support {
             usage_sink: None,
             log_sink: None,
             audit: None,
+            worktree_provider: None,
         }
     }
 
@@ -1614,6 +1633,36 @@ mod tests {
     use pipeline::model::Role;
     use runners::fake::FakeRunner;
     use runners::output::{RunnerOutput, RunnerUsage};
+
+    struct RecordingProvider {
+        ensure_calls: std::sync::Mutex<Vec<(String, String, String)>>,
+        reset_calls: std::sync::Mutex<Vec<String>>,
+        returns: String,
+    }
+    impl crate::engine::WorktreeProvider for RecordingProvider {
+        fn ensure(&self, run_id: &str, item_key: &str, target_repo: &str) -> Result<String, String> {
+            self.ensure_calls.lock().unwrap().push((run_id.into(), item_key.into(), target_repo.into()));
+            Ok(self.returns.clone())
+        }
+        fn reset(&self, worktree_path: &str) -> Result<(), String> {
+            self.reset_calls.lock().unwrap().push(worktree_path.into());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn worktree_provider_records_ensure_and_reset() {
+        let p = RecordingProvider {
+            ensure_calls: Default::default(),
+            reset_calls: Default::default(),
+            returns: "/proj/worktrees/R-1/alpha".into(),
+        };
+        let got = WorktreeProvider::ensure(&p, "R-1", "alpha", "/repo").unwrap();
+        assert_eq!(got, "/proj/worktrees/R-1/alpha");
+        WorktreeProvider::reset(&p, "/proj/worktrees/R-1/alpha").unwrap();
+        assert_eq!(p.ensure_calls.lock().unwrap()[0], ("R-1".into(), "alpha".into(), "/repo".into()));
+        assert_eq!(p.reset_calls.lock().unwrap()[0], "/proj/worktrees/R-1/alpha");
+    }
 
     fn approve_out() -> RunnerOutput {
         RunnerOutput { verdict: agent_bus_core::Verdict::Approve, artifact_path: None, final_text: String::new(), usage: RunnerUsage::default() }
@@ -2740,6 +2789,7 @@ mod tests {
             include_str!("../../app/migrations/007_invocation_audit.sql"),
             include_str!("../../app/migrations/008_nested_groups.sql"),
             include_str!("../../app/migrations/012_runtime_stores.sql"),
+            include_str!("../../app/migrations/014_task_worktree.sql"),
         ] {
             sqlx::query(sql).execute(&pool).await.unwrap();
         }
