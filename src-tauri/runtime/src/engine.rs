@@ -407,6 +407,7 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
             task.target_repo.clone(),
             now_unix(),
         );
+        child.topic = topic_for_item(first.description.as_deref(), &produced_key);
         if downstream_is_gate {
             // A gated item waits in the gate store for the human verdict — the
             // human is the consumer (Gates-as-stores). It is NOT queued for a
@@ -961,12 +962,11 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
         if !ctx.stores.reserve(&ctx.run_id, &downstream).await? {
             break;
         }
-        let artifact = items
-            .iter()
-            .find(|i| &i.key == key)
+        let emitted = items.iter().find(|i| &i.key == key);
+        let artifact = emitted
             .and_then(|i| i.artifact_path.clone())
             .or_else(|| Some(ctx.artifact_path(&source_team.id, key, 1)));
-        let child = Task::work_item(
+        let mut child = Task::work_item(
             run.project_id.clone(),
             ctx.pipeline.id.clone(),
             ctx.run_id.clone(),
@@ -976,6 +976,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
             ctx.target_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
             now_unix(),
         );
+        child.topic = topic_for_item(emitted.and_then(|i| i.description.as_deref()), key);
         ctx.tasks.insert(&child).await?;
         committed.push(key.clone());
     }
@@ -2330,6 +2331,33 @@ mod tests {
             .expect("a child work-item at the downstream stage");
         assert_eq!(child.project_id, run.project_id, "child must inherit the run's project id");
         assert_ne!(child.project_id, "proj", "must not be the old hardcoded placeholder");
+    }
+
+    #[tokio::test]
+    async fn generated_work_item_carries_the_description_as_its_topic() {
+        // A generator pass that emits one item WITH a DESCRIPTION: the committed
+        // child must carry the description as its topic (LF32).
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", None, Role::Producer, 8),
+        ]);
+        let runner = Arc::new(FakeRunner::always(items_out(
+            "KEY: lwv-x\nDESCRIPTION: Investigate the seam\nARTIFACT: artifacts/research/lwv-x.md",
+        )));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+
+        let outcome = generate_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(matches!(outcome, StepOutcome::Generated { .. }));
+
+        let child = ctx
+            .tasks
+            .claim_next_for_stage("spec", 200)
+            .await
+            .unwrap()
+            .expect("a child work-item at the downstream stage");
+        assert_eq!(child.topic, "Investigate the seam");
+        assert_eq!(child.item_key.as_deref(), Some("lwv-x"));
     }
 
     // ---- Task 6: run completion ----
