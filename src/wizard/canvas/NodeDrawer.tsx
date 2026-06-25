@@ -1,6 +1,7 @@
 import type React from "react";
 import type { CSSProperties } from "react";
 import type { DraftPipeline, DraftTeam, EffortMode } from "../../ipc/pipeline";
+import { regenerateTeamPrompt } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
 import { useState } from "react";
 import { Drawer } from "../../components/ui/Drawer";
@@ -52,6 +53,10 @@ interface NodeDrawerProps {
   /// select, stored repo-relative); the comma-separated text stays as the
   /// fallback. Absent (e.g. mid-create before a repo is bound) = text only.
   targetRepo?: string | null;
+  /// G5 — the Design Session dialogue session id. When present, a Team's drawer
+  /// offers a "regenerate prompt" action that runs the Step::Prompts design-session
+  /// logic for that one team over this session. Absent → the action is hidden.
+  sessionId?: string;
 }
 
 type Kind = "team" | "gate" | "fork" | "join" | "escalation" | "store" | "unknown";
@@ -72,7 +77,7 @@ function kindOf(draft: DraftPipeline, id: string): Kind {
   return "unknown";
 }
 
-export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], onDelete, targetRepo }: NodeDrawerProps) {
+export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], onDelete, targetRepo, sessionId }: NodeDrawerProps) {
   const open = selectedId != null;
   const kind = selectedId ? kindOf(draft, selectedId) : "unknown";
   // A store node shows its OWNING team id (not the synthetic `store:<id>`).
@@ -94,7 +99,7 @@ export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], 
               </Button>
             )}
           </header>
-          {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} skills={skills} targetRepo={targetRepo} />}
+          {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} skills={skills} targetRepo={targetRepo} sessionId={sessionId} />}
           {kind === "store" && <StoreEditor draft={draft} teamId={displayId} onChange={onChange} />}
           {kind === "gate" && <GateEditor draft={draft} id={selectedId} onChange={onChange} />}
           {kind === "join" && <JoinEditor draft={draft} id={selectedId} onChange={onChange} />}
@@ -303,11 +308,33 @@ function ScopePathField({
   );
 }
 
-function TeamEditor({ draft, id, onChange, skills, targetRepo }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void; skills: SkillEntry[]; targetRepo?: string | null }) {
+function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void; skills: SkillEntry[]; targetRepo?: string | null; sessionId?: string }) {
   const t = draft.teams.find((x) => x.id === id) as DraftTeam;
+  // G5 — per-node "regenerate prompt": busy + error state for the one team. Hooks
+  // must run unconditionally, so they sit above the early return.
+  const [regenBusy, setRegenBusy] = useState(false);
+  const [regenError, setRegenError] = useState<string | null>(null);
   if (!t) return null;
   const effort = t.runner.effort;
   const workers = t.workers;
+
+  async function regenerate() {
+    if (!sessionId) return;
+    setRegenBusy(true);
+    setRegenError(null);
+    try {
+      const next = await regenerateTeamPrompt(sessionId, draft, id);
+      if (next === null) {
+        setRegenError("No prompt was generated — try again.");
+      } else {
+        onChange(setPromptBody(draft, id, next));
+      }
+    } catch (e) {
+      setRegenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegenBusy(false);
+    }
+  }
 
   return (
     <div style={{ display: "grid", gap: "var(--sp-4)" }}>
@@ -315,7 +342,25 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo }: { draft: DraftP
         <input aria-label={`name for ${id}`} value={t.name} onChange={(e) => onChange(renameTeam(draft, id, e.target.value))} style={inp} />
       </Field>
 
-      <Field label="Prompt">
+      <Field label={
+        <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)" }}>
+          <span>Prompt</span>
+          {/* G5 — regenerate this one team's prompt via the Step::Prompts seam. Hidden
+              when no Design Session session is available. */}
+          {sessionId && (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={`regenerate prompt for ${id}`}
+              aria-busy={regenBusy}
+              disabled={regenBusy}
+              onClick={regenerate}
+            >
+              {regenBusy ? "Regenerating…" : "Regenerate"}
+            </Button>
+          )}
+        </span>
+      }>
         <SkillAutocomplete
           aria-label={`prompt for ${id}`}
           value={t.prompt_body}
@@ -326,6 +371,11 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo }: { draft: DraftP
         <div style={{ marginTop: "var(--sp-1)", fontSize: "var(--ts-xs)", color: "var(--text-3)" }}>
           Type <code style={{ fontFamily: "var(--font-mono)" }}>/</code> to insert an installed skill or command.
         </div>
+        {regenError && (
+          <div role="alert" aria-live="polite" style={{ marginTop: "var(--sp-1)", fontSize: "var(--ts-xs)", color: "var(--danger)" }}>
+            {regenError}
+          </div>
+        )}
       </Field>
 
       <fieldset style={group}>

@@ -200,6 +200,31 @@ export async function designSessionTurn(
   });
 }
 
+/** G5 — regenerate ONE team's responsibility prompt by running the existing
+ *  Step::Prompts design-session logic over the `llm_chat` seam (NOT a forked
+ *  session). Returns the regenerated prompt body for `teamId`, or null when the
+ *  turn produced no usable slice (the model's prose is surfaced separately). The
+ *  bounded-repair discipline lives in the backend turn. */
+export async function regenerateTeamPrompt(
+  sessionId: string,
+  draft: DraftPipeline,
+  teamId: string,
+): Promise<string | null> {
+  const team = draft.teams.find((t) => t.id === teamId);
+  const name = team?.name || teamId;
+  // The Step::Prompts system prompt expects a single team_id; name it explicitly.
+  const message =
+    `Write the responsibility prompt for the team with id "${teamId}" (${name}). ` +
+    `Use the current draft for context. Emit a PromptSlice for that team only.`;
+  const result = await designSessionTurn(sessionId, "prompts", draft, message);
+  const updated = result.updated_draft.teams.find((t) => t.id === teamId);
+  // Only treat it as regenerated when the body actually changed to something
+  // non-empty (a no-op turn leaves the draft unchanged).
+  const next = updated?.prompt_body ?? "";
+  if (next.trim() === "" || next === (team?.prompt_body ?? "")) return null;
+  return next;
+}
+
 export async function bestEffortValidate(draft: DraftPipeline): Promise<string[]> {
   return await invoke<string[]>("best_effort_validate_cmd", { draft });
 }

@@ -1,5 +1,5 @@
 import type React from "react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { savePipelineEdits, type DraftPipeline } from "../ipc/pipeline";
 import type { Project } from "../ipc/workspace";
 import { PipelineCanvas } from "./PipelineCanvas";
@@ -52,6 +52,10 @@ export function PipelineEditor({
   // A4: the skill catalog for this project, feeding NodeDrawer's prompt
   // autocomplete. Loaded at open + manually refreshable.
   const { entries: skills, refresh: refreshSkills } = useSkillCatalog(projectId);
+  // G5: a stable session id so a per-node "regenerate prompt" runs the Step::Prompts
+  // logic over the llm_chat seam (the only chat the editor uses, for that one
+  // affordance — distinct from the wizard's full Design Session).
+  const sessionId = useMemo(() => `edit-${projectId}-${Math.random().toString(36).slice(2)}`, [projectId]);
 
   async function save() {
     // G11 — block + surface the banner on a known-invalid draft (the backend stays
@@ -121,6 +125,7 @@ export function PipelineEditor({
             onChange={setDraft}
             skills={skills}
             onRefreshSkills={refreshSkills}
+            sessionId={sessionId}
             showBanner={showBanner}
             targetRepo={projects.find((p) => p.id === projectId)?.target_repo ?? null}
             onValidityChange={(valid) => { setCanvasValid(valid); if (valid) setShowBanner(false); }}
