@@ -1911,6 +1911,22 @@ mod composite_engine_tests {
         }])
     }
 
+    /// A catalog whose `approve_gate` carries a REAL derived-style schema
+    /// (task_id required, string) so the loop's validate-before-dispatch + bounded
+    /// repair turn (T1 Task 4) are exercised.
+    fn schema_catalog() -> ToolCatalog {
+        ToolCatalog::new(vec![ToolSpec {
+            name: "approve_gate".into(),
+            description: "Approve a gated task".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["task_id"],
+                "properties": { "task_id": { "type": "string" } }
+            }),
+            supplier_context: "runtime".into(),
+        }])
+    }
+
     fn reply(text: &str) -> ChatReply {
         ChatReply { text: text.into(), usage: ChatUsage::default() }
     }
@@ -1981,6 +1997,66 @@ mod composite_engine_tests {
         assert_eq!(got[1].dialogue_id, "p");
         assert!(got[1].user_message.contains("inject_topic"));
         assert!(got[1].user_message.contains("T-9"));
+    }
+
+    // T1 Task 4: the model emits args that fail schema validation -> a BOUNDED
+    // repair turn re-prompts on the SAME dialogue_id naming the arg error; the
+    // model's corrected re-emit then dispatches. A valid first emit makes no
+    // extra call (covered by two_step_loop_... above).
+    #[tokio::test]
+    async fn invalid_args_trigger_a_repair_turn_then_a_valid_re_emit_dispatches() {
+        let runner = Arc::new(FakeChatRunner::new(vec![
+            // first emit: missing the required task_id -> rejected, repair re-prompt
+            reply("Approving.\n```json\n{\"tool\":\"approve_gate\",\"args\":{}}\n```"),
+            // repaired emit: includes task_id -> validates -> dispatches
+            reply("Fixed.\n```json\n{\"tool\":\"approve_gate\",\"args\":{\"task_id\":\"T-7\"}}\n```"),
+            // final answer after the tool result is fed back
+            reply("Done — T-7 approved."),
+        ]));
+        let disp = Arc::new(
+            FakeDispatcher::new().with("approve_gate", ToolCallResult::Ok { result: json!({"id":"T-7"}) }),
+        );
+        let eng = agentic(runner.clone(), disp.clone(), Arc::new(Brake::new()));
+
+        let r = eng.respond("approve the gated task", &schema_catalog()).await;
+
+        // the corrected call dispatched exactly once
+        assert_eq!(disp.received.lock().unwrap().len(), 1);
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].request.args, json!({"task_id":"T-7"}));
+        assert_eq!(r.text, "Done — T-7 approved.");
+        // exactly three model calls: bad emit + repair re-prompt + final answer
+        let got = runner.received.lock().unwrap();
+        assert_eq!(got.len(), 3);
+        // the repair re-prompt was on the SAME dialogue_id and named the arg error
+        assert_eq!(got[1].dialogue_id, "p");
+        assert!(got[1].user_message.contains("task_id"), "repair must name the bad arg: {}", got[1].user_message);
+        assert!(got[1].user_message.to_lowercase().contains("invalid")
+            || got[1].user_message.to_lowercase().contains("required"));
+    }
+
+    // T1 Task 4: the model never produces valid args -> after MAX_REPAIR_RETRIES the
+    // loop gives up with a clear non-dispatch turn (no tool ever dispatched).
+    #[tokio::test]
+    async fn exhausted_arg_repair_retries_give_up_without_dispatching() {
+        use super::MAX_REPAIR_RETRIES;
+        // every reply omits task_id; FakeChatRunner clamps to the last reply.
+        let runner = Arc::new(FakeChatRunner::new(vec![
+            reply("Approving.\n```json\n{\"tool\":\"approve_gate\",\"args\":{}}\n```"),
+        ]));
+        let disp = Arc::new(FakeDispatcher::new());
+        let eng = agentic(runner.clone(), disp.clone(), Arc::new(Brake::new()));
+
+        let r = eng.respond("approve it", &schema_catalog()).await;
+
+        // nothing dispatched, no tool_calls recorded
+        assert_eq!(disp.received.lock().unwrap().len(), 0);
+        assert!(r.tool_calls.is_empty());
+        // a clear non-dispatch turn naming the failure
+        assert!(r.text.contains("invalid tool arguments") || r.text.to_lowercase().contains("invalid"));
+        assert!(r.text.contains("task_id"));
+        // initial bad emit + MAX_REPAIR_RETRIES repair re-prompts = 1 + 2 model calls
+        assert_eq!(runner.received.lock().unwrap().len(), 1 + MAX_REPAIR_RETRIES);
     }
 
     // Task 3: plain-prose first reply finishes with no dispatch.
