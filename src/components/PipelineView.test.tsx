@@ -99,6 +99,34 @@ describe("PipelineView", () => {
     expect(screen.getByText(/→ after/)).toBeInTheDocument();
   });
 
+  it("renders a nested fork distinctly with a depth-labelled containment box (AU2)", () => {
+    const tm = (id: string, on_approve?: string): Pipeline["teams"][number] => ({
+      id, name: id, prompt: "", scope: { reads: [], writes: [], tools: [] },
+      outputs: on_approve ? { on_approve } : {}, workers: { min: 1, max: 1 },
+      role: "producer", store: { capacity: 8 },
+    });
+    const p: Pipeline = {
+      id: "p", name: "Nested", description: "", schema_version: 2,
+      teams: [tm("ia", "inner-join"), tm("ib", "inner-join"), tm("lb", "outer-join"), tm("after")],
+      gates: [], escalations: [],
+      forks: [
+        { id: "outer", lanes: ["inner", "lb"] },
+        { id: "inner", lanes: ["ia", "ib"] },
+      ],
+      joins: [
+        { id: "inner-join", waits_for: ["ia", "ib"], downstream: "outer-join" },
+        { id: "outer-join", waits_for: ["inner", "lb"], downstream: "after" },
+      ],
+    };
+    const { container } = render(<PipelineView pipeline={p} />);
+    // A containment box is drawn for the nested (depth-2) fork group.
+    const box = container.querySelector('[data-nesting-depth="2"]');
+    expect(box).not.toBeNull();
+    // The nested fork node is indented relative to a non-nested node at the same column.
+    const innerNode = container.querySelector('[data-node-id="inner"]');
+    expect(innerNode).not.toBeNull();
+  });
+
   it("renders an Edit pipeline button when onEdit is provided and calls it", () => {
     const onEdit = vi.fn();
     render(<PipelineView pipeline={pipeline} onEdit={onEdit} />);

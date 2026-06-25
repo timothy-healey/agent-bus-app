@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import type { Pipeline } from "../ipc/pipeline";
-import { buildPipelineGraph, nodeBorderColor, type RouteKind } from "../lib/pipelineGraph";
+import { buildPipelineGraph, nodeBorderColor, nestingGroups, type RouteKind } from "../lib/pipelineGraph";
 
 /// Read-only static graph render of the pipeline (audit Decision 2). Nodes +
 /// edges laid out left-to-right, honouring fork/join/gate and revise/escalate
@@ -11,6 +11,8 @@ const NODE_H = 40;
 const COL_GAP = 70;
 const ROW_GAP = 22;
 const PAD = 16;
+const NEST_INDENT = 18; // px added to x per nesting depth level (AU2)
+const NEST_PAD = 8;     // px breathing room around a containment box
 
 function edgeStroke(kind: RouteKind): CSSProperties {
   switch (kind) {
@@ -28,11 +30,14 @@ export function PipelineGraph({ pipeline }: { pipeline: Pipeline }) {
   const graph = buildPipelineGraph(pipeline);
   if (graph.nodes.length === 0) return null;
 
+  const groups = nestingGroups(pipeline);
   const colX = (c: number) => PAD + c * (NODE_W + COL_GAP);
   const rowY = (r: number) => PAD + r * (NODE_H + ROW_GAP);
-  const pos = new Map(graph.nodes.map((n) => [n.id, { x: colX(n.col), y: rowY(n.row) }]));
+  const nodeX = (n: (typeof graph.nodes)[number]) => colX(n.col) + n.depth * NEST_INDENT;
+  const pos = new Map(graph.nodes.map((n) => [n.id, { x: nodeX(n), y: rowY(n.row) }]));
 
-  const width = PAD * 2 + graph.cols * NODE_W + (graph.cols - 1) * COL_GAP;
+  const maxDepth = graph.nodes.reduce((m, n) => Math.max(m, n.depth), 0);
+  const width = PAD * 2 + graph.cols * NODE_W + (graph.cols - 1) * COL_GAP + maxDepth * NEST_INDENT + NEST_PAD * 2;
   const height = PAD * 2 + (graph.rows + 1) * NODE_H + graph.rows * ROW_GAP;
 
   return (
@@ -58,6 +63,39 @@ export function PipelineGraph({ pipeline }: { pipeline: Pipeline }) {
             <path d="M0,0 L6,3 L0,6 Z" fill="oklch(45% 0.008 60)" />
           </marker>
         </defs>
+        {groups.map((grp) => {
+          const pts = grp.memberIds
+            .map((id) => pos.get(id))
+            .filter((p): p is { x: number; y: number } => !!p);
+          if (pts.length === 0) return null;
+          const minX = Math.min(...pts.map((p) => p.x)) - NEST_PAD;
+          const minY = Math.min(...pts.map((p) => p.y)) - NEST_PAD - 12; // room for label
+          const maxX = Math.max(...pts.map((p) => p.x)) + NODE_W + NEST_PAD;
+          const maxY = Math.max(...pts.map((p) => p.y)) + NODE_H + NEST_PAD;
+          return (
+            <g key={`nest-${grp.forkId}`} data-nesting-depth={grp.depth} data-nesting-fork={grp.forkId}>
+              <rect
+                x={minX}
+                y={minY}
+                width={maxX - minX}
+                height={maxY - minY}
+                rx={6}
+                fill="var(--surface-2)"
+                stroke="var(--border-2)"
+                strokeWidth={1}
+                strokeDasharray="3 3"
+              />
+              <text
+                x={minX + 8}
+                y={minY + 12}
+                fill="var(--text-3)"
+                style={{ fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: "0.04em" }}
+              >
+                {`${grp.forkId} · nested ·${grp.depth}`}
+              </text>
+            </g>
+          );
+        })}
         {graph.edges.map((e, i) => {
           const a = pos.get(e.from);
           const b = pos.get(e.to);
@@ -87,7 +125,7 @@ export function PipelineGraph({ pipeline }: { pipeline: Pipeline }) {
         {graph.nodes.map((n) => {
           const p = pos.get(n.id)!;
           return (
-            <g key={n.id} data-node-role={n.role}>
+            <g key={n.id} data-node-role={n.role} data-node-id={n.id} data-node-depth={n.depth}>
               <rect
                 x={p.x}
                 y={p.y}
