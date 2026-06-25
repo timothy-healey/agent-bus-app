@@ -1421,6 +1421,16 @@ async fn settle_audit(
 /// never strands a `running` work-item.
 async fn operational_failure(ctx: &EngineContext, task: &mut Task) -> Result<(), EngineError> {
     let now = now_unix();
+    // LH8: a failure WHILE THE BRAKE IS ON is almost certainly a Stop-kill of a
+    // live invocation, not a genuine verdict. Leave the task RE-RUNNABLE: re-queue
+    // WITHOUT consuming an attempt and WITHOUT escalating to needs-human, so a
+    // resume (LH6 manual-restore -> brake-off recovery) re-runs it cleanly.
+    if ctx.brake.is_on() {
+        task.state = TaskState::Queued;
+        task.updated_at = now;
+        ctx.tasks.update(task).await?;
+        return Ok(());
+    }
     if task.attempts >= MAX_ATTEMPTS {
         task.state = TaskState::NeedsHuman;
         task.current_stage = "needs-human".to_string();
@@ -1970,6 +1980,48 @@ mod tests {
         assert_eq!(outcome, StepOutcome::Idle);
         // the reservation taken before the (empty) claim was released
         assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn operational_failure_under_brake_requeues_without_bumping_attempts() {
+        // LH8: a failure WHILE THE BRAKE IS ON is a Stop-kill of a live invocation,
+        // not a genuine verdict — leave the task RE-RUNNABLE (re-queue, no attempts
+        // bump, no escalation) so a resume recovers it.
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("")))).await;
+        let mut task = Task::work_item(
+            "proj".into(), "p".into(), ctx.run_id.clone(), "z".into(),
+            "research".into(), None, None, 100,
+        );
+        task.attempts = 0;
+        task.state = TaskState::Running;
+        ctx.tasks.insert(&task).await.unwrap();
+
+        ctx.brake.set_on("manual");
+        super::operational_failure(&ctx, &mut task).await.unwrap();
+
+        assert_eq!(task.attempts, 0, "a braked (killed) failure does not consume an attempt");
+        assert_eq!(task.state, TaskState::Queued, "re-queued, recoverable");
+        let reloaded = ctx.tasks.get(&task.id).await.unwrap();
+        assert_eq!(reloaded.attempts, 0);
+        assert_eq!(reloaded.state, TaskState::Queued);
+    }
+
+    #[tokio::test]
+    async fn operational_failure_without_brake_bumps_attempts_as_before() {
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("")))).await;
+        let mut task = Task::work_item(
+            "proj".into(), "p".into(), ctx.run_id.clone(), "z".into(),
+            "research".into(), None, None, 100,
+        );
+        task.attempts = 0;
+        task.state = TaskState::Running;
+        ctx.tasks.insert(&task).await.unwrap();
+
+        super::operational_failure(&ctx, &mut task).await.unwrap();
+
+        assert_eq!(task.attempts, 1, "a genuine failure still consumes an attempt");
     }
 
     #[tokio::test]
