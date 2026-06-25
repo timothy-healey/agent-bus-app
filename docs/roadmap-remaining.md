@@ -33,7 +33,7 @@ All build on chunk 1's `ProcessRegistry` / killable spawner / brake wiring.
 - **AU2 · Nested-lane (P1) hierarchical render** — `done` (tag `plan-au2`) — nested fork lanes render indented inside a dashed depth-labelled containment box; nesting derived by a consolidated lane-walk faithful to `validate.rs`, depth-capped at 3.
 
 ## Frontend impeccable-pass leftovers
-- **FE2 + FE3** — `plan ready, NOT built` — **plan committed: `docs/superpowers/plans/2026-06-25-fe2-fe3-polish.md`** (6 tasks). FE2: roving-tabindex/arrow-key nav on the CardDrawer + ViewSwitcher tablists (a `rovingTabKey` helper). FE3: UsageMeter tooltip rows from EXISTING snapshot fields only (brake-eta from `est_brake_at`, reset countdown). **Next session: build this first** — implementer → 2-stage review → gates → tag `plan-fe2-fe3-polish`. (Out of scope in that plan, would need backend plumbing: 10-min burn avg, per-team effort/burn.)
+- **FE2 + FE3** — `done` (tag `plan-fe2-fe3-polish`) — roving-tabindex/arrow-key nav on the CardDrawer + ViewSwitcher tablists (`rovingTabKey` helper); UsageMeter tooltip gains brake-ETA (from `est_brake_at`) + window-reset rows. (Still out of scope, need backend plumbing: 10-min burn avg, per-team effort/burn.)
 - **FE1 · Inline-style → CSS-class migration** — `backlog` (deferred, large/regression-risky) — ~26 one-off chrome components remain inline; the impeccable pass deliberately scoped this out. Only do on explicit ask.
 
 ## Platform / test hardening
