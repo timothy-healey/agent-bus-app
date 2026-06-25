@@ -71,16 +71,21 @@ export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun
 
   const isRunning = !braked && activeRun != null && !activeRun.completed;
 
+  // LF33: the dropdown is a secondary "history" affordance — surface it only when
+  // there are completed (past) runs to inspect. The Start/● Running/Stop cluster
+  // is the operating surface; the dropdown is for reviewing finished runs.
+  const hasHistory = runs.some((r) => r.completed);
+
   return (
     <div style={bar}>
       <span id="run-selector-label" style={label}>
-        run
+        history
       </span>
       {loading && runs.length === 0 ? (
         <span style={empty} aria-live="polite">loading runs…</span>
       ) : runs.length === 0 ? (
         <span style={empty}>no runs yet — start a run</span>
-      ) : (
+      ) : hasHistory ? (
         <select
           aria-labelledby="run-selector-label"
           style={select}
@@ -93,7 +98,7 @@ export function RunSelector({ runs, selectedRun, activeRun, onSelect, onStartRun
             </option>
           ))}
         </select>
-      )}
+      ) : null}
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "var(--sp-3)" }}>
         {braked ? (
           <>
