@@ -416,50 +416,97 @@ impl ConversationEngine for AgenticChatEngine {
                 model: self.model.clone(),
                 thinking_budget: self.thinking_budget,
             };
-            // Display-only streaming: each step resets the live bubble via the
-            // explicit reset signal (prose sink stays prose-only — vet F1), then
-            // forwards prose fragments. Tool-call extraction below still runs on
-            // the COMPLETE reply.text (never partial JSON).
-            let reply = match &self.delta {
-                Some(emitter) => {
-                    (emitter.reset)();
-                    self.runner.chat_stream(&req, &emitter.sink).await
+
+            // T2: on a runner that supports NATIVE tool-use (the anthropic-api
+            // path), drive the tool step structurally — the model picks a catalog
+            // tool via tool_choice:auto and returns a schema-valid {tool,args}
+            // directly (no fenced-json parse, no T1 arg-repair turn needed). A
+            // prose finish surfaces as NoResult from the structured call, so we
+            // fetch the final answer once via the plain path. Else the T1
+            // prompt+extract+validate+repair path (UNCHANGED below). T1's
+            // validate-before-dispatch stays the universal safety net for BOTH.
+            let request = if self.runner.supports_structured() {
+                let tools = catalog_tool_defs(catalog);
+                match self.runner.chat_structured(&req, &tools, None).await {
+                    Ok(structured) => {
+                        ToolCallRequest { tool_name: structured.tool_name, args: structured.args }
+                    }
+                    // No tool_use block => the model answered in prose; it is done.
+                    // Fetch the final prose answer once (display-only streaming if set).
+                    Err(llm_chat::chat::ChatError::NoResult) => {
+                        let reply = match &self.delta {
+                            Some(emitter) => {
+                                (emitter.reset)();
+                                self.runner.chat_stream(&req, &emitter.sink).await
+                            }
+                            None => self.runner.chat(&req).await,
+                        };
+                        return match reply {
+                            Ok(r) => EngineReply { text: r.text, tool_calls },
+                            Err(e) => EngineReply { text: format!("[terminal error] {e}"), tool_calls },
+                        };
+                    }
+                    Err(e) => return EngineReply { text: format!("[terminal error] {e}"), tool_calls },
                 }
-                None => self.runner.chat(&req).await,
-            };
-            let reply = match reply {
-                Ok(r) => r,
-                // DD4: rate-limit (and any other chat error) stops the loop and surfaces.
-                Err(e) => return EngineReply { text: format!("[terminal error] {e}"), tool_calls },
+            } else {
+                // Display-only streaming: each step resets the live bubble via the
+                // explicit reset signal (prose sink stays prose-only — vet F1), then
+                // forwards prose fragments. Tool-call extraction below still runs on
+                // the COMPLETE reply.text (never partial JSON).
+                let reply = match &self.delta {
+                    Some(emitter) => {
+                        (emitter.reset)();
+                        self.runner.chat_stream(&req, &emitter.sink).await
+                    }
+                    None => self.runner.chat(&req).await,
+                };
+                let reply = match reply {
+                    Ok(r) => r,
+                    // DD4: rate-limit (and any other chat error) stops the loop and surfaces.
+                    Err(e) => return EngineReply { text: format!("[terminal error] {e}"), tool_calls },
+                };
+
+                // No fenced tool-call block => the model is done; this is the final answer (DD3).
+                let Some(block) = extract_tool_call_block(&reply.text) else {
+                    return EngineReply { text: reply.text, tool_calls };
+                };
+
+                // An unparseable / unknown tool-call is fed back as an error so the
+                // model can recover; it counts against the step cap and never panics (DD5).
+                // VF2: parse straight into the kernel's ToolCallRequest, no shadow type.
+                match parse_tool_call(&block) {
+                    Err(e) => {
+                        next_user_message = format!(
+                            "Tool call rejected: that was not a valid tool call ({e}). \
+                             Reply with a single fenced ```json {{\"tool\":\"<name>\",\"args\":{{…}}}} block, \
+                             or your final answer as plain prose."
+                        );
+                        continue;
+                    }
+                    Ok(req) if catalog.by_name(&req.tool_name).is_none() => {
+                        next_user_message = format!(
+                            "Tool call rejected: unknown tool `{}`. Available tools: {}. \
+                             Reply with a valid fenced ```json tool call, or your final answer.",
+                            req.tool_name, tool_names(catalog),
+                        );
+                        continue;
+                    }
+                    Ok(req) => req,
+                }
             };
 
-            // No fenced tool-call block => the model is done; this is the final answer (DD3).
-            let Some(block) = extract_tool_call_block(&reply.text) else {
-                return EngineReply { text: reply.text, tool_calls };
-            };
-
-            // An unparseable / unknown tool-call is fed back as an error so the
-            // model can recover; it counts against the step cap and never panics (DD5).
-            // VF2: parse straight into the kernel's ToolCallRequest, no shadow type.
-            let request = match parse_tool_call(&block) {
-                Err(e) => {
-                    next_user_message = format!(
-                        "Tool call rejected: that was not a valid tool call ({e}). \
-                         Reply with a single fenced ```json {{\"tool\":\"<name>\",\"args\":{{…}}}} block, \
-                         or your final answer as plain prose."
-                    );
-                    continue;
-                }
-                Ok(req) if catalog.by_name(&req.tool_name).is_none() => {
-                    next_user_message = format!(
-                        "Tool call rejected: unknown tool `{}`. Available tools: {}. \
-                         Reply with a valid fenced ```json tool call, or your final answer.",
-                        req.tool_name, tool_names(catalog),
-                    );
-                    continue;
-                }
-                Ok(req) => req,
-            };
+            // On the structured path the model can only pick a published tool, but
+            // guard anyway (an unknown name is impossible via tool_choice but the
+            // dispatcher relies on it): an unknown tool surfaces as an error turn.
+            if catalog.by_name(&request.tool_name).is_none() {
+                return EngineReply {
+                    text: format!(
+                        "[terminal error] model selected unknown tool `{}`",
+                        request.tool_name
+                    ),
+                    tool_calls,
+                };
+            }
 
             // T1: validate the model's args against the tool's PUBLISHED input_schema
             // BEFORE dispatch (the ACL seal — the loop validates the JSON schema, never
@@ -522,6 +569,24 @@ impl ConversationEngine for AgenticChatEngine {
 /// Comma-separated tool names for an error frame.
 fn tool_names(catalog: &ToolCatalog) -> String {
     catalog.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// Map the published tool catalog into the kernel `ChatToolDef`s the native
+/// structured-output path offers the model (T2 Task 4). Each tool's
+/// `input_schema` is T1's PUBLISHED schema — the SAME schema the loop validates
+/// against before dispatch — so the native call is schema-valid by construction
+/// and the validate-before-dispatch safety net still applies. Only the kernel
+/// ChatToolDef crosses the ChatRunner trait (the ACL seal).
+fn catalog_tool_defs(catalog: &ToolCatalog) -> Vec<llm_chat::chat::ChatToolDef> {
+    catalog
+        .specs()
+        .iter()
+        .map(|s| llm_chat::chat::ChatToolDef {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            input_schema: s.input_schema.clone(),
+        })
+        .collect()
 }
 
 /// Build the agentic system prompt: the operator framing + the tool catalog
@@ -2077,6 +2142,92 @@ mod composite_engine_tests {
         assert!(r.text.contains("task_id"));
         // initial bad emit + MAX_REPAIR_RETRIES repair re-prompts = 1 + 2 model calls
         assert_eq!(runner.received.lock().unwrap().len(), 1 + MAX_REPAIR_RETRIES);
+    }
+
+    // ---- T2 Task 4: native tool-use on a structured (API) runner ------------
+
+    use llm_chat::chat::{ChatToolDef, StructuredReply};
+    use llm_chat::fake::FakeStructuredChatRunner;
+
+    fn structured_engine(runner: Arc<dyn ChatRunner>, disp: Arc<FakeDispatcher>) -> AgenticChatEngine {
+        AgenticChatEngine::new(
+            runner,
+            disp as Arc<dyn ToolDispatcher>,
+            Arc::new(Brake::new()),
+            "p".into(),
+            "You are the god terminal.".into(),
+            "m".into(),
+            8192,
+        )
+    }
+
+    fn struct_reply(tool: &str, args: serde_json::Value) -> StructuredReply {
+        StructuredReply { tool_name: tool.into(), args, usage: ChatUsage::default() }
+    }
+
+    // A native tool call dispatches WITHOUT any fenced-json parse or repair turn.
+    #[tokio::test]
+    async fn structured_runner_native_tool_call_dispatches_then_finishes() {
+        // Step 1: structured tool call. Step 2: NoResult (prose finish) -> plain
+        // chat returns the final answer.
+        let runner = Arc::new(FakeStructuredChatRunner::with_chat(
+            vec![struct_reply("inject_topic", json!({"topic": "03-scheduling"}))],
+            vec![reply("Done — task T-9 was injected for 03-scheduling.")],
+        ));
+        let disp = Arc::new(
+            FakeDispatcher::new().with("inject_topic", ToolCallResult::Ok { result: json!({"task_id":"T-9"}) }),
+        );
+        let eng = structured_engine(runner.clone(), disp.clone());
+
+        let r = eng.respond("kick off research on 03-scheduling", &catalog()).await;
+
+        // dispatched exactly once via the native call (no fenced-json parse)
+        assert_eq!(disp.received.lock().unwrap().len(), 1);
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].request.tool_name, "inject_topic");
+        assert_eq!(r.tool_calls[0].request.args, json!({"topic": "03-scheduling"}));
+        assert_eq!(r.text, "Done — task T-9 was injected for 03-scheduling.");
+        // the structured seam was driven with the catalog tools, tool_choice auto
+        let calls = runner.structured_calls.lock().unwrap();
+        assert_eq!(calls[0].0, vec!["inject_topic".to_string()]);
+        assert_eq!(calls[0].1, None); // None = auto (model may finish in prose)
+    }
+
+    // The structured path's catalog tool defs carry T1's published input_schema.
+    #[test]
+    fn catalog_tool_defs_carry_the_published_schema() {
+        let defs: Vec<ChatToolDef> = super::catalog_tool_defs(&schema_catalog());
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "approve_gate");
+        assert_eq!(defs[0].input_schema["required"][0], "task_id");
+    }
+
+    // T1's validate-before-dispatch is STILL the safety net on the structured
+    // path: a native call with bad args triggers the bounded repair turn rather
+    // than dispatching, even though the model picked a published tool natively.
+    #[tokio::test]
+    async fn structured_runner_invalid_args_still_repair_then_dispatch() {
+        let runner = Arc::new(FakeStructuredChatRunner::with_chat(
+            vec![
+                struct_reply("approve_gate", json!({})),                 // missing task_id -> repair
+                struct_reply("approve_gate", json!({"task_id": "T-7"})), // corrected -> dispatch
+            ],
+            vec![reply("Done — T-7 approved.")], // prose finish
+        ));
+        let disp = Arc::new(
+            FakeDispatcher::new().with("approve_gate", ToolCallResult::Ok { result: json!({"id":"T-7"}) }),
+        );
+        let eng = structured_engine(runner.clone(), disp.clone());
+
+        let r = eng.respond("approve the gated task", &schema_catalog()).await;
+
+        // the corrected native call dispatched exactly once (T1 net held)
+        assert_eq!(disp.received.lock().unwrap().len(), 1);
+        assert_eq!(r.tool_calls[0].request.args, json!({"task_id":"T-7"}));
+        assert_eq!(r.text, "Done — T-7 approved.");
+        // the repair re-prompt rode the SAME dialogue_id and named the arg error
+        let got = runner.received.lock().unwrap();
+        assert!(got[1].user_message.contains("task_id"));
     }
 
     // Task 3: plain-prose first reply finishes with no dispatch.
