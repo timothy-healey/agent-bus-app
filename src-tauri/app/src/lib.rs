@@ -739,25 +739,33 @@ pub fn list_skills_inner(
     skills::merge_with_precedence(per_root)
 }
 
-/// OHS command (A4): list the skills + slash commands available to the project's
-/// worker, for authoring-time autocomplete. Resolves roots = global `~/.claude`
-/// + the project's configured `skill_sources`, scans, merges (project wins).
+/// OHS command (A4/G4): list the skills + slash commands available for
+/// authoring-time autocomplete. `project_id` is OPTIONAL (G4): when present,
+/// roots = global `~/.claude` + the project's configured `skill_sources` (project
+/// wins); when absent (e.g. the new-project wizard, before a project exists),
+/// roots = the global `~/.claude` ONLY — so the global catalog still loads during
+/// creation. Skills are discovery sugar; an unknown project id falls back to the
+/// global-only catalog rather than erroring (it must never break prompt authoring).
 #[tauri::command(rename_all = "snake_case")]
 async fn list_skills(
     ws: tauri::State<'_, WorkspaceState>,
     catalog: tauri::State<'_, SkillCatalogState>,
-    project_id: String,
+    project_id: Option<String>,
 ) -> Result<Vec<skills::SkillEntry>, String> {
     use agent_bus_core::ProjectId;
-    let project = ws
-        .store
-        .get(&ProjectId(project_id))
-        .await
-        .map_err(|e| e.to_string())?;
+    // Project sources, merged in only when a project is supplied AND resolvable.
+    let sources: Vec<String> = match project_id {
+        Some(id) => match ws.store.get(&ProjectId(id)).await {
+            Ok(project) => project.skill_sources,
+            // No such project yet (mid-create) — global-only, never an error.
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
-    let roots = resolve_skill_roots(&home, &project.skill_sources);
+    let roots = resolve_skill_roots(&home, &sources);
     Ok(list_skills_inner(catalog.catalog.as_ref(), &roots))
 }
 
@@ -786,6 +794,25 @@ mod list_skills_tests {
         assert_eq!(roots[0].path, std::path::PathBuf::from("/home/tim/.claude"));
         assert_eq!(roots[1].source, SkillSource::Project);
         assert_eq!(roots[1].path, std::path::PathBuf::from("/proj/.claude"));
+    }
+
+    #[test]
+    fn resolve_roots_with_no_project_sources_yields_global_only() {
+        // G4: list_skills with no project (None) resolves to global-only roots —
+        // the catalog still loads during creation. Empty sources == global-only.
+        let roots = resolve_skill_roots("/home/tim", &[]);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].source, SkillSource::Global);
+        assert_eq!(roots[0].path, std::path::PathBuf::from("/home/tim/.claude"));
+    }
+
+    #[test]
+    fn list_skills_inner_returns_the_global_catalog_with_no_project_sources() {
+        // G4: even with no project, the global catalog is scanned + returned.
+        let fake = FakeSkillCatalog::new(vec![entry("ddd-council", None)]);
+        let roots = resolve_skill_roots("/home/tim", &[]);
+        let merged = list_skills_inner(&fake, &roots);
+        assert!(merged.iter().any(|e| e.name == "ddd-council" && e.source == SkillSource::Global));
     }
 
     #[test]

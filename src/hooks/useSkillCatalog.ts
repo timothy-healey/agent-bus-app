@@ -8,20 +8,20 @@ export interface SkillCatalog {
   refresh: () => void;
 }
 
-/// A4 — load the skill catalog for the active project at boot + on a manual
-/// refresh, holding it in memory. `projectId` null → an empty, idle catalog
-/// (no project selected yet). Failures degrade to an empty catalog (autocomplete
-/// is sugar; a discovery hiccup must not break prompt authoring).
+/// A4/G4 — load the skill catalog at boot + on a manual refresh, holding it in
+/// memory. `projectId` is OPTIONAL: with a project, the catalog merges the
+/// project's sources over the global `~/.claude`; with `null` (the new-project
+/// wizard, before a project exists) it loads the GLOBAL `~/.claude` catalog — it
+/// does NOT short-circuit to empty, so skills are discoverable during creation
+/// (G4). Failures degrade to an empty catalog (autocomplete is sugar; a discovery
+/// hiccup must not break prompt authoring).
 export function useSkillCatalog(projectId: string | null): SkillCatalog {
   const [entries, setEntries] = useState<SkillEntry[]>([]);
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(() => {
-    if (!projectId) {
-      setEntries([]);
-      return;
-    }
     setLoading(true);
+    // null projectId → global-only catalog (the backend resolves global roots).
     listSkills(projectId)
       .then(setEntries)
       .catch(() => setEntries([]))

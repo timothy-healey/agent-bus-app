@@ -30,10 +30,13 @@ describe("useSkillCatalog", () => {
     expect(listSkillsMock).toHaveBeenCalledWith("proj-1");
   });
 
-  it("returns an empty idle catalog when no project is selected", async () => {
+  it("loads the GLOBAL catalog when no project is selected (G4)", async () => {
+    // G4: with no project (the new-project wizard), the hook must still load the
+    // global ~/.claude catalog — it does NOT short-circuit to empty.
+    listSkillsMock.mockResolvedValueOnce([entry("ddd-council")]);
     const { result } = renderHook(() => useSkillCatalog(null));
-    await waitFor(() => expect(result.current.entries).toEqual([]));
-    expect(listSkillsMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(result.current.entries.length).toBe(1));
+    expect(listSkillsMock).toHaveBeenCalledWith(null);
   });
 
   it("refresh re-scans", async () => {
