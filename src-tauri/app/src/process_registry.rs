@@ -134,8 +134,7 @@ impl ProcessRegistry {
     }
 
     /// Clear the latch — re-enable normal spawning (wired on brake-off / resume
-    /// in LH8b).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// at the root `brake_off` command + dispatcher arm, LH8b).
     pub fn end_killing(&self) {
         self.inner.lock().unwrap().killing = None;
     }
