@@ -282,6 +282,7 @@ pub fn output_contract(role: &str, artifact_dir: &str, already_found: &[String])
          marked lines:\n\n",
     );
     s.push_str("  KEY: <a stable, unique candidate key for this item>\n");
+    s.push_str("  DESCRIPTION: <a short (<=80 char) plain-language summary of this item>\n");
     s.push_str(&format!(
         "  ARTIFACT: {artifact_dir}/<key>... (the file you wrote for this item)\n"
     ));
@@ -525,6 +526,14 @@ ARTIFACT: artifacts/specs/gamma.md";
         assert!(c.contains("src/b.rs"));
         // a generator is not told to emit a verdict
         assert!(!c.contains("VERDICT:"));
+    }
+
+    #[test]
+    fn output_contract_tells_every_role_to_emit_a_description() {
+        for role in ["generator", "reviewer", "producer"] {
+            let c = output_contract(role, "${project}/artifacts/x", &[]);
+            assert!(c.contains("DESCRIPTION:"), "role {role} contract must request a DESCRIPTION line");
+        }
     }
 
     #[test]
