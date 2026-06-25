@@ -48,6 +48,17 @@ describe("Terminal", () => {
     expect(container.querySelector('[data-streaming="true"]')).toBeNull();
   });
 
+  it("shows a thinking indicator while pending (before any streaming prose)", () => {
+    render(<Terminal turns={[]} contextLine="ctx" onSend={vi.fn()} pending />);
+    expect(screen.getByText(/thinking/i)).toBeInTheDocument();
+  });
+
+  it("hides the thinking indicator once streaming text arrives", () => {
+    const { container } = render(<Terminal turns={[]} contextLine="ctx" onSend={vi.fn()} pending streaming="tokens" />);
+    expect(container.querySelector('[data-pending="true"]')).toBeNull();
+    expect(screen.getByText("tokens")).toBeInTheDocument();
+  });
+
   it("exposes a resize handle that grows the panel on ArrowUp", () => {
     render(<Terminal turns={[]} contextLine="x" onSend={vi.fn()} />);
     const handle = screen.getByRole("separator", { name: /resize terminal/i });
