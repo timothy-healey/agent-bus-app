@@ -57,6 +57,7 @@ async fn emit_structured<T: serde::de::DeserializeOwned + schemars::JsonSchema>(
         user_message,
         model: "claude-opus-4-8".to_string(),
         thinking_budget: 8192,
+        working_dir: None,
     };
     match runner.chat_structured(&req, &tools, Some(EMIT_TOOL)).await {
         Ok(reply) => match serde_json::from_value::<T>(reply.args) {
@@ -247,6 +248,7 @@ async fn chat_with_repair_parsed<T>(
             user_message,
             model: "claude-opus-4-8".to_string(),
             thinking_budget: 8192,
+            working_dir: None,
         };
         match runner.chat(&req).await {
             Ok(reply) => {
