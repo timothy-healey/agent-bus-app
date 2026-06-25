@@ -22,7 +22,7 @@ Likely area: graph-builder auto-layout / recommended-graph generation — review
 
 ---
 
-### LF3 · "team has no prompt" validation fires too early — `uninvestigated`
+### LF3 · "team has no prompt" validation fires too early — `promoted → G11`
 
 > "team has no prompt message comes up to early, should probably just block going to the next page when the button is pressed, not persists from the start"
 
@@ -78,7 +78,7 @@ Likely area: graph-builder canvas vs the bounded-buffer model — the per-stage 
 
 ---
 
-### LF10 · Delete project option — `uninvestigated`
+### LF10 · Delete project option — `promoted → G13`
 
 > "delete project option"
 
@@ -86,7 +86,7 @@ Likely area: a `workspace_remove_project` command + Settings → Projects remove
 
 ---
 
-### LF11 · Bundled template for the DDD pipeline use-case — `uninvestigated`
+### LF11 · Bundled template for the DDD pipeline use-case — `promoted → G15`
 
 > "i think we should have a template for my usecase research -> spec -> spec-review -> plan -> plan-review -> implement -> code-review -> hand off to human"
 
@@ -99,3 +99,11 @@ Likely area: A2 seed templates (`pipeline/src/seed_template.rs`) — add a bundl
 > "can't move back from graph view to basics and then from basics back to graph without re clicking generate"
 
 Likely area: `NewProjectWizard` step navigation — going Canvas → Basics → Canvas drops the built/generated draft, forcing a re-Generate. The draft should persist across back-nav. To investigate later.
+
+---
+
+### LF13 · Left-nav column + clickable nav tree (from C4 brainstorm) — `promoted → G14`
+
+> "with the changes we make to remove the modal and use screens we could probably have some nicer navigations. We could set up a column on the left with a clickable nav tree on top of the continue+back buttons. Surface the delete action in the switcher."
+
+Design idea raised during the C4 brainstorm (not a raw test finding): once the canvas is full-page (G10), add a left navigation column with a clickable nav tree (Basics / Canvas / Review + project switcher) above the continue/back buttons, and surface delete-project in the switcher (overlaps G13).
