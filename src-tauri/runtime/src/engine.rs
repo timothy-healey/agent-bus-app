@@ -1215,6 +1215,14 @@ async fn invoke(
     if let Some(repo) = effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref()) {
         vars = vars.with_target_repo(repo);
     }
+    // LF26: the child `claude` runs in the work-item's resolved working dir —
+    // the worktree for implementers, the target repo otherwise. v1 has no
+    // per-item worktree wiring, so this is the effective `${target_repo}` (task
+    // override → project default). `None` keeps the pre-LF26 inherit-cwd
+    // behaviour for a topic-less run with no target repo configured.
+    let working_dir =
+        effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref())
+            .map(|p| p.to_string_lossy().into_owned());
     // Grant write access to this stage's ABSOLUTE artifact dir (the L1 + LF26
     // fix): the dir is outside the worker's cwd, so it must be in scope.writes
     // (settings allow) AND surfaced as an --add-dir (the build_settings pass
@@ -1257,7 +1265,7 @@ async fn invoke(
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
         sandbox_profile: None,
-        working_dir: None,
+        working_dir,
     };
 
     // R3: open an audit record for this invocation (outcome NULL = in-flight)
@@ -1558,6 +1566,28 @@ mod tests {
 
     fn approve_out() -> RunnerOutput {
         RunnerOutput { verdict: agent_bus_core::Verdict::Approve, artifact_path: None, final_text: String::new(), usage: RunnerUsage::default() }
+    }
+
+    #[tokio::test]
+    async fn invoke_sets_working_dir_to_effective_target_repo() {
+        // A single terminal producer team; one queued item to claim + invoke.
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let mut ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
+        ctx.target_repo = Some(std::path::PathBuf::from("/repo/here"));
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item(
+            "proj".into(), "p".into(), ctx.run_id.clone(), "k".into(),
+            "research".into(), Some("artifacts/in.md".into()), None, 100,
+        );
+        ctx.tasks.insert(&item).await.unwrap();
+
+        let _ = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let received = recorder.received.lock().unwrap();
+        assert_eq!(received.len(), 1, "the runner was invoked once");
+        assert_eq!(received[0].working_dir.as_deref(), Some("/repo/here"));
     }
 
     #[test]
