@@ -195,3 +195,9 @@ After LF19 the generator runs `claude`, but a generator pass produces NO work-it
 > "app: generator loop step failed for `research`: database error: (code: 787) FOREIGN KEY constraint failed"
 
 The generator (which has no parent task to inherit from) created its child work-items with a hardcoded `project_id = "proj"` (`engine::generate_once`), so the `tasks.project_id -> projects(id)` FK failed live. Tests passed because the test harness's run was *also* `project_id "proj"` (and the in-mem pools don't enforce that FK). Fixed: the generator now takes `project_id` from the RUN row (`run.project_id`) — the source of truth that downstream stages already inherit via `task.project_id`. Regression test: a distinct run project id, assert the generated child carries it (not "proj"). Commit on `main`.
+
+---
+
+### LF25 · generator_ledger records keys BEFORE the work-item commits → lost candidates — `uninvestigated`
+
+> Surfaced diagnosing "where are the candidates": live DB showed 9 keys in `generator_ledger` but 0 tasks (the FK-787/LF24 runs). The research agent worked (9 sensible candidate keys), but `engine::generate_once` calls `record_keys` for the WHOLE batch BEFORE the reserve+commit loop. So any key whose commit fails (FK error pre-LF24, OR backpressure when the downstream store fills mid-loop) stays in the ledger as "found" but was never stored → a future/resumed pass sees it in `found`, emits 0 new, goes dry, and that candidate is **permanently lost** for the run. (An existing comment treats the backpressure case as intentional — but it's wrong: the un-committed key shouldn't be remembered as found.) Fix: record a key in the ledger only AFTER its work-item commit succeeds (move `record_keys` into the loop post-insert, or un-record on failure) so ledger ⟺ committed items stay consistent. Pre-LF24 runs are poisoned (ledger has keys, no tasks → resume goes dry); start a fresh run. To investigate.
