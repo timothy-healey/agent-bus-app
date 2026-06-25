@@ -140,13 +140,31 @@ pub struct InvocationRequest {
     pub working_dir: Option<String>,
 }
 
-/// A display-only log sink. The streaming worker path forwards each assistant
-/// text fragment here as it parses, for live-log display. Deliberately a plain
-/// `&str` callback: NO stream-json idiom, CLI flag, or event name crosses the
-/// ACL through it — the composition root maps fragments to whatever UI event it
-/// likes. Mirrors `llm_chat::chat::DeltaSink` (separate ACL crate, by design —
-/// the worker ACL is verdict-shaped, the chat ACL is prose-shaped; vet F2).
-pub type LogSink = Box<dyn Fn(&str) + Send + Sync>;
+/// Which channel a streamed fragment belongs to. `Output` is the model's visible
+/// prose (accumulated into the final text used for verdict/item parsing);
+/// `Thinking` is reasoning the model emits in `thinking` blocks — forwarded for
+/// live display only, NEVER accumulated into the parsed text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKind {
+    Output,
+    Thinking,
+}
+
+/// A tagged display-only log fragment. The streaming worker path forwards each
+/// fragment here as it parses, for live-log display. NO stream-json idiom, CLI
+/// flag, or event name crosses the ACL through it — the composition root maps
+/// fragments to whatever UI event it likes. Mirrors `llm_chat`'s tagged delta
+/// (separate ACL crate, by design — vet F2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogDelta {
+    pub kind: LogKind,
+    pub text: String,
+}
+
+/// A display-only log sink. The streaming worker path forwards each tagged
+/// fragment here as it parses. Deliberately a plain `&LogDelta` callback: the
+/// composition root coalesces per kind and emits whatever UI event it likes.
+pub type LogSink = Box<dyn Fn(&LogDelta) + Send + Sync>;
 
 /// The ACL seam. Runtime depends only on this trait; the concrete runner kind
 /// is selected once at the composition root. Object-safe so it can be held as
@@ -174,6 +192,16 @@ pub trait Runner: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_delta_carries_kind_and_text() {
+        let out = LogDelta { kind: LogKind::Output, text: "hi".into() };
+        let think = LogDelta { kind: LogKind::Thinking, text: "hmm".into() };
+        assert_eq!(out.kind, LogKind::Output);
+        assert_eq!(think.kind, LogKind::Thinking);
+        assert_ne!(out.kind, think.kind);
+        assert_eq!(out.text, "hi");
+    }
 
     #[test]
     fn runner_output_round_trips() {
