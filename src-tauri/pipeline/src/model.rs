@@ -176,7 +176,7 @@ pub struct Gate {
     pub downstream: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Escalation {
     pub id: String,
     #[serde(default)]
@@ -239,7 +239,7 @@ impl Default for Store {
 /// default `producer` (matches L1 "producers default approve, reviewers judge").
 /// Routing/verdict semantics consume this in the runtime-behavior chunk; the
 /// graph builder reads it for role-aware edges (replacing the `teamRole` regex).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     #[default]

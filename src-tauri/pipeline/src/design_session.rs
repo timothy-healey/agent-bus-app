@@ -6,7 +6,7 @@
 //! extracts + parses + best-effort-applies the slice (the trust boundary). The
 //! prose is never parsed for state.
 
-use crate::draft::{apply_slice, best_effort_validate, DraftPipeline, PromptSlice, Slice, TeamsSlice, WiringSlice};
+use crate::draft::{apply_kickoff_slice, apply_slice, best_effort_validate, DraftPipeline, KickoffSlice, PromptSlice, Slice, TeamsSlice, WiringSlice};
 use llm_chat::chat::{ChatRequest, ChatRunner};
 use serde::{Deserialize, Serialize};
 
@@ -17,18 +17,40 @@ fn slice_schema<T: schemars::JsonSchema>() -> String {
     serde_json::to_string(&schemars::schema_for!(T)).unwrap_or_default()
 }
 
-/// The kickoff one-shot system prompt: prose + a fenced ```json TEAMS slice whose
-/// shape is the DERIVED slice schema (one source of truth). Prose rules kept
-/// (2–5 teams, slug ids).
+/// The kickoff one-shot system prompt (G5/G3): prose + a fenced ```json
+/// **kickoff slice** whose shape is the DERIVED schema (one source of truth). The
+/// kickoff now emits a COMPLETE recommended graph in one Generate — teams with
+/// full `prompt_body` bodies (G5 — so the canvas is prefilled), an EXPLICIT `role`
+/// per team (G3 — producer/reviewer; never rely on the name regex), each team's
+/// route edges, the human-review `gates`, and the terminal `escalations` (a
+/// `needs-human` escalation for declines). The prose rules pin the well-formed
+/// review structure B4's canvas warning checks for (every reviewer arrives with
+/// approve + revise→its writer + decline→needs-human).
 pub fn kickoff_system_prompt() -> String {
     format!(
         "You are designing a multi-team Claude Code agent pipeline from a one-line \
 description. Reply with a short paragraph of prose, THEN a fenced ```json block \
-containing ONLY the team set. The object MUST include \"kind\":\"teams\" and match \
-this JSON Schema (the team-set payload):\n\
+containing the COMPLETE recommended graph. The object MUST match this JSON Schema \
+(the kickoff payload):\n\
 ```json\n{schema}\n```\n\
-Use 2 to 5 teams. ids are lowercase slugs. Emit ONLY the json in the fenced block.",
-        schema = slice_schema::<TeamsSlice>()
+Rules:\n\
+- Use 2 to 6 teams; ids are lowercase slugs.\n\
+- Every team MUST have a non-empty `prompt_body`: a clear 2-4 sentence \
+responsibility prompt written in the second person (\"You ...\").\n\
+- Set each team's `role` EXPLICITLY to \"producer\" (does work, hands off) or \
+\"reviewer\" (judges upstream work and emits approve/revise/reject). Include at \
+least one reviewer for a non-trivial flow.\n\
+- A producer routes its `on_approve` forward to the next stage (or to a gate).\n\
+- A reviewer MUST set all three routes: `on_approve` to its downstream (or a \
+gate), `on_revise` BACK to the team that produced the work it reviews, and \
+`on_reject` to \"needs-human\".\n\
+- Add a human-review `gate` (with a downstream) where a person should sign off \
+(e.g. after a spec is approved); a reviewer's on_approve may target the gate.\n\
+- Include one terminal escalation with id \"needs-human\" so declines have a home.\n\
+- The first team in the list is the entry/source. Every other team must be \
+reachable by following forward (on_approve / gate downstream) edges.\n\
+Emit ONLY the json in the fenced block.",
+        schema = slice_schema::<KickoffSlice>()
     )
 }
 
@@ -109,9 +131,18 @@ pub fn parse_slice(block: &str) -> Result<Slice, serde_json::Error> {
 /// block" vs a serde structure/parse error. This is the single failure classifier
 /// the bounded repair turn re-prompts on (so the model is told exactly what to fix).
 fn extract_and_parse(prose: &str) -> Result<Slice, String> {
+    extract_and_parse_as::<Slice>(prose)
+}
+
+/// Generic variant of `extract_and_parse` (G5): extract the fenced json block and
+/// deserialize it into any target type `T`, with the same SPECIFIC classifier
+/// messages the bounded repair turn re-prompts on. The kickoff one-shot parses a
+/// `KickoffSlice` through this; the per-step turns parse the tagged `Slice`.
+fn extract_and_parse_as<T: serde::de::DeserializeOwned>(prose: &str) -> Result<T, String> {
     let block = extract_json_block(prose)
         .ok_or_else(|| "no fenced ```json block was found in the reply".to_string())?;
-    parse_slice(&block).map_err(|e| format!("the fenced json did not match the slice schema: {e}"))
+    serde_json::from_str::<T>(&block)
+        .map_err(|e| format!("the fenced json did not match the slice schema: {e}"))
 }
 
 /// Bounded **repair turn** budget: up to this many repair re-prompts AFTER the
@@ -140,6 +171,21 @@ async fn chat_with_repair(
     system_prompt: &str,
     initial_user_message: String,
 ) -> (String, Option<Slice>) {
+    chat_with_repair_parsed(runner, dialogue_id, system_prompt, initial_user_message, extract_and_parse).await
+}
+
+/// Generic bounded-repair chat (G5): identical discipline to `chat_with_repair`
+/// (≤ `1 + MAX_REPAIR_RETRIES` model calls on the SAME `dialogue_id`, repair turns
+/// named by the specific failure, runner-error short-circuit), parameterised by a
+/// `parse` closure so the kickoff one-shot can extract a `KickoffSlice` instead of
+/// the tagged `Slice` WITHOUT forking the repair loop.
+async fn chat_with_repair_parsed<T>(
+    runner: &dyn ChatRunner,
+    dialogue_id: &str,
+    system_prompt: &str,
+    initial_user_message: String,
+    parse: impl Fn(&str) -> Result<T, String>,
+) -> (String, Option<T>) {
     let mut user_message = initial_user_message;
     let mut last_text = String::new();
     for attempt in 0..=MAX_REPAIR_RETRIES {
@@ -153,8 +199,8 @@ async fn chat_with_repair(
         match runner.chat(&req).await {
             Ok(reply) => {
                 last_text = reply.text.clone();
-                match extract_and_parse(&reply.text) {
-                    Ok(slice) => return (reply.text, Some(slice)),
+                match parse(&reply.text) {
+                    Ok(value) => return (reply.text, Some(value)),
                     Err(err) => {
                         if attempt == MAX_REPAIR_RETRIES {
                             return (last_text, None); // give up; draft unchanged
@@ -223,15 +269,16 @@ pub async fn kickoff_generate(
     draft.id = slug_id(description);
 
     let dialogue_id = format!("{session_id}:kickoff");
-    let (_text, slice) = chat_with_repair(
+    let (_text, slice) = chat_with_repair_parsed(
         runner,
         &dialogue_id,
         &kickoff_system_prompt(),
         description.to_string(),
+        extract_and_parse_as::<KickoffSlice>,
     )
     .await;
     if let Some(slice) = slice {
-        apply_slice(&mut draft, slice);
+        apply_kickoff_slice(&mut draft, slice);
     }
     draft
 }
@@ -347,18 +394,45 @@ mod tests {
         ChatReply { text: text.into(), usage: ChatUsage::default() }
     }
 
+    /// A canned kickoff reply: prose + a fenced KickoffSlice with two producers,
+    /// one reviewer (approve→gate, revise→writers, decline→needs-human), a gate,
+    /// and the terminal needs-human escalation. Exercises G5 (prompt bodies) + G3
+    /// (roles + routes + gate) in one Generate.
+    fn canned_kickoff() -> &'static str {
+        "I propose a research → write → review flow with a sign-off gate.\n\n\
+```json\n{\
+\"teams\":[\
+{\"id\":\"research\",\"name\":\"Research\",\"prompt_body\":\"You investigate the target repo and write findings.\",\"role\":\"producer\",\"on_approve\":\"writers\"},\
+{\"id\":\"writers\",\"name\":\"Writers\",\"prompt_body\":\"You turn findings into a spec.\",\"role\":\"producer\",\"on_approve\":\"reviewers\"},\
+{\"id\":\"reviewers\",\"name\":\"Reviewers\",\"prompt_body\":\"You review the spec and judge it.\",\"role\":\"reviewer\",\"on_approve\":\"gate-1\",\"on_revise\":\"writers\",\"on_reject\":\"needs-human\"}\
+],\
+\"gates\":[{\"id\":\"gate-1\",\"label\":\"Sign-off\",\"downstream\":\"needs-human\"}],\
+\"escalations\":[{\"id\":\"needs-human\",\"triggers\":[]}]\
+}\n```"
+    }
+
     #[tokio::test]
-    async fn kickoff_generate_builds_a_draft_from_a_teams_slice() {
-        let canned = "I propose a two-team flow.\n\n```json\n{\"kind\":\"teams\",\"teams\":[\
-            {\"id\":\"research\",\"name\":\"Research\"},{\"id\":\"writers\",\"name\":\"Writers\"}]}\n```";
-        let runner = FakeChatRunner::new(vec![reply(canned)]);
+    async fn kickoff_generate_builds_a_draft_from_a_kickoff_slice() {
+        let runner = FakeChatRunner::new(vec![reply(canned_kickoff())]);
         let draft = kickoff_generate(&runner, "sess-1", "Build a research+writing pipeline").await;
-        assert_eq!(draft.teams.len(), 2);
+        assert_eq!(draft.teams.len(), 3);
         assert!(draft.teams.iter().any(|t| t.id == "research"));
         // the description is carried onto the draft
         assert_eq!(draft.description, "Build a research+writing pipeline");
         // a non-empty id is stamped so the yaml has a basename (D7)
         assert!(!draft.id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn kickoff_generate_prefills_every_team_with_a_non_empty_prompt_body() {
+        // G5 (Task 2): the kickoff one-shot emits prompt bodies (teams + prompts in
+        // ONE Generate), so the canvas / NodeDrawer is prefilled — no separate step.
+        let runner = FakeChatRunner::new(vec![reply(canned_kickoff())]);
+        let draft = kickoff_generate(&runner, "sess-1", "research+writing pipeline").await;
+        assert!(!draft.teams.is_empty());
+        for t in &draft.teams {
+            assert!(!t.prompt_body.trim().is_empty(), "team {} has no prompt body", t.id);
+        }
     }
 
     #[tokio::test]
@@ -435,11 +509,10 @@ mod tests {
     #[tokio::test]
     async fn kickoff_repairs_a_malformed_first_reply_then_builds_the_draft() {
         let malformed = reply("Two teams: research and writers. (json omitted)");
-        let good = reply("```json\n{\"kind\":\"teams\",\"teams\":[\
-            {\"id\":\"research\",\"name\":\"Research\"},{\"id\":\"writers\",\"name\":\"Writers\"}]}\n```");
+        let good = reply(canned_kickoff());
         let runner = FakeChatRunner::new(vec![malformed, good]);
         let draft = kickoff_generate(&runner, "sess-1", "research+writing pipeline").await;
-        assert_eq!(draft.teams.len(), 2);
+        assert_eq!(draft.teams.len(), 3);
         let received = runner.received.lock().unwrap();
         assert_eq!(received.len(), 2); // initial + 1 repair
         assert_eq!(received[1].dialogue_id, "sess-1:kickoff");
@@ -527,10 +600,13 @@ mod tests {
     }
 
     #[test]
-    fn kickoff_prompt_embeds_the_derived_teams_schema() {
+    fn kickoff_prompt_embeds_the_derived_kickoff_schema() {
+        // G5: the kickoff prompt embeds the DERIVED KickoffSlice schema (one source
+        // of truth) — so prompt↔parser can't drift — and instructs prompt bodies.
         let p = kickoff_system_prompt();
-        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::TeamsSlice)).unwrap();
-        assert!(p.contains(&schema));
-        assert!(p.contains('2') && p.contains('5')); // 2–5 teams rule kept
+        let schema = serde_json::to_string(&schemars::schema_for!(crate::draft::KickoffSlice)).unwrap();
+        assert!(p.contains(&schema), "kickoff prompt must embed the derived KickoffSlice schema");
+        // G5: prompt-body instruction present.
+        assert!(p.contains("prompt_body"));
     }
 }
