@@ -224,6 +224,37 @@ describe("NodeDrawer — join editor (Lanes / Quorum / Early-cancel)", () => {
     fireEvent.click(screen.getByLabelText("early cancel for join-1"));
     expect(onChange.mock.calls.at(-1)?.[0].joins[0].cancel_on_reject).toBe(true);
   });
+
+  // DD7 interplay: a set quorum governs success and the runtime ignores
+  // cancel_on_reject, so the UI disables the early-cancel toggle and shows a hint.
+  it("with no quorum: early-cancel is enabled and the DD7 hint is absent", () => {
+    render(<NodeDrawer draft={joinDraft()} selectedId="join-1" onChange={() => {}} onClose={() => {}} />);
+    expect(screen.getByLabelText("early cancel for join-1")).not.toBeDisabled();
+    expect(screen.queryByText(/ignored while a quorum is set/i)).not.toBeInTheDocument();
+  });
+
+  it("with a quorum set: early-cancel is disabled and the DD7 hint is shown", () => {
+    const withQuorum: DraftPipeline = {
+      ...emptyDraft(),
+      joins: [{ id: "join-1", waits_for: ["a", "b", "c"], downstream: "", quorum: 2 }],
+    };
+    render(<NodeDrawer draft={withQuorum} selectedId="join-1" onChange={() => {}} onClose={() => {}} />);
+    expect(screen.getByLabelText("early cancel for join-1")).toBeDisabled();
+    expect(screen.getByText(/ignored while a quorum is set/i)).toBeInTheDocument();
+  });
+
+  it("setting a quorum live disables the early-cancel toggle (controlled)", () => {
+    function Host() {
+      const [draft, setDraft] = useState<DraftPipeline>(joinDraft);
+      return <NodeDrawer draft={draft} selectedId="join-1" onChange={setDraft} onClose={() => {}} />;
+    }
+    render(<Host />);
+    const cancel = screen.getByLabelText("early cancel for join-1");
+    expect(cancel).not.toBeDisabled();
+    fireEvent.change(screen.getByLabelText("quorum for join-1"), { target: { value: "2" } });
+    expect(screen.getByLabelText("early cancel for join-1")).toBeDisabled();
+    expect(screen.getByText(/ignored while a quorum is set/i)).toBeInTheDocument();
+  });
 });
 
 describe("NodeDrawer — G5 regenerate prompt", () => {
