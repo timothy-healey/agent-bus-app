@@ -30,7 +30,7 @@ Likely area: wizard/graph-builder `best_effort_validate` badge/banner timing —
 
 ---
 
-### LF4 · Native folder picker styling is jarring / off-brand — `uninvestigated`
+### LF4 · Native folder picker styling is jarring / off-brand — `promoted → G7`
 
 > "native folder picker styling is jarring and doesn't match"
 
@@ -38,7 +38,7 @@ Likely area: A3 `FolderPickerField` / `pickFolder` (the OS-native dialog). To in
 
 ---
 
-### LF5 · Node delete affordance + larger non-modal graph view — `uninvestigated`
+### LF5 · Node delete affordance + larger non-modal graph view — `promoted → G9 (delete) + G10 (full-page)`
 
 > "can i delete a node? maybe right click actions in graph view. And make the view larger, not inside a modal"
 
@@ -54,7 +54,7 @@ Likely area: (a) A4 `SkillAutocomplete` / `list_skills` discovery not surfacing 
 
 ---
 
-### LF7 · Scope fields unclear — folder/file pickers + info tooltips — `uninvestigated`
+### LF7 · Scope fields unclear — folder/file pickers + info tooltips — `promoted → G7 (pickers) + G8 (tooltips)`
 
 > "scope fields are unclear, can they be folder pickers / file pickers? should we have an informational question mark next to fields"
 
