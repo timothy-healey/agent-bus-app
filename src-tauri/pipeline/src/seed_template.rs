@@ -89,25 +89,32 @@ fn ddd_seed() -> DraftPipeline {
     d.name = "DDD: Spec → Plan → Implement".to_string();
     d.description =
         "Research → spec → spec-review → plan → plan-review → implement → code-review \
-         → hand off to human, with a spec-approval human gate."
+         → hand off to human. A spec-approval human gate; implementers work in a local \
+         git worktree (no push); reviewers use /ddd-council vet."
             .to_string();
     d.schema_version = SCHEMA_VERSION;
 
     d.teams = vec![
-        // The entry/source — scans the repo, no input store concern.
+        // The entry/source — scans the target repo for work, no input store concern.
         producer(
             "research",
             "Research",
-            "You investigate the target repository and existing artifacts, then write a \
-             findings/critique analysis the spec writers will build on.",
+            "You investigate the target repository and any existing artifacts to find \
+             concrete, well-scoped units of work for this delivery. For each candidate, \
+             record its location, why it is a candidate, and the proposed change. Aim for \
+             whole-scope coverage. Read-only — produce a candidate analysis; do not modify \
+             code. Emit one work-item per candidate.",
             "spec-writers",
             8,
         ),
         producer(
             "spec-writers",
             "Spec Writers",
-            "You turn the research findings into a clear specification document with \
-             explicit requirements, scope, and boundaries.",
+            "For each candidate, write a change specification. Invoke the superpowers \
+             brainstorming skill with recommended defaults and no operator intervention \
+             (never pause for questions), then write the spec: the target, the proposed \
+             change, the methods and call-sites affected, and explicit acceptance criteria. \
+             Produce a Markdown artifact; do not implement.",
             "spec-reviewers",
             6,
         ),
@@ -115,9 +122,10 @@ fn ddd_seed() -> DraftPipeline {
         reviewer(
             "spec-reviewers",
             "Spec Reviewers",
-            "You review the specification for completeness, soundness, and clarity. \
-             Approve to send it to the human sign-off gate, request revision back to \
-             the spec writers, or decline.",
+            "You review each specification for viability and soundness — scope, \
+             testability, and whether the approach is correct. Approve to send it to the \
+             human sign-off gate, request revision back to the spec writers, or decline \
+             (to needs-human) if it is unworkable.",
             "gate-spec",
             "spec-writers",
             4,
@@ -125,17 +133,19 @@ fn ddd_seed() -> DraftPipeline {
         producer(
             "plan-writers",
             "Plan Writers",
-            "You turn the approved specification into a concrete, step-by-step \
-             implementation plan.",
+            "You turn each approved specification into a concrete implementation plan. \
+             Invoke the superpowers writing-plans skill (TDD, bite-sized tasks, exact file \
+             paths, frequent commits). Produce a Markdown artifact; do not implement.",
             "plan-reviewers",
             6,
         ),
         reviewer(
             "plan-reviewers",
             "Plan Reviewers",
-            "You review the implementation plan against the approved spec. Approve to \
-             send it to the implementers, request revision back to the plan writers, \
-             or decline.",
+            "You vet each plan with /ddd-council vet (DDD soundness — boundaries, \
+             aggregates, the right seams) plus a general implementation review (sequencing, \
+             testability, completeness). Approve sound plans to the implementers, request \
+             revision back to the plan writers, or decline to needs-human.",
             "implementers",
             "plan-writers",
             4,
@@ -143,8 +153,11 @@ fn ddd_seed() -> DraftPipeline {
         producer(
             "implementers",
             "Implementers",
-            "You implement the approved plan in a worktree, committing the changes, \
-             then hand the diff to code review.",
+            "You implement the approved plan in a SELF-CONTAINED git worktree of the target \
+             repository, using the superpowers subagent-driven-development skill (TDD, with \
+             a two-stage review per task). NEVER push, fetch, or otherwise touch any remote \
+             — everything stays local. Commit the changes in the worktree and hand the diff \
+             to code review; do not merge.",
             "code-reviewers",
             6,
         ),
@@ -152,9 +165,9 @@ fn ddd_seed() -> DraftPipeline {
         reviewer(
             "code-reviewers",
             "Code Reviewers",
-            "You review the implemented changes against the plan and spec. Approve to \
-             hand the finished work off to a human, request revision back to the \
-             implementers, or decline.",
+            "You review the implemented changes against their spec and plan for conformance, \
+             quality, and test coverage. Approve to hand the finished work off to a human, \
+             request revision (send back) to the implementers, or decline.",
             "needs-human",
             "implementers",
             4,
