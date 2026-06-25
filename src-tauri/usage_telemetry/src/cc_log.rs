@@ -83,12 +83,23 @@ impl CcUsageStore {
         .await?;
         Ok(row.map(|(t,)| t).filter(|t| *t > 0))
     }
+
+    /// Delete rows older than `before_ts` (bounds table growth; the spec prunes
+    /// `now - 2 * window_secs` each sweep). Returns rows removed.
+    pub async fn prune(&self, before_ts: i64) -> Result<u64, CcUsageError> {
+        let res = sqlx::query("DELETE FROM cc_usage_log WHERE ts < ?")
+            .bind(before_ts)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transcript::parse_transcript;
+    use crate::transcript::CcUsageRecord;
     use sqlx::sqlite::SqlitePoolOptions;
 
     const SAMPLE: &str = include_str!("fixtures/transcript-sample.jsonl");
@@ -126,5 +137,30 @@ mod tests {
         assert!(oldest > 1_700_000_000);
         // none in an empty window
         assert!(store.oldest_in_window(i64::MAX / 2).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn prune_removes_rows_before_cutoff_keeps_in_window() {
+        let store = CcUsageStore::new(fresh_pool().await);
+        store.ingest(&parse_transcript(SAMPLE)).await.unwrap(); // ts ~ 1.7e9 (2023+)
+        // a row older than the cutoff and a row newer
+        store
+            .insert(&CcUsageRecord {
+                message_id: "old".into(),
+                ts: 1_000,
+                model: None,
+                input_tokens: 10,
+                output_tokens: 0,
+                cache_creation: 0,
+                cache_read: 0,
+            })
+            .await
+            .unwrap();
+        let removed = store.prune(2_000).await.unwrap();
+        assert_eq!(removed, 1); // only "old" (ts=1000 < 2000)
+        // the SAMPLE rows (ts ~1.7e9) survive
+        assert!(store.window_tokens(0).await.unwrap() > 0);
+        // pruning an empty range removes nothing
+        assert_eq!(store.prune(2_000).await.unwrap(), 0);
     }
 }
