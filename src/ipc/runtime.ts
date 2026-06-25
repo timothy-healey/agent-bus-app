@@ -163,6 +163,8 @@ export async function scaleTeam(teamId: string): Promise<number> {
 export interface TaskLog {
   task_id: string;
   delta: string;
+  /// Which channel the fragment belongs to (A): visible prose vs dimmed reasoning.
+  kind: "output" | "thinking";
 }
 
 /// Subscribe to backend display-only worker log fragments (R4).
