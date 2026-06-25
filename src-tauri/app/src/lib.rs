@@ -789,7 +789,9 @@ fn brake_on(
     reason: Option<String>,
 ) -> runtime::brake::BrakeState {
     runtime.brake.set_on(reason.unwrap_or_else(|| "manual".into()));
-    registry.kill_all();
+    // LH5: Stop kills WORKERS only — the user's in-flight chat survives. Exit
+    // (the RunEvent handler) still kill_all()s both.
+    registry.kill_workers();
     runtime.brake.state()
 }
 
@@ -1099,8 +1101,8 @@ impl ToolDispatcher for RootDispatcher {
                 let args = parse_args!(runtime::api::args::BrakeOnArgs);
                 let s = self.runtime.brake.clone();
                 s.set_on(args.reason.unwrap_or_else(|| "manual".into()));
-                // LF20: Stop kills every in-flight `claude` process group.
-                self.process_registry.kill_all();
+                // LH5: Stop kills WORKERS only; the in-flight chat survives.
+                self.process_registry.kill_workers();
                 let _ = self.app.emit(crate::events::USAGE_CHANGED, ());
                 ok(serde_json::to_value(s.state()).unwrap())
             }
