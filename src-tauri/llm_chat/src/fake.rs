@@ -199,10 +199,10 @@ impl ChatRunner for FakeStructuredChatRunner {
             return Err(err);
         }
         let idx = self.next_idx();
-        self.structured
-            .get(idx.min(self.structured.len().saturating_sub(1)))
-            .cloned()
-            .ok_or(ChatError::NoResult)
+        // Past the end of the seeded structured replies, return NoResult (the
+        // "model answered in prose, not a tool" signal) rather than clamping —
+        // so the agentic loop's prose-finish branch is reached deterministically.
+        self.structured.get(idx).cloned().ok_or(ChatError::NoResult)
     }
 }
 

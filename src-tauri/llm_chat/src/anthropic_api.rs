@@ -29,10 +29,13 @@ pub const MAX_OUTPUT_TOKENS: u32 = 8192;
 /// wire shape: model, system, one user message, max_tokens, budget-driven extended
 /// thinking. When `tools` is non-empty the request carries the `tools` array and
 /// (optionally) a forced `tool_choice` — this is the only place the anthropic
-/// tool-use idiom is constructed. `force` pins the model to a specific tool name;
-/// `None` with tools present sets `tool_choice` to `{ "type": "any" }` (the model
-/// MUST call one of the tools). Extended thinking is incompatible with a forced
-/// tool_choice, so it is omitted whenever a tool_choice is set.
+/// tool-use idiom is constructed. `force` pins the model to a specific tool name
+/// (`{ "type": "tool", "name": … }` — the model MUST call exactly that tool, used
+/// by the forced single-tool emit path). `None` with tools present sets
+/// `tool_choice` to `{ "type": "auto" }` (the model MAY call one of the tools or
+/// answer in prose, used by the multi-tool agentic loop where a prose reply means
+/// "done"). Extended thinking is incompatible with a tool_choice, so it is
+/// omitted whenever a tool_choice is set.
 pub fn build_request_body(req: &ChatRequest, tools: &[ChatToolDef], force: Option<&str>) -> Value {
     let mut body = json!({
         "model": req.model,
@@ -58,7 +61,7 @@ pub fn build_request_body(req: &ChatRequest, tools: &[ChatToolDef], force: Optio
         body["tools"] = Value::Array(tool_defs);
         body["tool_choice"] = match force {
             Some(name) => json!({ "type": "tool", "name": name }),
-            None => json!({ "type": "any" }),
+            None => json!({ "type": "auto" }),
         };
     }
 
@@ -320,9 +323,9 @@ mod tests {
     }
 
     #[test]
-    fn structured_body_without_force_uses_any_tool_choice() {
+    fn structured_body_without_force_uses_auto_tool_choice() {
         let body = build_request_body(&req(), &[tool()], None);
-        assert_eq!(body["tool_choice"]["type"], "any");
+        assert_eq!(body["tool_choice"]["type"], "auto");
         assert!(body["tool_choice"].get("name").is_none());
     }
 
