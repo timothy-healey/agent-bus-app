@@ -382,6 +382,14 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
 
     let result = invoke(ctx, team, &task, system_prompt).await;
 
+    // The implementer's worktree (if any) was just persisted inside `invoke`;
+    // refresh it onto the in-memory parent so the child copies below inherit it.
+    if task.worktree_path.is_none() {
+        if let Ok(refreshed) = ctx.tasks.get(&task.id).await {
+            task.worktree_path = refreshed.worktree_path;
+        }
+    }
+
     // 5a. FAILURE (invoke error OR no parseable items): release the downstream
     //     reservation (none was taken for a join target), route onto the
     //     operational-failure path.
@@ -441,6 +449,9 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
             now_unix(),
         );
         child.topic = topic_for_item(first.description.as_deref(), &produced_key);
+        // Worktree isolation: the child inherits the item's worktree (so a
+        // downstream reviewer / gate shares the implement tree). `None` upstream.
+        child.worktree_path = task.worktree_path.clone();
         if downstream_is_gate {
             // A gated item waits in the gate store for the human verdict — the
             // human is the consumer (Gates-as-stores). It is NOT queued for a
@@ -522,6 +533,8 @@ pub async fn apply_gate_verdict(
                 task.target_repo.clone(),
                 now_unix(),
             );
+            // Worktree isolation: the approved item keeps its worktree downstream.
+            child.worktree_path = task.worktree_path.clone();
             if ds_is_gate {
                 child.state = TaskState::Gated;
             }
@@ -562,6 +575,8 @@ pub async fn apply_gate_verdict(
             // A revise is a re-claim: bump attempts so compose_invocation_message
             // pulls the persisted feedback bundle (revise-once feedback path).
             child.attempts = (task.attempts + 1).min(MAX_ATTEMPTS);
+            // Worktree isolation: a revise→implement loop reuses the same tree.
+            child.worktree_path = task.worktree_path.clone();
             ctx.tasks.insert(&child).await?;
             task.state = TaskState::Done;
             task.updated_at = now_unix();
@@ -817,6 +832,8 @@ pub async fn resolve_join_barrier(
                 lane_task.target_repo.clone(),
                 now_unix(),
             );
+            // Worktree isolation: the joined continuation keeps the item's tree.
+            child.worktree_path = lane_task.worktree_path.clone();
             if ds_is_gate {
                 child.state = TaskState::Gated;
             }
@@ -851,6 +868,8 @@ pub async fn resolve_join_barrier(
                     // Carry + bump attempts: the bundled critiques are composed at
                     // re-claim, and the count makes the revision a one-shot.
                     child.attempts = (lane_attempts + 1).min(MAX_ATTEMPTS);
+                    // Worktree isolation: a join revise→implement loop reuses the tree.
+                    child.worktree_path = lane_task.worktree_path.clone();
                     ctx.tasks.insert(&child).await?;
                     return Ok(StepOutcome::Revised { task_id: lane_task.id.0.clone(), producer });
                 }
@@ -868,6 +887,8 @@ pub async fn resolve_join_barrier(
                 lane_task.target_repo.clone(),
                 now_unix(),
             );
+            // Worktree isolation: the escalated item keeps its tree for the human.
+            child.worktree_path = lane_task.worktree_path.clone();
             child.state = TaskState::NeedsHuman;
             ctx.tasks.insert(&child).await?;
             Ok(StepOutcome::Escalated { task_id: lane_task.id.0.clone() })
@@ -1275,12 +1296,30 @@ async fn invoke(
     if let Some(repo) = effective_repo.clone() {
         vars = vars.with_target_repo(repo);
     }
-    // LF26: the child `claude` runs in the work-item's resolved working dir —
-    // the worktree for implementers, the target repo otherwise. v1 has no
-    // per-item worktree wiring, so this is the effective `${target_repo}` (task
-    // override → project default). `None` keeps the pre-LF26 inherit-cwd
-    // behaviour for a topic-less run with no target repo configured.
-    let working_dir = effective_repo.map(|p| p.to_string_lossy().into_owned());
+    // LF26 + worktree isolation: the child `claude` runs in the work-item's
+    // resolved working dir. An inherited `worktree_path` wins; else an
+    // Implementer stage creates+records a worktree via the injected provider;
+    // else (read-only stages, or no provider/repo) the effective target repo
+    // (chunk-1 behavior). `None` keeps the pre-LF26 inherit-cwd behaviour for a
+    // topic-less run with no target repo configured.
+    let working_dir = if let Some(p) = task.worktree_path.clone() {
+        Some(p)
+    } else if team.role == pipeline::model::Role::Implementer {
+        match (&ctx.worktree_provider, effective_repo.as_ref()) {
+            (Some(wp), Some(repo)) => {
+                let path = wp
+                    .ensure(&ctx.run_id, task.item_key.as_deref().unwrap_or_default(), &repo.to_string_lossy())
+                    .map_err(EngineError::Invoke)?;
+                // Record on the task so downstream children inherit it. Persist
+                // before the run so a crash mid-run still resumes on the same tree.
+                ctx.tasks.set_worktree_path(&task.id.0, &path).await?;
+                Some(path)
+            }
+            _ => effective_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        }
+    } else {
+        effective_repo.as_ref().map(|p| p.to_string_lossy().into_owned())
+    };
     // Grant write access to this stage's ABSOLUTE artifact dir (the L1 + LF26
     // fix): the dir is outside the worker's cwd, so it must be in scope.writes
     // (settings allow) AND surfaced as an --add-dir (the build_settings pass
@@ -1715,6 +1754,70 @@ mod tests {
         assert_eq!(received[0].working_dir.as_deref(), Some("/repo/here"));
     }
 
+    #[tokio::test]
+    async fn invoke_creates_and_persists_worktree_for_implementer_without_inherited_path() {
+        let provider = std::sync::Arc::new(RecordingProvider {
+            ensure_calls: Default::default(),
+            reset_calls: Default::default(),
+            returns: "/proj/worktrees/R-1/alpha".into(),
+        });
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
+        ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
+        ctx.worktree_provider = Some(provider.clone());
+        let impl_team = team("implementers", None, Role::Implementer, 8);
+        let item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "implementers".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+        let _ = invoke(&ctx, &impl_team, &item, "sys".into()).await;
+        assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/proj/worktrees/R-1/alpha"));
+        assert_eq!(provider.ensure_calls.lock().unwrap().len(), 1);
+        assert_eq!(provider.ensure_calls.lock().unwrap()[0], (ctx.run_id.clone(), "alpha".into(), "/repo".into()));
+        let back = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!(back.worktree_path.as_deref(), Some("/proj/worktrees/R-1/alpha"));
+    }
+
+    #[tokio::test]
+    async fn invoke_uses_inherited_worktree_path_without_calling_ensure() {
+        let provider = std::sync::Arc::new(RecordingProvider { ensure_calls: Default::default(), reset_calls: Default::default(), returns: "/should/not/be/used".into() });
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
+        ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
+        ctx.worktree_provider = Some(provider.clone());
+        let impl_team = team("implementers", None, Role::Implementer, 8);
+        let mut item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "implementers".into(), None, None, 100);
+        item.worktree_path = Some("/proj/worktrees/R-1/alpha".into());
+        ctx.tasks.insert(&item).await.unwrap();
+        let _ = invoke(&ctx, &impl_team, &item, "sys".into()).await;
+        assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/proj/worktrees/R-1/alpha"));
+        assert!(provider.ensure_calls.lock().unwrap().is_empty(), "inherited path must not call ensure");
+    }
+
+    #[tokio::test]
+    async fn invoke_producer_falls_back_to_target_repo() {
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
+        ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
+        ctx.worktree_provider = Some(std::sync::Arc::new(RecordingProvider { ensure_calls: Default::default(), reset_calls: Default::default(), returns: "/x".into() }));
+        let prod = team("research", Some("spec"), Role::Producer, 8);
+        let item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+        let _ = invoke(&ctx, &prod, &item, "sys".into()).await;
+        assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/repo"));
+    }
+
+    #[tokio::test]
+    async fn invoke_implementer_with_no_provider_falls_back_to_target_repo() {
+        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
+        ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
+        ctx.worktree_provider = None;
+        let impl_team = team("implementers", None, Role::Implementer, 8);
+        let item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "implementers".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+        let _ = invoke(&ctx, &impl_team, &item, "sys".into()).await;
+        assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/repo"));
+    }
+
     #[test]
     fn fallback_user_message_is_never_empty_for_a_topic_less_run() {
         // source/generator: no parent artifact → a non-empty kickoff directive.
@@ -1987,6 +2090,38 @@ mod tests {
         assert_eq!(queued[0].item_key.as_deref(), Some("alpha"));
         // the claimed item is Done
         assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn transform_child_inherits_parent_worktree_path() {
+        // implementers (Implementer) -> code-reviewers (Reviewer, terminal): the
+        // committed child must carry the implementer's worktree_path so the
+        // reviewer shares the implement tree.
+        let p = pipeline(vec![
+            team("implementers", Some("code-reviewers"), Role::Implementer, 8),
+            team("code-reviewers", None, Role::Reviewer, 8),
+        ]);
+        let provider = std::sync::Arc::new(RecordingProvider {
+            ensure_calls: Default::default(),
+            reset_calls: Default::default(),
+            returns: "/proj/worktrees/R-1/alpha".into(),
+        });
+        let out = items_out("KEY: alpha\nARTIFACT: artifacts/impl/alpha.md");
+        let mut ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
+        ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
+        ctx.worktree_provider = Some(provider.clone());
+        ctx.stores.ensure(&ctx.run_id, "implementers", 8).await.unwrap();
+        ctx.stores.ensure(&ctx.run_id, "code-reviewers", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "implementers").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "implementers".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        let _ = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let queued = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].current_stage, "code-reviewers");
+        assert_eq!(queued[0].worktree_path.as_deref(), Some("/proj/worktrees/R-1/alpha"));
     }
 
     #[tokio::test]
