@@ -115,3 +115,11 @@ Design idea raised during the C4 brainstorm (not a raw test finding): once the c
 > Live error: "database error: FOREIGN KEY constraint failed (code 787)" on delete-project (ProjectSwitcher). Operator: "delete should cascade so there's no longer any remnants of the project pieces."
 
 Root cause: `ProjectStore::remove` did a bare `DELETE FROM projects` while child rows (conversations/tasks/comments/audit/runs/stores/ledger/workers) reference it; FK enforcement blocked it. Fixed: transactional cascade of ALL DB children + worker rows, + on-disk cleanup (scaffolded subdirs + git-worktree teardown) guarded to NEVER touch `target_repo` (skips if target_repo == root or nested). Commits a158619 / 621f95c / 4c05870 / 9bab60a.
+
+---
+
+### LF15 · Draggable bottom-chat (terminal) height — `fixed`
+
+> "can we make the size of the bottom chat draggable"
+
+Added a drag-to-resize handle on the docked terminal's top edge (pointer drag + ↑/↓ keyboard, clamped [120px, 80vh], role="separator"); the panel uses a resizable height instead of a fixed 280px max. Session-only. Frontend-only.
