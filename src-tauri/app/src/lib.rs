@@ -79,6 +79,8 @@ struct RootDispatcher {
     app: tauri::AppHandle,
     /// LF20: brake-on (Stop) kills every in-flight `claude` process group.
     process_registry: Arc<process_registry::ProcessRegistry>,
+    /// LH6: persist the brake row on every set_on/set_off through the dispatcher.
+    brake_store: Arc<brake_persist::BrakeStore>,
 }
 
 /// Concrete revise-bundle reader (Plan 4 vet F1 consumer). Reads the comments
@@ -789,14 +791,32 @@ async fn create_project_from_draft(
 async fn brake_on(
     runtime: tauri::State<'_, Arc<RuntimeState>>,
     registry: tauri::State<'_, Arc<process_registry::ProcessRegistry>>,
+    brake_store: tauri::State<'_, Arc<brake_persist::BrakeStore>>,
     reason: Option<String>,
 ) -> Result<runtime::brake::BrakeState, String> {
-    runtime.brake.set_on(reason.unwrap_or_else(|| "manual".into()));
+    let reason = reason.unwrap_or_else(|| "manual".into());
+    runtime.brake.set_on(reason.as_str());
+    // LH6: persist the brake row so an explicit Stop survives app exit/reboot.
+    let _ = brake_store.save(true, Some(&reason), now_unix()).await;
     // LH5: Stop kills WORKERS only — the user's in-flight chat survives. Exit
     // (the RunEvent handler) still kill_all()s both. LH3: the bounded grace runs
     // on the blocking pool so it never stalls a Tokio worker; the user-facing
     // Stop awaits the kill so the UI is truthful.
     registry.kill_workers_blocking().await;
+    Ok(runtime.brake.state())
+}
+
+/// LH6: root `brake_off` (Resume) wrapper. Mirrors the root `brake_on`: clears
+/// the runtime brake and persists the OFF row. Replaces `runtime::api::brake_off`
+/// in the invoke handler so persistence stays consistent. (LH8b adds the kill-
+/// latch clear so resume re-enables spawning.)
+#[tauri::command(rename_all = "snake_case")]
+async fn brake_off(
+    runtime: tauri::State<'_, Arc<RuntimeState>>,
+    brake_store: tauri::State<'_, Arc<brake_persist::BrakeStore>>,
+) -> Result<runtime::brake::BrakeState, String> {
+    runtime.brake.set_off();
+    let _ = brake_store.save(false, None, now_unix()).await;
     Ok(runtime.brake.state())
 }
 
@@ -1105,14 +1125,22 @@ impl ToolDispatcher for RootDispatcher {
             "brake_on" => {
                 let args = parse_args!(runtime::api::args::BrakeOnArgs);
                 let s = self.runtime.brake.clone();
-                s.set_on(args.reason.unwrap_or_else(|| "manual".into()));
+                let reason = args.reason.unwrap_or_else(|| "manual".into());
+                s.set_on(reason.as_str());
+                // LH6: persist the brake row.
+                let _ = self.brake_store.save(true, Some(&reason), now_unix()).await;
                 // LH5: Stop kills WORKERS only; the in-flight chat survives.
                 // LH3: offload the bounded grace off the Tokio worker thread.
                 self.process_registry.kill_workers_blocking().await;
                 let _ = self.app.emit(crate::events::USAGE_CHANGED, ());
                 ok(serde_json::to_value(s.state()).unwrap())
             }
-            "brake_off" => { self.runtime.brake.set_off(); let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::to_value(self.runtime.brake.state()).unwrap()) }
+            "brake_off" => {
+                self.runtime.brake.set_off();
+                let _ = self.brake_store.save(false, None, now_unix()).await;
+                let _ = self.app.emit(crate::events::USAGE_CHANGED, ());
+                ok(serde_json::to_value(self.runtime.brake.state()).unwrap())
+            }
             "scale_team" => {
                 let args = parse_args!(runtime::api::args::ScaleTeamArgs);
                 match runtime::api::scale_team_inner(&self.runtime, args.team_id) {
@@ -1313,6 +1341,13 @@ pub fn run() {
                     Arc::new(process_records::LiveProcessStore::new(pool.clone()));
                 process_registry.set_live_store(live_processes.clone());
 
+                // LH6: durable brake state. Built now (pool ready); persisted on
+                // every set_on/set_off at the root and restored (reason-aware) on
+                // boot. Managed so the root `brake_on`/`brake_off` commands resolve
+                // it; cloned into the dispatcher + auto-meter sweep.
+                let brake_store = Arc::new(brake_persist::BrakeStore::new(pool.clone()));
+                handle.manage(brake_store.clone());
+
                 // Workspace state (Plan 1).
                 let project_store = Arc::new(ProjectStore::new(pool.clone()));
                 handle.manage(WorkspaceState { store: project_store.clone() });
@@ -1458,6 +1493,7 @@ pub fn run() {
                     usage: usage_state_arc.clone(),
                     app: handle.clone(),
                     process_registry: process_registry.clone(),
+                    brake_store: brake_store.clone(),
                 });
 
                 // The terminal's free-form chat engine (Plan llm_chat). One
@@ -1573,6 +1609,7 @@ pub fn run() {
                     let pool = pool.clone();
                     let handle = handle.clone();
                     let process_registry = process_registry.clone();
+                    let brake_store = brake_store.clone();
                     let ingestor = ingestor.clone();
                     tauri::async_runtime::spawn(async move {
                         use usage_telemetry::api::load_config;
@@ -1606,8 +1643,18 @@ pub fn run() {
                             let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
                             if let Ok(snap) = compute_snapshot(&cc, &worker, &cfg, brake.is_on(), now).await {
                                 match auto_brake_decision(&snap, &cfg, auto_on) {
-                                    BrakeDecision::SetOn(reason) => { brake.set_on(reason); process_registry.kill_all(); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
-                                    BrakeDecision::Release => { brake.set_off(); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
+                                    BrakeDecision::SetOn(reason) => {
+                                        brake.set_on(reason.as_str());
+                                        // LH6: persist the brake row.
+                                        let _ = brake_store.save(true, Some(&reason), now).await;
+                                        process_registry.kill_all();
+                                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                                    }
+                                    BrakeDecision::Release => {
+                                        brake.set_off();
+                                        let _ = brake_store.save(false, None, now).await;
+                                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                                    }
                                     BrakeDecision::NoChange => {}
                                 }
                             }
@@ -1661,7 +1708,7 @@ pub fn run() {
             runtime::api::list_runs,
             runtime::api::run_store_occupancy,
             brake_on,
-            runtime::api::brake_off,
+            brake_off,
             runtime::api::brake_state,
             runtime::api::scale_team,
             review::api::add_comment,
