@@ -209,6 +209,14 @@ impl ProcessRegistry {
         self.signal_and_reap(taken);
     }
 
+    /// Async wrapper for the Stop path (LH3): runs the blocking grace loop on the
+    /// blocking thread pool so it never stalls a Tokio worker. Brake-on callers
+    /// flip the brake first (new claims gated immediately), then await this.
+    pub async fn kill_workers_blocking(self: &Arc<Self>) {
+        let me = self.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || me.kill_workers()).await;
+    }
+
     /// Shared kill primitive: SIGTERM each group, grace-poll ~2.5s, SIGKILL any
     /// survivor, then `.wait()` each owned `Child` to reap the zombie. Holding the
     /// owned `Child` until after SIGKILL means the leader pid cannot be recycled
@@ -577,6 +585,35 @@ mod tests {
         std::env::set_var("PATH", old_path);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(res.is_ok(), "chat is exempt from a workers-only latch: {res:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::zombie_processes)] // kill_workers reaps the owned Child
+    async fn kill_workers_blocking_offloads_and_kills() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        let reg = Arc::new(ProcessRegistry::new());
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30 & wait")
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pgid = child.id() as i32;
+        reg.register_child_scoped(pgid, child, Scope::Worker);
+        // A concurrent tick must make progress while the kill runs on the blocking pool.
+        let ticker =
+            tokio::spawn(async { tokio::time::sleep(Duration::from_millis(10)).await; 7 });
+        reg.kill_workers_blocking().await;
+        assert_eq!(ticker.await.unwrap(), 7, "the executor was not starved");
+        let alive = |p: i32| unsafe { libc::kill(-p, 0) == 0 };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while alive(pgid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(pgid));
     }
 
     #[test]
