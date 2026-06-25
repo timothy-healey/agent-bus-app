@@ -6,7 +6,7 @@ Status legend: `uninvestigated` (default) · `investigating` · `promoted` (move
 
 ---
 
-### LF1 · Represent reviewer revisions in the graph + decline behavior — `uninvestigated`
+### LF1 · Represent reviewer revisions in the graph + decline behavior — `promoted → G2`
 
 > "need a way to represent reviewers revisions in graph / what happens when decline"
 
@@ -14,7 +14,7 @@ Likely area: graph-builder canvas (how a reviewer's revise edge/loop is shown) +
 
 ---
 
-### LF2 · Auto-graph handles review nodes poorly (mostly only implementation nodes) — `uninvestigated`
+### LF2 · Auto-graph handles review nodes poorly (mostly only implementation nodes) — `promoted → G3`
 
 > "the auto graph didn't do so well with each review node. mostly just the implementation nodes"
 
@@ -70,7 +70,7 @@ Likely area: node-drawer Runner editor — replace the free-text model input wit
 
 ---
 
-### LF9 · Stores/queues not represented in the graph — `uninvestigated`
+### LF9 · Stores/queues not represented in the graph — `promoted → G1`
 
 > "how is the store of outcomes represented by the graph, i just see edges between working nodes but no representation of the queues"
 
