@@ -103,6 +103,10 @@ impl ProcessRegistry {
     /// so pgid == the child's pid), so `claude`'s own tool/subagent children die
     /// too. On non-unix this is a logged no-op (the documented Windows gap).
     pub fn kill_all(&self) {
+        // Set the latch FIRST so any child racing past the brake gate self-kills
+        // on register instead of escaping the snapshot. The latch stays set until
+        // end_killing() (brake-off / resume) — kill_all never clears it.
+        self.begin_killing();
         let pgids = self.snapshot();
         if pgids.is_empty() {
             self.inner.lock().unwrap().groups.clear();
@@ -281,6 +285,16 @@ mod tests {
         reg.end_killing(); // latch off (brake-off / resume)
         assert!(matches!(reg.register_pgid(99), RegisterDecision::Registered));
         assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn kill_all_leaves_the_latch_set_so_stragglers_self_kill() {
+        let reg = ProcessRegistry::new();
+        reg.kill_all(); // empty sweep, but the latch must now be set
+        assert!(
+            matches!(reg.register_pgid(7), RegisterDecision::KillImmediately),
+            "after kill_all the latch is held until end_killing()"
+        );
     }
 
     #[test]
