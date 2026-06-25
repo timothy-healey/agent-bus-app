@@ -119,6 +119,87 @@ impl runtime::revision::RevisionBundleReader for SqliteRevisionReader {
 fn ok(v: serde_json::Value) -> ToolCallResult { ToolCallResult::Ok { result: v } }
 fn err(e: impl ToString) -> ToolCallResult { ToolCallResult::Err { error: e.to_string() } }
 
+/// The app's git-backed worktree provider (worktree isolation). Implements the
+/// git-unaware `runtime::engine::WorktreeProvider` over `workspace`'s
+/// `WorktreeGit` seam. Lives at the composition root so `runtime` never learns
+/// `git`. The project root scopes every worktree under `<root>/worktrees/`.
+pub struct GitCliWorktreeProvider {
+    git: std::sync::Arc<dyn workspace::worktree::WorktreeGit>,
+    project_root: String,
+}
+
+impl GitCliWorktreeProvider {
+    pub fn new(git: std::sync::Arc<dyn workspace::worktree::WorktreeGit>, project_root: String) -> Self {
+        Self { git, project_root }
+    }
+
+    fn worktree_path_for(&self, run_id: &str, item_key: &str) -> String {
+        std::path::Path::new(&self.project_root)
+            .join("worktrees")
+            .join(run_id)
+            .join(item_key)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+impl runtime::engine::WorktreeProvider for GitCliWorktreeProvider {
+    fn ensure(&self, run_id: &str, item_key: &str, _target_repo: &str) -> Result<String, String> {
+        let path = self.worktree_path_for(run_id, item_key);
+        // Idempotent: a worktree dir already present (resume / re-claim) is reused.
+        if std::path::Path::new(&path).is_dir() {
+            return Ok(path);
+        }
+        let branch = format!("agent-bus/{run_id}/{item_key}");
+        // Create the branch off the project root repo's current HEAD; the
+        // path-scope guard runs no git on an out-of-subtree path. (The common
+        // case has project_root == target_repo; per the spec the worktree lives
+        // under <project_root>/worktrees/ and branches off HEAD.)
+        workspace::worktree::add_worktree_inner(
+            self.git.as_ref(),
+            &self.project_root,
+            &path,
+            &branch,
+            "HEAD",
+        )?;
+        Ok(path)
+    }
+
+    fn reset(&self, worktree_path: &str) -> Result<(), String> {
+        workspace::worktree::reset_worktree_inner(self.git.as_ref(), &self.project_root, worktree_path)
+    }
+}
+
+#[cfg(test)]
+mod worktree_provider_tests {
+    use super::*;
+
+    #[test]
+    fn git_cli_worktree_provider_ensure_derives_path_and_branch() {
+        use std::sync::Mutex;
+        struct FakeGit { added: Mutex<Vec<(String, String, String, String)>> }
+        impl workspace::worktree::WorktreeGit for FakeGit {
+            fn list_porcelain(&self, _r: &str) -> Result<String, String> { Ok(String::new()) }
+            fn remove(&self, _r: &str, _p: &str) -> Result<(), String> { Ok(()) }
+            fn add(&self, repo: &str, path: &str, branch: &str, base: &str) -> Result<(), String> {
+                self.added.lock().unwrap().push((repo.into(), path.into(), branch.into(), base.into()));
+                Ok(())
+            }
+            fn reset(&self, _p: &str) -> Result<(), String> { Ok(()) }
+        }
+        let git = std::sync::Arc::new(FakeGit { added: Mutex::new(vec![]) });
+        let provider = GitCliWorktreeProvider::new(git.clone(), "/proj".into());
+        let path = runtime::engine::WorktreeProvider::ensure(&provider, "R-1", "alpha", "/repo").unwrap();
+        assert_eq!(path, "/proj/worktrees/R-1/alpha");
+        let calls = git.added.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "/proj");
+        assert_eq!(calls[0].1, "/proj/worktrees/R-1/alpha");
+        assert_eq!(calls[0].2, "agent-bus/R-1/alpha");
+        assert_eq!(calls[0].3, "HEAD");
+    }
+}
+
 /// Couples the display-only prose sink with an explicit step-boundary `reset`, so
 /// the `DeltaSink` stays prose-only (vet F1) — no control marker rides the prose
 /// channel. The engine calls `reset()` at the top of each model step and passes
@@ -1420,6 +1501,18 @@ pub fn run() {
                 let (project_id, project_root, project_target_repo, pipe) = load_active(&project_store).await;
                 let tasks = Arc::new(TaskStore::new(pool.clone()));
                 let invocation_audit = Arc::new(runtime::invocation_audit::InvocationAuditStore::new(pool.clone()));
+
+                // Worktree isolation: the git-unaware seam, built at the root so
+                // `runtime` never learns `git`. Threaded into each run's
+                // EngineContext (via WorkerDeps) AND used for WT2 reset-on-resume
+                // below. Reuses the same GitCli managed for the cleanup commands.
+                let worktree_git: std::sync::Arc<dyn workspace::worktree::WorktreeGit> =
+                    std::sync::Arc::new(workspace::worktree::GitCli);
+                let worktree_provider: Option<std::sync::Arc<dyn runtime::engine::WorktreeProvider>> =
+                    Some(std::sync::Arc::new(GitCliWorktreeProvider::new(
+                        worktree_git.clone(),
+                        project_root.clone(),
+                    )));
                 // LH6: restore a persisted MANUAL brake (come up braked); an
                 // auto-meter brake stays OFF so the sweep re-derives it.
                 let brake = restore_brake_from(&brake_store).await;
@@ -1429,8 +1522,29 @@ pub fn run() {
                 // surviving competitor. Best-effort; clears the records.
                 process_records::reap_orphans(&live_processes).await;
 
-                // F4 crash recovery: release any tasks stuck in `running`.
-                let _ = tasks.release_orphaned_running(now_unix()).await;
+                // F4 crash recovery + WT2 reset-on-resume: re-queue orphaned
+                // running tasks (the prior session's `claude` groups were already
+                // reaped above), then reset each re-queued implementer worktree to
+                // its baseline before a worker can re-claim it (the kill may have
+                // left a half-written tree). Runtime stays git-unaware: it reports
+                // the re-queued rows; the root (which holds the provider) resets.
+                // Read-only stages carry no worktree_path, so they are skipped; a
+                // cleanly-committed worktree of a task that was NOT re-queued is
+                // never touched.
+                match tasks.release_orphaned_running(now_unix()).await {
+                    Ok(requeued) => {
+                        if let Some(wp) = worktree_provider.as_ref() {
+                            for t in &requeued {
+                                if let Some(path) = t.worktree_path.as_deref() {
+                                    if let Err(e) = wp.reset(path) {
+                                        eprintln!("app: WT2 worktree reset failed for {}: {e}", t.id.0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("app: release_orphaned_running failed: {e}"),
+                }
 
                 // Bounded-buffer engine aggregates (④a/④d). ONE instance each,
                 // shared by RuntimeState (start_run + gate verdicts) and the
@@ -1611,6 +1725,7 @@ pub fn run() {
                         fanout: fanout.clone(),
                         process_registry: process_registry.clone(),
                         app_data: data_dir.clone(),
+                        worktree_provider: worktree_provider.clone(),
                     },
                 ));
                 handle.manage(activator.clone());

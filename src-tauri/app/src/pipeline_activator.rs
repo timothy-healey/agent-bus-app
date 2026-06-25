@@ -65,6 +65,10 @@ pub struct WorkerDeps {
     /// The Tauri app-data dir (LF26): the root of the app-owned artifact base
     /// `<app_data>/projects/<id>/artifacts`, threaded into each `EngineContext`.
     pub app_data: std::path::PathBuf,
+    /// The injected, git-unaware worktree seam (worktree isolation). Threaded
+    /// into each run's `EngineContext` so an Implementer stage resolves its
+    /// working dir to a per-work-item worktree. `None` ⇒ target-repo fallback.
+    pub worktree_provider: Option<Arc<dyn runtime::engine::WorktreeProvider>>,
 }
 
 /// Owns the runtime-activation lifecycle: swap the active pipeline + (re)spawn
@@ -373,6 +377,7 @@ impl PipelineActivator {
         let usage_sink = self.deps.usage_sink.clone();
         let log_sink = self.deps.log_sink.clone();
         let audit = self.deps.audit.clone();
+        let worktree_provider = self.deps.worktree_provider.clone();
         let project_root = active.project_root.clone();
         let app_data = self.deps.app_data.clone();
         let project_id_for_base = active.project_id.clone();
@@ -403,6 +408,7 @@ impl PipelineActivator {
             usage_sink: usage_sink.clone(),
             log_sink: log_sink.clone(),
             audit: audit.clone(),
+            worktree_provider: worktree_provider.clone(),
         }
     }
 }
