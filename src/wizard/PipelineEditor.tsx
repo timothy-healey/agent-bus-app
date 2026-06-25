@@ -122,6 +122,7 @@ export function PipelineEditor({
             skills={skills}
             onRefreshSkills={refreshSkills}
             showBanner={showBanner}
+            targetRepo={projects.find((p) => p.id === projectId)?.target_repo ?? null}
             onValidityChange={(valid) => { setCanvasValid(valid); if (valid) setShowBanner(false); }}
           />
         </div>

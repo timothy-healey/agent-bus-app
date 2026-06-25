@@ -47,6 +47,10 @@ interface PipelineCanvasProps {
   /// G11 — report current best-effort validity to the host so it can gate the
   /// nav-tree steps + Continue + Create at attempt time. `issues` is the raw list.
   onValidityChange?: (valid: boolean, issues: string[]) => void;
+  /// G7 — the project's target repo (absolute path). Threaded to the NodeDrawer
+  /// so Scope reads/writes can offer the in-app FileTreePicker rooted here.
+  /// Absent (mid-create before a repo is bound) = the comma-text fallback only.
+  targetRepo?: string | null;
 }
 
 /// Edge stroke per route kind (DESIGN.md §Pipeline-editor edges): hand-off /
@@ -67,7 +71,7 @@ const PALETTE_LABEL: Record<NodeKind, string> = {
   escalation: "Escalation",
 };
 
-function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner = false, onValidityChange }: PipelineCanvasProps) {
+function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner = false, onValidityChange, targetRepo }: PipelineCanvasProps) {
   // LOCAL, ephemeral position map (spec §Positions) — never persisted.
   const [positions, setPositions] = useState<Record<string, XY>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -253,7 +257,7 @@ function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner
         />
       )}
 
-      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} skills={skills} onDelete={deleteNode} />
+      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} skills={skills} onDelete={deleteNode} targetRepo={targetRepo} />
     </div>
   );
 }
