@@ -50,6 +50,21 @@ describe("ProjectSwitcher (G13/G14)", () => {
     expect(screen.getByRole("button", { name: /delete project alpha/i })).toBeInTheDocument();
   });
 
+  it("a rejecting onDelete does not throw and still resets the confirm row", async () => {
+    // Regression: onDelete used to be awaited with no catch → unhandled rejection
+    // + stuck confirm. App's handler now surfaces the error; the switcher's
+    // finally must still reset confirming.
+    const onDelete = vi.fn().mockRejectedValue(new Error("FOREIGN KEY constraint failed"));
+    render(<ProjectSwitcher projects={projects} activeProjectId="p1" onSelect={() => {}} onDelete={onDelete} />);
+    fireEvent.click(screen.getByRole("button", { name: /delete project alpha/i }));
+    fireEvent.click(screen.getByRole("button", { name: /confirm delete alpha/i }));
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith("p1"));
+    // confirm row reset → the plain delete affordance is back, no crash.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /delete project alpha/i })).toBeInTheDocument(),
+    );
+  });
+
   it("hides the delete affordance when onDelete is omitted", () => {
     render(<ProjectSwitcher projects={projects} activeProjectId="p1" onSelect={() => {}} />);
     expect(screen.queryByRole("button", { name: /delete project/i })).not.toBeInTheDocument();
