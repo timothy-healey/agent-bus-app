@@ -44,12 +44,23 @@ export function PipelineEditor({
   const [step, setStep] = useState<EditorStep>("canvas");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // G11 — live validity from the canvas; the prominent banner + Save block only on
+  // a Save/leave-Canvas attempt.
+  const [canvasValid, setCanvasValid] = useState(true);
+  const [showBanner, setShowBanner] = useState(false);
 
   // A4: the skill catalog for this project, feeding NodeDrawer's prompt
   // autocomplete. Loaded at open + manually refreshable.
   const { entries: skills, refresh: refreshSkills } = useSkillCatalog(projectId);
 
   async function save() {
+    // G11 — block + surface the banner on a known-invalid draft (the backend stays
+    // the hard authority; this avoids the round-trip + raises the offending badges).
+    if (!canvasValid) {
+      setShowBanner(true);
+      setStep("canvas");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -65,7 +76,15 @@ export function PipelineEditor({
   const steps: NavStep[] = EDITOR_STEPS.map((s) => ({
     id: s,
     label: STEP_LABELS[s],
-    onSelect: () => setStep(s),
+    // G11 — leaving an invalid Canvas (forward, to Review) reveals the banner +
+    // blocks; moving back to Canvas never blocks.
+    onSelect: () => {
+      if (step === "canvas" && s === "review" && !canvasValid) {
+        setShowBanner(true);
+        return;
+      }
+      setStep(s);
+    },
   }));
 
   const switcher = (
@@ -97,7 +116,14 @@ export function PipelineEditor({
     >
       {step === "canvas" && (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <PipelineCanvas draft={draft} onChange={setDraft} skills={skills} onRefreshSkills={refreshSkills} />
+          <PipelineCanvas
+            draft={draft}
+            onChange={setDraft}
+            skills={skills}
+            onRefreshSkills={refreshSkills}
+            showBanner={showBanner}
+            onValidityChange={(valid) => { setCanvasValid(valid); if (valid) setShowBanner(false); }}
+          />
         </div>
       )}
 
