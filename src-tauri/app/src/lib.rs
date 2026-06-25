@@ -1468,6 +1468,12 @@ pub fn run() {
             sql: include_str!("../migrations/014_task_worktree.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 15,
+            description: "recalibrate legacy usage window_budget to the all-tokens basis",
+            sql: include_str!("../migrations/015_usage_budget_recalibrate.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     // Live child process-group registry (LF20): the killable spawners register

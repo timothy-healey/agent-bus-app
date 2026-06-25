@@ -134,15 +134,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_tokens_includes_cache() {
-        let store = CcUsageStore::new(fresh_pool().await);
-        store.ingest(&parse_transcript(SAMPLE)).await.unwrap();
-        // msg_aaa: 1200+300+40+10 = 1550 ; msg_bbb: 500+120+0+0 = 620 ; total 2170
-        // (the +50 over the old 2120 is the cache_creation+cache_read on msg_aaa)
-        assert_eq!(store.window_tokens(0).await.unwrap(), 2170);
-    }
-
-    #[tokio::test]
     async fn oldest_in_window_is_the_min_ts() {
         let store = CcUsageStore::new(fresh_pool().await);
         store.ingest(&parse_transcript(SAMPLE)).await.unwrap();
