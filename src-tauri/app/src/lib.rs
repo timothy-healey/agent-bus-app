@@ -1297,6 +1297,19 @@ pub fn run() {
                 let runs = Arc::new(runtime::run_store::RunStore::new(pool.clone()));
                 let ledger = Arc::new(runtime::generator_ledger::GeneratorLedger::new(pool.clone()));
                 let fanout = Arc::new(runtime::fanout_store::FanOutStore::new(pool.clone()));
+
+                // Resume reconciliation (LF20 occupancy leak): after orphaned
+                // `running` rows were requeued above, rebuild each store's
+                // occupancy from the resident work-items so a slot reserved before
+                // a kill/crash (and never released) does not keep the resumed run
+                // falsely backpressured. Per active run. Best-effort: a reconcile
+                // failure must not block boot.
+                if let Ok(Some(active)) = runs.latest_active_for_project(&project_id).await {
+                    if let Err(e) = stores.reconcile_occupancy(&active.id).await {
+                        eprintln!("app: boot reconcile_occupancy failed: {e}");
+                    }
+                }
+
                 let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                     Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
 
