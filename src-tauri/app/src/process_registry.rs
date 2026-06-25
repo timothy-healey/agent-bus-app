@@ -68,6 +68,11 @@ impl ProcessRegistry {
         #[cfg(unix)]
         {
             use std::time::{Duration, Instant};
+            // NOTE: deferred pgid-reuse hazard — between snapshotting and
+            // signalling (or between reaping and deregistering), the OS could
+            // recycle a freed pgid for an unrelated group, so a stale entry could
+            // signal the wrong group. A full guard (e.g. revalidating ownership)
+            // is deferred per spec.
             // 1. SIGTERM every group.
             for &pgid in &pgids {
                 unsafe {
@@ -132,18 +137,27 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
         let mut child = cmd.spawn().map_err(|e| RunnerError::Spawn(e.to_string()))?;
         let pgid = child.id() as i32;
         registry.register(pgid);
-        // Capture to completion, then wait. (Reads the piped handles; for the
-        // streaming path the engine still forwards deltas via the stream parser
-        // over the returned stdout — same as the .output() path.)
+        // Drain BOTH pipes CONCURRENTLY, then wait. A sequential stdout-then-
+        // stderr drain deadlocks when the child writes more than one pipe buffer
+        // (~64KB) to stderr before stdout reaches EOF (parent blocks on stdout,
+        // child blocks writing stderr). Read stderr on a worker thread while this
+        // thread reads stdout. (For the streaming path the engine still forwards
+        // deltas via the stream parser over the returned stdout.)
         use std::io::Read;
+        let stderr_handle = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = e.read_to_end(&mut buf);
+                buf
+            })
+        });
         let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
         if let Some(mut o) = child.stdout.take() {
             let _ = o.read_to_end(&mut stdout);
         }
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_end(&mut stderr);
-        }
+        let stderr = stderr_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
         let status = child.wait().map_err(|e| RunnerError::Spawn(e.to_string()));
         registry.deregister(pgid);
         let status = status?;
@@ -179,15 +193,24 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
         let mut child = cmd.spawn().map_err(|e| ChatError::Spawn(e.to_string()))?;
         let pgid = child.id() as i32;
         registry.register(pgid);
+        // Drain BOTH pipes CONCURRENTLY, then wait — see killable_spawn: a
+        // sequential stdout-then-stderr drain deadlocks once the child writes
+        // more than the ~64KB stderr pipe buffer before stdout EOF.
         use std::io::Read;
+        let stderr_handle = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = e.read_to_end(&mut buf);
+                buf
+            })
+        });
         let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
         if let Some(mut o) = child.stdout.take() {
             let _ = o.read_to_end(&mut stdout);
         }
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_end(&mut stderr);
-        }
+        let stderr = stderr_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
         let status = child.wait().map_err(|e| ChatError::Spawn(e.to_string()));
         registry.deregister(pgid);
         let status = status?;
@@ -236,6 +259,86 @@ mod tests {
         );
         assert_eq!(out.unwrap(), "hello");
         assert!(reg.is_empty(), "registry drained after the child is waited on");
+    }
+
+    /// Run `f` on a thread and require it to finish within `timeout`, else fail —
+    /// turns a true deadlock into a deterministic test failure rather than a
+    /// stalled runner. Used by the concurrent-drain regression tests below.
+    #[cfg(unix)]
+    fn assert_completes_within<T: Send + 'static>(
+        timeout: std::time::Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(v) => {
+                handle.join().expect("worker thread panicked");
+                v
+            }
+            Err(_) => panic!(
+                "spawner deadlocked: did not complete within {timeout:?} \
+                 (child wrote a large STDERR payload before STDOUT EOF)"
+            ),
+        }
+    }
+
+    /// Regression for the pipe-buffer deadlock: a child that writes >128KB to
+    /// STDERR before STDOUT reaches EOF blocks the sequential stdout-then-stderr
+    /// drain forever (the child blocks writing stderr past the ~64KB pipe buffer
+    /// while the parent blocks reading stdout). The concurrent drain must finish
+    /// and still capture STDOUT.
+    #[cfg(unix)]
+    #[test]
+    fn killable_spawn_does_not_deadlock_on_large_stderr() {
+        let reg = Arc::new(ProcessRegistry::new());
+        let out = assert_completes_within(std::time::Duration::from_secs(20), move || {
+            (super::killable_spawn(&reg))(
+                &[
+                    "sh".into(),
+                    "-c".into(),
+                    // ~200KB to stderr, a small known payload to stdout last.
+                    "yes x | head -c 200000 1>&2; printf hello".into(),
+                ],
+                None,
+            )
+        });
+        assert_eq!(out.unwrap(), "hello");
+    }
+
+    /// Same deadlock regression for the chat spawner. The chat spawner forces the
+    /// `claude` binary as argv[0], so drive it through a fake binary on PATH.
+    #[cfg(unix)]
+    #[test]
+    fn killable_chat_spawn_does_not_deadlock_on_large_stderr() {
+        // Stage a fake `claude` that floods stderr then prints a stdout payload.
+        let dir = std::env::temp_dir().join(format!("abtest-claude-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nyes x | head -c 200000 1>&2\nprintf '{\"result\":\"hello\"}'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // CLAUDE_BIN is resolved via PATH lookup; prepend our staging dir.
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.display(), old_path));
+
+        let reg = Arc::new(ProcessRegistry::new());
+        let res = assert_completes_within(std::time::Duration::from_secs(20), move || {
+            (super::killable_chat_spawn(&reg))(&["-p".into(), "hi".into()], None)
+        });
+
+        std::env::set_var("PATH", old_path);
+        let _ = std::fs::remove_dir_all(&dir);
+        // We only assert no-deadlock + a captured success here; the exact chat
+        // payload parsing is covered by llm_chat's own tests.
+        assert!(res.is_ok(), "chat spawn should succeed, got {res:?}");
     }
 
     #[cfg(unix)]
