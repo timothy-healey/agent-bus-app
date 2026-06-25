@@ -89,7 +89,7 @@ export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], 
     <Drawer open={open} onClose={onClose} label={selectedId ? `${kind} · ${displayId}` : "node"}>
       {selectedId && (
         <div style={body}>
-          <header style={{ marginBottom: "var(--sp-5)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)" }}>
+          <header style={{ marginBottom: "var(--sp-5)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)", paddingRight: "var(--sp-7)" }}>
             <div style={{ fontSize: "var(--ts-sm)", color: "var(--text-3)", textTransform: "capitalize", letterSpacing: "0.04em" }}>
               {kind} · <span style={{ color: "var(--text-2)" }}>{displayId}</span>
             </div>
