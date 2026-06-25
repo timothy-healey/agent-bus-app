@@ -42,6 +42,14 @@ impl TranscriptIngestor {
         self.ingest_gated(|mt| mt > modified_since).await
     }
 
+    /// Boot backfill: ingest files modified within the rolling window plus a 1h
+    /// buffer (`mtime > now - window_secs - 3600`), so the meter is correct on
+    /// launch instead of 0 until the first new transcript line.
+    pub async fn backfill_window(&self, window_secs: i64, now: i64) -> Result<u64, IngestError> {
+        let cutoff = now - window_secs - 3600;
+        self.ingest_gated(|mt| mt > cutoff).await
+    }
+
     /// Shared walk; `gate(mtime_secs)` decides whether to parse a file.
     async fn ingest_gated(&self, gate: impl Fn(i64) -> bool) -> Result<u64, IngestError> {
         let mut total = 0u64;
@@ -174,6 +182,35 @@ mod tests {
         assert_eq!(cc.window_tokens(0).await.unwrap(), 0);
         // a lower watermark picks it up
         assert_eq!(ing.ingest_changed(999_999).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn backfill_window_includes_recent_excludes_old_by_mtime() {
+        let root = temp_root("backfill");
+        let recent = write_jsonl(&root, "p1", "recent.jsonl", A);
+        let old = write_jsonl(&root, "p2", "old.jsonl", B);
+        let now = 2_000_000i64;
+        let window_secs = 18_000i64; // 5h
+                                     // recent: mtime just inside the window
+        File::options()
+            .write(true)
+            .open(&recent)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs((now - 100) as u64))
+            .unwrap();
+        // old: mtime well before now - window - 3600
+        File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs((now - window_secs - 7200) as u64))
+            .unwrap();
+        let cc = Arc::new(CcUsageStore::new(fresh_pool().await));
+        let ing = TranscriptIngestor::new(root, cc.clone());
+
+        let n = ing.backfill_window(window_secs, now).await.unwrap();
+        assert_eq!(n, 1); // only the recent file (msg_aaa)
+        assert_eq!(cc.window_tokens(0).await.unwrap(), 1500);
     }
 
     #[tokio::test]
