@@ -187,3 +187,11 @@ global.css HAD overrides for `.react-flow__controls*` but they tied the library'
 > "i started a run but don't see anything happening"
 
 After LF19 the generator runs `claude`, but a generator pass produces NO work-item until it returns the candidate list, so the board shows no card + no "busy" while the (possibly long) research scan runs — looks idle. Likely needs a run/generator activity indicator (a "researching… / generator running" state, or surface the in-flight source pass) + verify the live generator actually returns parseable items (the output-contract live path is still unproven). To investigate (pairs with the live-run shakedown).
+
+---
+
+### LF24 · Live run: generator child insert fails — FK 787 (hardcoded project_id) — `fixed`
+
+> "app: generator loop step failed for `research`: database error: (code: 787) FOREIGN KEY constraint failed"
+
+The generator (which has no parent task to inherit from) created its child work-items with a hardcoded `project_id = "proj"` (`engine::generate_once`), so the `tasks.project_id -> projects(id)` FK failed live. Tests passed because the test harness's run was *also* `project_id "proj"` (and the in-mem pools don't enforce that FK). Fixed: the generator now takes `project_id` from the RUN row (`run.project_id`) — the source of truth that downstream stages already inherit via `task.project_id`. Regression test: a distinct run project id, assert the generated child carries it (not "proj"). Commit on `main`.
