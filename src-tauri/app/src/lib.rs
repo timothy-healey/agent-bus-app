@@ -1138,6 +1138,15 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+/// Resolve `~/.claude/projects` (the Claude Code transcript tree this app
+/// ingests for the window meter). Mirrors the existing HOME convention; on a
+/// machine with no HOME it returns `.claude/projects` (relative) which simply
+/// yields an empty walk.
+fn cc_claude_projects_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".claude").join("projects")
+}
+
 /// Resolve the active project + pipeline at startup. v1: the newest project
 /// (projects[0] in the frontend ordering) and its first pipeline file. Returns
 /// an empty placeholder pipeline when none exists so the app still boots.
@@ -1384,6 +1393,10 @@ pub fn run() {
                 use usage_telemetry::worker_log::WorkerUsageStore;
                 let cc_store = Arc::new(CcUsageStore::new(pool.clone()));
                 let worker_usage = Arc::new(WorkerUsageStore::new(pool.clone()));
+                let ingestor = Arc::new(usage_telemetry::ingest::TranscriptIngestor::new(
+                    cc_claude_projects_dir(),
+                    cc_store.clone(),
+                ));
                 let usage_sink: Arc<dyn agent_bus_core::UsageSink> = worker_usage.clone();
                 let usage_state_arc = Arc::new(usage_telemetry::api::UsageState {
                     cc: cc_store.clone(), worker: worker_usage.clone(), pool: pool.clone(),
@@ -1507,6 +1520,21 @@ pub fn run() {
                 // Boot activation goes through the SAME path as runtime activation.
                 if let Err(e) = activator.activate(&project_id).await {
                     eprintln!("app: boot activation failed: {e}");
+                }
+
+                // Boot backfill: prime cc_usage_log from transcripts modified
+                // within the rolling window so the meter is correct on launch
+                // instead of 0 until the first new transcript line. Emit only
+                // when rows were inserted (avoids a needless refetch).
+                {
+                    let cfg = usage_telemetry::api::load_config(&pool).await;
+                    let n = ingestor
+                        .backfill_window(cfg.window_secs, now_unix())
+                        .await
+                        .unwrap_or(0);
+                    if n > 0 {
+                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                    }
                 }
 
                 // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
