@@ -62,6 +62,9 @@ pub struct WorkerDeps {
     /// Live child process-group registry (LF20): the killable worker spawner
     /// registers each `claude` group so the exit/brake triggers can kill them.
     pub process_registry: Arc<crate::process_registry::ProcessRegistry>,
+    /// The Tauri app-data dir (LF26): the root of the app-owned artifact base
+    /// `<app_data>/projects/<id>/artifacts`, threaded into each `EngineContext`.
+    pub app_data: std::path::PathBuf,
 }
 
 /// Owns the runtime-activation lifecycle: swap the active pipeline + (re)spawn
@@ -352,6 +355,8 @@ impl PipelineActivator {
         let log_sink = self.deps.log_sink.clone();
         let audit = self.deps.audit.clone();
         let project_root = active.project_root.clone();
+        let app_data = self.deps.app_data.clone();
+        let project_id_for_base = active.project_id.clone();
         let pipeline = active.pipeline.clone();
         let target_repo: Option<std::path::PathBuf> =
             active.project_target_repo.as_deref().map(std::path::PathBuf::from);
@@ -371,8 +376,9 @@ impl PipelineActivator {
             runner: runner.clone(),
             project_root: std::path::PathBuf::from(&project_root),
             target_repo: target_repo.clone(),
-            // Populated properly from the app-data dir in Task 12.
-            artifact_base: std::path::PathBuf::from(&project_root).join("artifacts"),
+            // LF26: the app-owned artifact base, via the shared layout fn so it
+            // matches `read_artifact` + the delete cascade exactly.
+            artifact_base: workspace::api::artifact_base_for(&app_data, &project_id_for_base),
             read_prompt: read_prompt.clone(),
             revision_reader: revision_reader.clone(),
             usage_sink: usage_sink.clone(),
