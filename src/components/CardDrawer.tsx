@@ -55,6 +55,9 @@ export interface CardDrawerProps {
   onForceAdvance?: (taskId: string) => void;
   onAbandon?: (taskId: string) => void;
   onAccept?: (taskId: string) => void;
+  /// The tab to open on (C6). A `gen:` generator card opens on `"live log"`;
+  /// otherwise the drawer defaults to the artifact tab.
+  initialTab?: Tab;
 }
 
 export function CardDrawer({
@@ -78,12 +81,13 @@ export function CardDrawer({
   onForceAdvance,
   onAbandon,
   onAccept,
+  initialTab,
 }: CardDrawerProps) {
   const artifactPath = task.review_artifact ?? task.parent_artifact ?? `artifacts/${task.id}.md`;
   // Pass the viewed artifact body so the hook re-anchors comments addressed in
   // this version (B1); absent a body it falls back to v1 carry-over.
   const { reanchored, add, remove } = useComments(task.id, artifactPath, artifactMarkdown);
-  const [tab, setTab] = useState<Tab>("artifact");
+  const [tab, setTab] = useState<Tab>(initialTab ?? "artifact");
   const [revising, setRevising] = useState(false);
   const [confirmingAbandon, setConfirmingAbandon] = useState(false);
   const [activeComment, setActiveComment] = useState<string | undefined>();

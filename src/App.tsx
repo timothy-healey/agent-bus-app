@@ -25,6 +25,7 @@ import { setBudget, setAutoMeter } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
 import { useConversation } from "./hooks/useConversation";
 import { useTaskLog } from "./hooks/useTaskLog";
+import { useActiveGenerators } from "./hooks/useActiveGenerators";
 
 export default function App() {
   const { projects, reload } = useProjects();
@@ -97,6 +98,7 @@ export default function App() {
   }
 
   const liveLog = useTaskLog();
+  const activeGenerators = useActiveGenerators(selectedRun?.id ?? null);
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   // A lineage click overrides which artifact the pane shows (D5: single pane).
   const [lineagePath, setLineagePath] = useState<string | null>(null);
@@ -110,8 +112,34 @@ export default function App() {
     setCompareMarkdown(null);
   }, [openTaskId]);
 
-  const openTask: Task | null =
-    openTaskId != null ? tasks.find((t) => t.id === openTaskId) ?? null : null;
+  const openTask: Task | null = (() => {
+    if (openTaskId == null) return null;
+    const real = tasks.find((t) => t.id === openTaskId);
+    if (real) return real;
+    // A `gen:` id has no DB row — synthesise a minimal running source Task so the
+    // drawer opens on the live-log tab; other tabs show their empty states.
+    if (openTaskId.startsWith("gen:")) {
+      const stage = openTaskId.split(":")[2] ?? "source";
+      return {
+        id: openTaskId,
+        project_id: activeProject?.id ?? "",
+        pipeline: pipeline?.id ?? "",
+        topic: `${stage} · scanning…`,
+        target_repo: null,
+        target_scope: null,
+        current_stage: stage,
+        state: "running",
+        attempts: 1,
+        parent_artifact: null,
+        review_artifact: null,
+        created_at: 0,
+        updated_at: 0,
+        run_id: selectedRun?.id ?? null,
+        item_key: null,
+      } as Task;
+    }
+    return null;
+  })();
 
   const { snapshot: usage } = useUsage();
 
@@ -400,6 +428,7 @@ export default function App() {
             occupancy={occupancy}
             hasRun={selectedRun != null}
             tokensByTask={usage?.tokens_by_task ?? {}}
+            activeGenerators={activeGenerators}
             onOpenCard={setOpenTaskId}
           />
         )}
@@ -409,6 +438,7 @@ export default function App() {
         {openTask && (
           <CardDrawer
             task={openTask}
+            initialTab={openTask.id.startsWith("gen:") ? "live log" : undefined}
             artifactMarkdown={artifactMarkdown}
             logText={liveLog.logFor(openTask.id)}
             logSegments={liveLog.segmentsFor(openTask.id)}
