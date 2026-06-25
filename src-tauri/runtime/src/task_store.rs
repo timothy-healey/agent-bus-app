@@ -40,6 +40,7 @@ struct Row {
     join_target: Option<String>,
     run_id: Option<String>,
     item_key: Option<String>,
+    worktree_path: Option<String>,
 }
 
 pub struct TaskStore {
@@ -55,8 +56,8 @@ impl TaskStore {
         sqlx::query(
             "INSERT INTO tasks (id, project_id, pipeline, topic, target_repo, target_scope,
              current_stage, state, attempts, parent_artifact, review_artifact, created_at, updated_at,
-             group_id, lane, join_target, run_id, item_key)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             group_id, lane, join_target, run_id, item_key, worktree_path)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&task.id.0)
         .bind(&task.project_id)
@@ -76,6 +77,7 @@ impl TaskStore {
         .bind(&task.join_target)
         .bind(&task.run_id)
         .bind(&task.item_key)
+        .bind(&task.worktree_path)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -102,13 +104,14 @@ impl TaskStore {
             join_target: r.join_target,
             run_id: r.run_id,
             item_key: r.item_key,
+            worktree_path: r.worktree_path,
         })
     }
 
     const SELECT: &'static str =
         "SELECT id, project_id, pipeline, topic, target_repo, target_scope, current_stage,
          state, attempts, parent_artifact, review_artifact, created_at, updated_at,
-         group_id, lane, join_target, run_id, item_key FROM tasks";
+         group_id, lane, join_target, run_id, item_key, worktree_path FROM tasks";
 
     pub async fn get(&self, id: &TaskId) -> Result<Task, TaskStoreError> {
         let row = sqlx::query_as::<_, Row>(&format!("{} WHERE id = ?", Self::SELECT))
@@ -137,7 +140,7 @@ impl TaskStore {
         let res = sqlx::query(
             "UPDATE tasks SET current_stage=?, state=?, attempts=?, parent_artifact=?,
              review_artifact=?, updated_at=?, group_id=?, lane=?, join_target=?,
-             run_id=?, item_key=? WHERE id=?",
+             run_id=?, item_key=?, worktree_path=? WHERE id=?",
         )
         .bind(&task.current_stage)
         .bind(task.state.as_str())
@@ -150,11 +153,26 @@ impl TaskStore {
         .bind(&task.join_target)
         .bind(&task.run_id)
         .bind(&task.item_key)
+        .bind(&task.worktree_path)
         .bind(&task.id.0)
         .execute(&self.pool)
         .await?;
         if res.rows_affected() == 0 {
             return Err(TaskStoreError::NotFound(task.id.clone()));
+        }
+        Ok(())
+    }
+
+    /// Persist just the work-item's resolved worktree path (worktree isolation).
+    /// Single-column UPDATE so it does not race the broader `update`.
+    pub async fn set_worktree_path(&self, task_id: &str, path: &str) -> Result<(), TaskStoreError> {
+        let res = sqlx::query("UPDATE tasks SET worktree_path=? WHERE id=?")
+            .bind(path)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(TaskStoreError::NotFound(TaskId(task_id.to_string())));
         }
         Ok(())
     }
@@ -255,11 +273,41 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/014_task_worktree.sql")).execute(&pool).await.unwrap();
         pool
     }
 
     fn task(stage: &str) -> Task {
         Task::injected("p".into(), "pipe".into(), stage.into(), "topic".into(), None, 100)
+    }
+
+    #[tokio::test]
+    async fn insert_get_round_trips_worktree_path() {
+        let store = TaskStore::new(fresh_pool().await);
+        let mut task = Task::work_item("p".into(), "pl".into(), "R-1".into(), "alpha".into(), "implementers".into(), None, None, 100);
+        task.worktree_path = Some("/p/worktrees/R-1/alpha".into());
+        store.insert(&task).await.unwrap();
+        let back = store.get(&task.id).await.unwrap();
+        assert_eq!(back.worktree_path.as_deref(), Some("/p/worktrees/R-1/alpha"));
+    }
+
+    #[tokio::test]
+    async fn set_worktree_path_persists_single_column() {
+        let store = TaskStore::new(fresh_pool().await);
+        let task = Task::work_item("p".into(), "pl".into(), "R-1".into(), "alpha".into(), "implementers".into(), None, None, 100);
+        store.insert(&task).await.unwrap();
+        store.set_worktree_path(&task.id.0, "/p/worktrees/R-1/alpha").await.unwrap();
+        let back = store.get(&task.id).await.unwrap();
+        assert_eq!(back.worktree_path.as_deref(), Some("/p/worktrees/R-1/alpha"));
+    }
+
+    #[tokio::test]
+    async fn legacy_task_loads_with_none_worktree_path() {
+        let store = TaskStore::new(fresh_pool().await);
+        let task = Task::injected("p".into(), "pl".into(), "research".into(), "topic".into(), None, 100);
+        store.insert(&task).await.unwrap();
+        let back = store.get(&task.id).await.unwrap();
+        assert_eq!(back.worktree_path, None);
     }
 
     #[tokio::test]
