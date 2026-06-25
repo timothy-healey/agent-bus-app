@@ -806,17 +806,20 @@ async fn brake_on(
     Ok(runtime.brake.state())
 }
 
-/// LH6: root `brake_off` (Resume) wrapper. Mirrors the root `brake_on`: clears
-/// the runtime brake and persists the OFF row. Replaces `runtime::api::brake_off`
-/// in the invoke handler so persistence stays consistent. (LH8b adds the kill-
-/// latch clear so resume re-enables spawning.)
+/// LH6/LH8b: root `brake_off` (Resume) wrapper. Mirrors the root `brake_on`:
+/// clears the runtime brake, persists the OFF row, and clears the registry kill
+/// latch so resume re-enables spawning (the LH8a-left `Queued` rows are then
+/// re-claimed by the live worker loops). Replaces `runtime::api::brake_off` in
+/// the invoke handler so persistence + latch-clear stay consistent.
 #[tauri::command(rename_all = "snake_case")]
 async fn brake_off(
     runtime: tauri::State<'_, Arc<RuntimeState>>,
+    registry: tauri::State<'_, Arc<process_registry::ProcessRegistry>>,
     brake_store: tauri::State<'_, Arc<brake_persist::BrakeStore>>,
 ) -> Result<runtime::brake::BrakeState, String> {
     runtime.brake.set_off();
     let _ = brake_store.save(false, None, now_unix()).await;
+    registry.end_killing(); // LH8b: resume re-enables spawning
     Ok(runtime.brake.state())
 }
 
@@ -1138,6 +1141,7 @@ impl ToolDispatcher for RootDispatcher {
             "brake_off" => {
                 self.runtime.brake.set_off();
                 let _ = self.brake_store.save(false, None, now_unix()).await;
+                self.process_registry.end_killing(); // LH8b: resume re-enables spawning
                 let _ = self.app.emit(crate::events::USAGE_CHANGED, ());
                 ok(serde_json::to_value(self.runtime.brake.state()).unwrap())
             }
