@@ -94,7 +94,7 @@ Likely area: A2 seed templates (`pipeline/src/seed_template.rs`) — add a bundl
 
 ---
 
-### LF12 · Basics↔Canvas back-nav loses the graph (forces re-Generate) — `uninvestigated`
+### LF12 · Basics↔Canvas back-nav loses the graph (forces re-Generate) — `promoted → G12`
 
 > "can't move back from graph view to basics and then from basics back to graph without re clicking generate"
 
