@@ -214,3 +214,62 @@ describe("NewProjectWizard — validation timing (G11)", () => {
     expect(await screen.findByText(/prompts\/research\.md/)).toBeInTheDocument();
   });
 });
+
+describe("NewProjectWizard — draft-preserving Basics↔Canvas nav (G12)", () => {
+  beforeEach(() => {
+    kickoffMock.mockReset();
+    seedTemplateMock.mockReset();
+    createMock.mockReset();
+    listSeedTemplatesMock.mockReset();
+    listSeedTemplatesMock.mockResolvedValue([]);
+    bestEffortValidateMock.mockReset();
+    bestEffortValidateMock.mockResolvedValue([]);
+    vi.restoreAllMocks();
+  });
+
+  // Generate once, then jump back to Basics via the nav tree.
+  async function generateThenBackToBasics() {
+    kickoffMock.mockResolvedValueOnce(draftWithTeam());
+    render(<NewProjectWizard open={true} onClose={() => {}} onCreated={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "Demo" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Root path" }), { target: { value: "/p" } });
+    fireEvent.change(screen.getByLabelText(/describe/i), { target: { value: "a research flow" } });
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+    await screen.findByRole("button", { name: /add team/i });
+    fireEvent.click(screen.getByRole("button", { name: "Basics" }));
+  }
+
+  it("Basics→Canvas→Basics→Canvas keeps the draft (no re-Generate)", async () => {
+    await generateThenBackToBasics();
+    // Back on Basics, a draft exists → Continue (not just Generate) is offered.
+    const cont = await screen.findByRole("button", { name: /continue to canvas/i });
+    fireEvent.click(cont);
+    // Back on the canvas WITHOUT a second kickoffGenerate call.
+    expect(await screen.findByRole("button", { name: /add team/i })).toBeInTheDocument();
+    expect(kickoffMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("Generate becomes Regenerate once a draft exists", async () => {
+    await generateThenBackToBasics();
+    expect(await screen.findByRole("button", { name: /^regenerate$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^generate$/i })).not.toBeInTheDocument();
+  });
+
+  it("Regenerate confirms before replacing the draft (cancel keeps it)", async () => {
+    await generateThenBackToBasics();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(await screen.findByRole("button", { name: /^regenerate$/i }));
+    expect(confirmSpy).toHaveBeenCalled();
+    // Cancelled → no second generate, still on Basics (Continue still offered).
+    expect(kickoffMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /continue to canvas/i })).toBeInTheDocument();
+  });
+
+  it("Regenerate replaces the draft when confirmed", async () => {
+    await generateThenBackToBasics();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    kickoffMock.mockResolvedValueOnce(draftWithTeam());
+    fireEvent.click(await screen.findByRole("button", { name: /^regenerate$/i }));
+    await waitFor(() => expect(kickoffMock).toHaveBeenCalledTimes(2));
+  });
+});
