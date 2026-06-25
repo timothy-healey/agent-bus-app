@@ -1489,6 +1489,7 @@ pub fn run() {
                         ledger: ledger.clone(),
                         fanout: fanout.clone(),
                         process_registry: process_registry.clone(),
+                        app_data: data_dir.clone(),
                     },
                 ));
                 handle.manage(activator.clone());
