@@ -22,11 +22,13 @@ export interface SkillEntry {
   qualified: boolean;
 }
 
-/** List the skills + slash commands available to a project's worker, for
- *  authoring-time autocomplete. Roots = global ~/.claude + the project's
- *  configured sources (resolved + merged backend-side; project wins). */
-export async function listSkills(projectId: string): Promise<SkillEntry[]> {
-  return await invoke<SkillEntry[]>("list_skills", { project_id: projectId });
+/** List the skills + slash commands available for authoring-time autocomplete.
+ *  `projectId` is OPTIONAL (G4): with a project, roots = global ~/.claude + the
+ *  project's configured sources (project wins); without one (e.g. the new-project
+ *  wizard, before a project exists) roots = the global ~/.claude only — so the
+ *  global catalog still loads during creation. */
+export async function listSkills(projectId?: string | null): Promise<SkillEntry[]> {
+  return await invoke<SkillEntry[]>("list_skills", { project_id: projectId ?? null });
 }
 
 /** The `/`-token an author should insert for an entry (no leading slash): the

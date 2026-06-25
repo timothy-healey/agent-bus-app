@@ -9,6 +9,7 @@ import { AuthoringLayout, type NavStep } from "./AuthoringLayout";
 import { ProjectSwitcher } from "../components/ProjectSwitcher";
 import { Button } from "../components/ui/Button";
 import { FolderPickerField } from "../components/FolderPickerField";
+import { useSkillCatalog } from "../hooks/useSkillCatalog";
 
 interface NewProjectWizardProps {
   open: boolean;
@@ -65,6 +66,10 @@ export function NewProjectWizard({
     listSeedTemplates().then((t) => { if (active) setTemplates(t); }).catch(() => {});
     return () => { active = false; };
   }, [open]);
+
+  // G4 — the GLOBAL skill catalog (no project exists yet mid-create). Passed to the
+  // canvas so the prompt `/`-autocomplete works during creation, not just edit-mode.
+  const { entries: skills, refresh: refreshSkills } = useSkillCatalog(null);
 
   const idx = WIZARD_STEPS.indexOf(step);
   const go = (next: WizardStep) => setStep(next);
@@ -254,6 +259,8 @@ export function NewProjectWizard({
           <PipelineCanvas
             draft={draft}
             onChange={setDraft}
+            skills={skills}
+            onRefreshSkills={refreshSkills}
             showBanner={showBanner}
             targetRepo={targetRepo.trim() || null}
             onValidityChange={(valid) => {
