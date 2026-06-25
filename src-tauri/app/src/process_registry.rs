@@ -113,6 +113,13 @@ impl ProcessRegistry {
     }
 
     /// Remove a live-process record once the child has been reaped (LH4).
+    /// NOTE: `record_spawn` (insert) and this `record_reap` (delete) are both
+    /// fire-and-forget on the runtime, so they are dispatched UNORDERED — for a
+    /// very short-lived child the delete can land before the insert, leaving a
+    /// stale row behind. This self-heals on the next boot's `reap_orphans`: a
+    /// dead pgid fails the signal-0 probe (not reaped) and is cleared by
+    /// `clear_all`; a recycled leader trips the start-ts guard (skipped) and is
+    /// likewise cleared. So a stale row is at worst a harmless no-op next boot.
     fn record_reap(&self, pgid: i32) {
         if let Some(s) = self.live_store.lock().unwrap().clone() {
             tauri::async_runtime::spawn(async move {
