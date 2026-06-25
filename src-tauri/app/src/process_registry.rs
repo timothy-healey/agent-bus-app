@@ -383,9 +383,9 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
             })
         });
         let mut stdout_pipe = child.stdout.take();
-        // Register the owned child under the lock. Chat scoping is wired in LH5b;
-        // for now it registers Worker-scoped (back-compat with the pre-LH5 kill).
-        match registry.register_child_scoped(pgid, child, Scope::Worker) {
+        // Register the owned child under the lock as Chat-scoped (LH5): a manual
+        // Stop (kill_workers) spares it; only app-exit (kill_all) takes it.
+        match registry.register_child_scoped(pgid, child, Scope::Chat) {
             RegisterDecision::Registered => {}
             RegisterDecision::KillImmediately => {
                 #[cfg(unix)]
@@ -417,6 +417,11 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that mutate the process-global `PATH` to stage a fake
+    /// `claude` binary, so their set/restore windows don't clobber each other
+    /// when the harness runs tests in parallel.
+    static PATH_GUARD: Mutex<()> = Mutex::new(());
 
     #[test]
     fn register_under_a_set_latch_returns_kill_immediately() {
@@ -548,6 +553,32 @@ mod tests {
         assert!(reg.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn chat_spawn_survives_a_workers_only_latch() {
+        let _path_guard = PATH_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        // Stage a fake `claude` that prints a result (reuse the staging idiom).
+        let dir = std::env::temp_dir().join(format!(
+            "abtest-claude-chat-scope-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nprintf '{\"result\":\"hi\"}'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.display(), old_path));
+
+        let reg = Arc::new(ProcessRegistry::new());
+        reg.begin_kill_workers(); // workers-only latch (a Stop is in progress)
+        let res = (super::killable_chat_spawn(&reg))(&["-p".into(), "hi".into()], None);
+
+        std::env::set_var("PATH", old_path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_ok(), "chat is exempt from a workers-only latch: {res:?}");
+    }
+
     #[test]
     fn register_then_deregister_leaves_the_set_empty() {
         let reg = ProcessRegistry::new();
@@ -640,6 +671,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn killable_chat_spawn_does_not_deadlock_on_large_stderr() {
+        let _path_guard = PATH_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // Stage a fake `claude` that floods stderr then prints a stdout payload.
         let dir = std::env::temp_dir().join(format!("abtest-claude-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
