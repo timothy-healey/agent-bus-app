@@ -855,7 +855,13 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     if ctx.brake.is_on() {
         return Ok(StepOutcome::Braked);
     }
-    if ctx.runs.get(&ctx.run_id).await?.generator_dry {
+    // The run is the source of truth for the project id (the generator has no
+    // parent task to inherit from); its children — and everything downstream that
+    // inherits via `task.project_id` — must carry the REAL project so the
+    // `tasks.project_id -> projects(id)` FK holds (a hardcoded placeholder fails
+    // live with FK 787, even though FK-less test pools accepted it).
+    let run = ctx.runs.get(&ctx.run_id).await?;
+    if run.generator_dry {
         return Ok(StepOutcome::Retired);
     }
 
@@ -886,7 +892,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     );
     // The generator pass uses a transient source task purely to drive one invoke.
     let pass_task = Task::work_item(
-        "proj-pass".into(),
+        run.project_id.clone(),
         ctx.pipeline.id.clone(),
         ctx.run_id.clone(),
         String::new(),
@@ -936,7 +942,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
             .and_then(|i| i.artifact_path.clone())
             .or_else(|| Some(artifact_path(&source_team.id, key, 1)));
         let child = Task::work_item(
-            "proj".into(),
+            run.project_id.clone(),
             ctx.pipeline.id.clone(),
             ctx.run_id.clone(),
             key.clone(),
@@ -1482,7 +1488,9 @@ pub(crate) mod test_support {
     /// stores it needs with the capacities it wants.
     pub async fn ctx_with(pool: SqlitePool, pipeline: Pipeline, runner: Arc<dyn Runner>) -> EngineContext {
         let runs = Arc::new(RunStore::new(pool.clone()));
-        runs.create(&crate::run_store::Run::new("R1".into(), "p".into(), "proj".into(), 100)).await.unwrap();
+        // Distinct from the directly-inserted test tasks' "proj" so a generator
+        // child that wrongly hardcodes "proj" (the FK-787 regression) is caught.
+        runs.create(&crate::run_store::Run::new("R1".into(), "p".into(), "proj-R1".into(), 100)).await.unwrap();
         EngineContext {
             run_id: "R1".into(),
             pipeline: Arc::new(pipeline),
@@ -2208,6 +2216,32 @@ mod tests {
         assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Generated { keys: vec!["only".into()] });
         assert_eq!(generate_once(&ctx, source).await.unwrap(), StepOutcome::Retired);
         assert_eq!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn generator_child_inherits_the_run_project_id_not_a_hardcode() {
+        // Regression: the generator has no parent task, so its children must take
+        // the project id from the RUN — a hardcoded placeholder ("proj") inserts a
+        // task whose `project_id` has no `projects` row and fails live with FK 787.
+        let p = pipeline(vec![
+            team("source", Some("spec"), Role::Producer, 8),
+            team("spec", None, Role::Producer, 8),
+        ]);
+        let runner = Arc::new(FakeRunner::always(items_out("KEY: a")));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+        let run = ctx.runs.get(&ctx.run_id).await.unwrap();
+
+        generate_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let child = ctx
+            .tasks
+            .claim_next_for_stage("spec", 200)
+            .await
+            .unwrap()
+            .expect("a child work-item at the downstream stage");
+        assert_eq!(child.project_id, run.project_id, "child must inherit the run's project id");
+        assert_ne!(child.project_id, "proj", "must not be the old hardcoded placeholder");
     }
 
     // ---- Task 6: run completion ----
