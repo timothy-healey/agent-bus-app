@@ -87,6 +87,16 @@ describe("NewProjectWizard", () => {
     expect(await screen.findByRole("button", { name: /add team/i })).toBeInTheDocument();
   });
 
+  it("the left-nav tree jumps directly to a step (G14)", async () => {
+    await openToReview();
+    // On review now; jump straight back to Canvas via the nav tree (not Back).
+    fireEvent.click(screen.getByRole("button", { name: "Canvas" }));
+    expect(await screen.findByRole("button", { name: /add team/i })).toBeInTheDocument();
+    // and jump straight to Review again.
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(await screen.findByText(/prompts\/research\.md/)).toBeInTheDocument();
+  });
+
   it("Cancel calls onClose", () => {
     const onClose = vi.fn();
     render(<NewProjectWizard open={true} onClose={onClose} onCreated={() => {}} />);
