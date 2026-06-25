@@ -1174,6 +1174,20 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+/// LH6: build the boot `Brake`, restoring a persisted MANUAL/reactive brake
+/// authoritatively (come up braked, no auto-resume) but letting a persisted
+/// AUTO_METER_REASON brake stay OFF — the auto-meter sweep re-derives it from
+/// fresh telemetry on its first tick, so the run is not stranded.
+async fn restore_brake_from(store: &crate::brake_persist::BrakeStore) -> Arc<Brake> {
+    let brake = Arc::new(Brake::new());
+    if let Ok(p) = store.load().await {
+        if p.on && crate::brake_persist::persists_across_reboot(p.reason.as_deref()) {
+            brake.set_on(p.reason.unwrap_or_else(|| "manual".into()));
+        }
+    }
+    brake
+}
+
 /// Resolve `~/.claude/projects` (the Claude Code transcript tree this app
 /// ingests for the window meter). Mirrors the existing HOME convention; on a
 /// machine with no HOME it returns `.claude/projects` (relative) which simply
@@ -1387,7 +1401,9 @@ pub fn run() {
                 let (project_id, project_root, project_target_repo, pipe) = load_active(&project_store).await;
                 let tasks = Arc::new(TaskStore::new(pool.clone()));
                 let invocation_audit = Arc::new(runtime::invocation_audit::InvocationAuditStore::new(pool.clone()));
-                let brake = Arc::new(Brake::new());
+                // LH6: restore a persisted MANUAL brake (come up braked); an
+                // auto-meter brake stays OFF so the sweep re-derives it.
+                let brake = restore_brake_from(&brake_store).await;
 
                 // LH4: reap any crash-orphaned `claude` groups from a prior
                 // session BEFORE re-queueing their tasks, so the re-run has no
@@ -1960,6 +1976,37 @@ mod migration_tests {
         assert_eq!(version, 13, "all thirteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn boot_restore_brakes_for_manual_not_for_auto_meter() {
+        use crate::brake_persist::{BrakeStore, PersistedBrake};
+        use std::str::FromStr;
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(false);
+        let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+        sqlx::query(include_str!("../migrations/013_lifecycle_hardening.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = BrakeStore::new(pool);
+
+        // Manual Stop persisted -> the Brake comes up ON with the same reason.
+        store.save(true, Some("manual"), 1).await.unwrap();
+        let b = crate::restore_brake_from(&store).await;
+        assert!(b.is_on());
+        assert_eq!(b.state().reason.as_deref(), Some("manual"));
+
+        // Auto-meter persisted -> the Brake comes up OFF (sweep re-derives it).
+        store
+            .save(true, Some(usage_telemetry::brake_policy::AUTO_METER_REASON), 2)
+            .await
+            .unwrap();
+        let b2 = crate::restore_brake_from(&store).await;
+        assert!(!b2.is_on(), "auto-meter brake must not strand the run across reboot");
+
+        let _ = PersistedBrake { on: false, reason: None, ts: 0 }; // keep import used
     }
 }
 
