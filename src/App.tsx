@@ -437,6 +437,9 @@ export default function App() {
       <Drawer open={openTask != null} onClose={() => setOpenTaskId(null)}>
         {openTask && (
           <CardDrawer
+            // Remount per task so the at-mount `initialTab` contract is explicit
+            // (switching cards picks up the new task's default tab) (M5).
+            key={openTask.id}
             task={openTask}
             initialTab={openTask.id.startsWith("gen:") ? "live log" : undefined}
             artifactMarkdown={artifactMarkdown}
