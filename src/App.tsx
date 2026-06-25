@@ -411,6 +411,7 @@ export default function App() {
             task={openTask}
             artifactMarkdown={artifactMarkdown}
             logText={liveLog.logFor(openTask.id)}
+            logSegments={liveLog.segmentsFor(openTask.id)}
             reviseTarget={reviseTargetFor(openTask)}
             onOpenArtifact={setLineagePath}
             compareMarkdown={compareMarkdown}

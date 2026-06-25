@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { InvocationRow, Task } from "../ipc/runtime";
 import type { Pipeline } from "../ipc/pipeline";
 import { useComments } from "../hooks/useComments";
@@ -19,6 +19,9 @@ export interface CardDrawerProps {
   artifactMarkdown: string;
   /// log text for the live-log tab (v1: settled output, may be empty).
   logText?: string;
+  /// Ordered tagged live-log segments (B). Output renders as prose, thinking
+  /// dimmed/italic with a marker. When omitted, the drawer falls back to `logText`.
+  logSegments?: { kind: "output" | "thinking"; text: string }[];
   /// upstream writer the revise routes back to (for the panel summary).
   reviseTarget?: string;
   /// Open an upstream artifact from the lineage tab (D5). When omitted, clicking
@@ -58,6 +61,7 @@ export function CardDrawer({
   task,
   artifactMarkdown,
   logText,
+  logSegments = [],
   reviseTarget = "the writer",
   onOpenArtifact,
   compareMarkdown,
@@ -83,6 +87,7 @@ export function CardDrawer({
   const [revising, setRevising] = useState(false);
   const [confirmingAbandon, setConfirmingAbandon] = useState(false);
   const [activeComment, setActiveComment] = useState<string | undefined>();
+  const logRef = useRef<HTMLPreElement>(null);
 
   const inlineCount = reanchored.filter((c) => c.kind === "inline").length;
   const gated = task.state === "gated";
@@ -118,8 +123,13 @@ export function CardDrawer({
     };
   }
   // Derive the live-log tab state from what the drawer already knows (S1). Avoids
-  // re-plumbing the telemetry pipeline: running == still producing output.
-  const logBody = logText?.trim() ?? "";
+  // re-plumbing the telemetry pipeline: running == still producing output. The
+  // body the state machine keys off is the OUTPUT-only prose (thinking is display-
+  // only); when no tagged segments are supplied it falls back to `logText`.
+  const outputText = logSegments.length
+    ? logSegments.filter((s) => s.kind === "output").map((s) => s.text).join("")
+    : (logText ?? "");
+  const logBody = outputText.trim();
   const logState: "loading" | "streaming" | "settled" | "error" | "empty" =
     /\[error\]/i.test(logBody)
       ? "error"
@@ -141,6 +151,12 @@ export function CardDrawer({
     whiteSpace: "pre-wrap",
     background: "var(--bg-2)",
   };
+  // Keep the tail of the live log in view while it streams (S1/B feel).
+  useEffect(() => {
+    if (tab === "live log" && logState === "streaming" && logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [tab, logState, logSegments]);
   const bodyWrap: CSSProperties = { flex: 1, display: "flex", minHeight: 0 };
   const actionBar: CSSProperties = {
     borderTop: "1px solid var(--border)",
@@ -250,9 +266,26 @@ export function CardDrawer({
               </div>
             )}
             {(logState === "streaming" || logState === "settled") && (
-              <pre style={logBlock}>
-                {logBody}
-                {logState === "streaming" && <span className="abp-pulse" style={{ color: "var(--running)" }}>▌</span>}
+              <pre ref={logRef} style={logBlock} data-testid="live-log-body">
+                {logSegments.length
+                  ? logSegments.map((s, i) =>
+                      s.kind === "thinking" ? (
+                        <span
+                          key={i}
+                          data-log-kind="thinking"
+                          style={{ color: "var(--text-3)", fontStyle: "italic" }}
+                        >
+                          <span aria-hidden="true" style={{ opacity: 0.7 }}>thinking · </span>
+                          {s.text}
+                        </span>
+                      ) : (
+                        <span key={i} data-log-kind="output">{s.text}</span>
+                      ),
+                    )
+                  : logBody}
+                {logState === "streaming" && (
+                  <span className="abp-pulse" style={{ color: "var(--running)" }}>▌</span>
+                )}
               </pre>
             )}
             {logState === "error" && (
