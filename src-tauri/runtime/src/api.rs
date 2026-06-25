@@ -195,6 +195,9 @@ impl RuntimeState {
             usage_sink: None,
             log_sink: None,
             audit: None,
+            // The gate-verdict context never invokes the runner / resolves a
+            // working dir, so it carries no worktree seam (worktree isolation).
+            worktree_provider: None,
         }
     }
 }
@@ -905,6 +908,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/014_task_worktree.sql")).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO projects (id,name,root_path,created_at,updated_at) VALUES ('proj','n','/p',0,0)")
             .execute(&pool).await.unwrap();
         fn team(id: &str, approve: Option<&str>, cap: u32) -> pipeline::model::Team {
