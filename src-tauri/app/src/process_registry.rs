@@ -71,12 +71,52 @@ impl KillScope {
 pub struct ProcessRegistry {
     /// The live process-group map + kill latch, behind one lock.
     inner: Mutex<Inner>,
+    /// LH4: optional durable record of spawned pgids for crash-orphan reaping.
+    /// Interior-mutable so the registry (built before the pool) can have the
+    /// store attached at boot via `set_live_store`. `None` in unit tests.
+    live_store: Mutex<Option<Arc<crate::process_records::LiveProcessStore>>>,
 }
 
 impl ProcessRegistry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(Inner::default()),
+            live_store: Mutex::new(None),
+        }
+    }
+
+    /// Builder: attach a `LiveProcessStore` so the spawner persists a record per
+    /// spawned pgid (LH4). Used in tests; production wires via `set_live_store`.
+    pub fn with_live_store(self, store: Arc<crate::process_records::LiveProcessStore>) -> Self {
+        *self.live_store.lock().unwrap() = Some(store);
+        self
+    }
+
+    /// Attach the `LiveProcessStore` after construction (LH4): the registry is
+    /// built before the pool exists, so the store is set in `setup` once the
+    /// pool + migrations are ready.
+    pub fn set_live_store(&self, store: Arc<crate::process_records::LiveProcessStore>) {
+        *self.live_store.lock().unwrap() = Some(store);
+    }
+
+    /// Persist a live-process record for a freshly-registered pgid (LH4). Fire-
+    /// and-forget on the runtime so the sync spawner is not blocked. run_id /
+    /// task_id are NULL in v1 (the SpawnFn has no run/task in scope; the reap only
+    /// needs pgid + start-time).
+    fn record_spawn(&self, pgid: i32, started_ts: i64) {
+        if let Some(s) = self.live_store.lock().unwrap().clone() {
+            tauri::async_runtime::spawn(async move {
+                let _ = s.insert(pgid as i64, None, None, started_ts).await;
+            });
+        }
+    }
+
+    /// Remove a live-process record once the child has been reaped (LH4).
+    fn record_reap(&self, pgid: i32) {
+        if let Some(s) = self.live_store.lock().unwrap().clone() {
+            tauri::async_runtime::spawn(async move {
+                let _ = s.delete(pgid as i64).await;
+            });
         }
     }
 
@@ -303,7 +343,12 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
         // On a latched register the child was moved in here, so reclaim it via
         // take_child to self-kill.
         match registry.register_child_scoped(pgid, child, Scope::Worker) {
-            RegisterDecision::Registered => {}
+            RegisterDecision::Registered => {
+                // LH4: persist a durable record so a crash-orphan can be reaped
+                // on the next boot (deleted at reap below; nothing on self-kill).
+                let started = crate::process_records::process_start_ts(pgid).unwrap_or(0);
+                registry.record_spawn(pgid, started);
+            }
             RegisterDecision::KillImmediately => {
                 // A Stop/exit kill is in progress; this claim raced past the
                 // brake gate. Kill the child we just spawned (whole group) so it
@@ -338,6 +383,7 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
             // kill_all reaped + removed our entry already; the group is dead.
             None => Err(RunnerError::Other("spawn aborted: kill in progress".into())),
         };
+        registry.record_reap(pgid); // LH4: drop the durable record on reap
         let status = status?;
         runners::claude_cli::interpret_runner_output(stdout, stderr, status.success())
     })
@@ -383,7 +429,10 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
         // Register the owned child under the lock as Chat-scoped (LH5): a manual
         // Stop (kill_workers) spares it; only app-exit (kill_all) takes it.
         match registry.register_child_scoped(pgid, child, Scope::Chat) {
-            RegisterDecision::Registered => {}
+            RegisterDecision::Registered => {
+                let started = crate::process_records::process_start_ts(pgid).unwrap_or(0);
+                registry.record_spawn(pgid, started);
+            }
             RegisterDecision::KillImmediately => {
                 #[cfg(unix)]
                 unsafe {
@@ -406,6 +455,7 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
             Some(mut c) => c.wait().map_err(|e| ChatError::Spawn(e.to_string())),
             None => Err(ChatError::Spawn("spawn aborted: kill in progress".into())),
         };
+        registry.record_reap(pgid); // LH4: drop the durable record on reap
         let status = status?;
         llm_chat::claude_cli::interpret_chat_output(stdout, stderr, status.success())
     })
@@ -419,6 +469,42 @@ mod tests {
     /// `claude` binary, so their set/restore windows don't clobber each other
     /// when the harness runs tests in parallel.
     static PATH_GUARD: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawner_persists_a_live_record_then_removes_it_on_reap() {
+        use crate::process_records::LiveProcessStore;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(false);
+        // max_connections(1): a `sqlite::memory:` DB is per-connection, so the
+        // fire-and-forget insert/delete (on the tauri runtime) and the test's
+        // list() must share ONE connection to see the same database.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query(include_str!("../migrations/013_lifecycle_hardening.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = Arc::new(LiveProcessStore::new(pool));
+        let reg = Arc::new(ProcessRegistry::new().with_live_store(store.clone()));
+        // A child that exits promptly: record written at register, deleted at reap.
+        let out = (super::killable_spawn(&reg))(
+            &["sh".into(), "-c".into(), "printf ok".into()],
+            None,
+        );
+        assert_eq!(out.unwrap(), "ok");
+        // The spawner runs the blocking drain+wait on the calling thread;
+        // persistence is fire-and-forget via the runtime handle, so allow a
+        // brief settle.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(store.list().await.unwrap().is_empty(), "record removed after reap");
+    }
 
     #[test]
     fn register_under_a_set_latch_returns_kill_immediately() {
