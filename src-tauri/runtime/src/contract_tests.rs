@@ -37,6 +37,7 @@ fn full_task() -> Task {
     t.join_target = Some("join-1".into());
     t.run_id = Some("R-1".into());
     t.item_key = Some("src/a.rs".into());
+    t.worktree_path = Some("/proj/worktrees/R-1/alpha".into());
     t
 }
 
@@ -67,6 +68,7 @@ fn task_key_set_matches_ts() {
             "join_target",
             "run_id",
             "item_key",
+            "worktree_path",
         ]),
     );
     // newtype id → bare string; counters → numbers.
