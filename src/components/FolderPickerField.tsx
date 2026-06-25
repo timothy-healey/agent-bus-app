@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from "react";
 import { Button } from "./ui/Button";
-import { FileTreePicker } from "./FileTreePicker";
+import { pickFolder } from "../ipc/workspace";
 
 export interface FolderPickerFieldProps {
   label: string;
@@ -8,26 +8,25 @@ export interface FolderPickerFieldProps {
   onChange: (value: string) => void;
   placeholder?: string;
   disabled?: boolean;
-  /// Absolute base the in-app tree is rooted at. Defaults to "~" (home).
-  root?: string;
 }
 
-/// Label + text input + a "Browse…" toggle that opens the in-app themed
-/// `FileTreePicker` (G7, single-folder mode) — replacing the native OS dialog,
-/// which couldn't be themed. Manual ~-path text entry stays as the fallback
-/// (still backend-expanded at create/set). Reused for Root path and Target repo
-/// (wizard Basics + Settings).
-export function FolderPickerField({
-  label,
-  value,
-  onChange,
-  placeholder,
-  disabled,
-  root = "~",
-}: FolderPickerFieldProps) {
-  const [open, setOpen] = useState(false);
-  // Single-select folder mode: selection is [value] when value is absolute.
-  const selected = value && value.startsWith("/") ? [value] : [];
+/// Label + an app-styled path input + a "Browse…" button that opens the NATIVE OS
+/// folder dialog (Finder) via the `pickFolder` seam (A3). The OS dialog is the
+/// familiar picker; only the path-display box is themed to match the app. Manual
+/// ~-path text entry stays as the fallback (backend-expanded at create/set).
+/// Reused for Root path and Target repo (wizard Basics + Settings).
+export function FolderPickerField({ label, value, onChange, placeholder, disabled }: FolderPickerFieldProps) {
+  const [busy, setBusy] = useState(false);
+
+  async function browse() {
+    setBusy(true);
+    try {
+      const picked = await pickFolder();
+      if (picked) onChange(picked);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -39,36 +38,23 @@ export function FolderPickerField({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           disabled={disabled}
-          style={{ flex: 1 }}
+          style={inp}
         />
-        <Button
-          onClick={() => setOpen((o) => !o)}
-          disabled={disabled}
-          aria-label={`Browse for ${label}`}
-          aria-expanded={open}
-        >
-          {open ? "Close" : "Browse…"}
+        <Button onClick={browse} disabled={disabled || busy} aria-label={`Browse for ${label}`}>
+          {busy ? "Opening…" : "Browse…"}
         </Button>
       </div>
-      {open && (
-        <div style={picker}>
-          <FileTreePicker
-            root={root}
-            mode="folder"
-            label={`folder picker for ${label}`}
-            selected={selected}
-            onChange={(sel) => {
-              const next = sel[0] ?? "";
-              if (next) onChange(next);
-            }}
-          />
-          <div style={{ fontSize: "var(--ts-xs)", color: "var(--text-3)", marginTop: 4 }}>
-            Pick a folder, or type a path above. Selected: {value || "(none)"}
-          </div>
-        </div>
-      )}
     </label>
   );
 }
 
-const picker: CSSProperties = { marginTop: 4 };
+const inp: CSSProperties = {
+  flex: 1,
+  background: "var(--bg-2)",
+  border: "1px solid var(--border)",
+  color: "var(--text)",
+  padding: "var(--sp-2)",
+  borderRadius: "var(--r-sm)",
+  fontFamily: "inherit",
+  fontSize: "var(--ts-base)",
+};
