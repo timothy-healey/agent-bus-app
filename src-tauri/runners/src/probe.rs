@@ -52,7 +52,7 @@ pub fn classify_probe(result: Result<(), RunnerError>) -> ModelProbe {
         Ok(()) => ModelProbe { status: ProbeStatus::Ok, message: "model available".into() },
         Err(RunnerError::ModelUnavailable(m)) => ModelProbe {
             status: ProbeStatus::Unavailable,
-            message: format!("model unavailable — pick another ({m})"),
+            message: format!("model unavailable, pick another ({m})"),
         },
         Err(e) => ModelProbe { status: ProbeStatus::Error, message: e.to_string() },
     }
