@@ -14,4 +14,9 @@ describe("EVENTS contract", () => {
       expect(name).not.toContain(".");
     });
   }
+
+  it("exposes generator-status as a dot-free name", () => {
+    expect(EVENTS.generatorStatus).toBe("generator-status");
+    expect(EVENTS.generatorStatus).not.toContain(".");
+  });
 });
