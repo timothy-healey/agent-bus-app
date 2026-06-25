@@ -106,9 +106,33 @@ pub fn process_start_ts(_pid: i32) -> Option<i64> {
     None
 }
 
+/// Decide whether a recorded live-process group should be reaped on boot.
+/// `recorded_ts` = the start-time fingerprint stored at spawn (`0` if `ps` failed
+/// then). `probe` = `process_start_ts(leader pgid)` at boot (`None` = the leader
+/// pid is gone / `ps` failed, even though the GROUP may still be alive because a
+/// child outlives it). `group_alive` = `kill(-pgid, 0)` succeeded.
+///
+/// The PID-reuse guard must only protect against signalling a *stranger*: a
+/// POSITIVE start-ts mismatch (a recycled leader, recorded != 0 and probe != it)
+/// is the one case we skip. Otherwise — an exact match, a leader that has exited
+/// while a group child survives (`None`), or a record whose `started_ts` was `0`
+/// (ps failed at spawn) — we REAP the still-alive group. This closes the LH4
+/// under-reap hole where `claude`'s subagent children outlive `claude` itself.
+fn should_reap(recorded_ts: i64, probe: Option<i64>, group_alive: bool) -> bool {
+    if !group_alive {
+        return false; // nothing to kill (caller clears the row regardless)
+    }
+    match probe {
+        // Recycled leader: a DIFFERENT live start-time -> don't signal a stranger.
+        Some(ts) if recorded_ts != 0 && ts != recorded_ts => false,
+        // Exact match, leader-gone-but-group-alive (None), or recorded 0 -> reap.
+        _ => true,
+    }
+}
+
 /// Boot reap (LH4): for each recorded prior-session pgid that is STILL ALIVE and
-/// whose start-time fingerprint still matches (not a recycled pid), SIGTERM the
-/// group, grace, SIGKILL; then clear ALL records (a clean exit left none anyway).
+/// is not a recycled-leader stranger (see `should_reap`), SIGTERM the group,
+/// grace, SIGKILL; then clear ALL records (a clean exit left none anyway).
 /// MUST run BEFORE release_orphaned_running / reconcile_occupancy so the re-run
 /// has no surviving competitor. Best-effort + logged; never blocks boot fatally.
 pub async fn reap_orphans(store: &LiveProcessStore) {
@@ -122,15 +146,18 @@ pub async fn reap_orphans(store: &LiveProcessStore) {
     #[cfg(unix)]
     for rec in &records {
         let pgid = rec.pgid as i32;
-        // Alive? probe with signal 0.
-        if unsafe { libc::kill(-pgid, 0) } != 0 {
-            continue;
-        }
-        // PID-reuse guard: the live start-time must match the recorded one.
-        if process_start_ts(pgid) != Some(rec.started_ts) {
-            eprintln!(
-                "app: reap_orphans skipping pgid {pgid} (start-time mismatch / recycled)"
-            );
+        // Alive? probe the GROUP with signal 0 (a child can keep the group alive
+        // after the leader exits).
+        let group_alive = unsafe { libc::kill(-pgid, 0) } == 0;
+        // PID-reuse guard: probe the LEADER's start-time. Only a POSITIVE mismatch
+        // (recycled leader) skips; a gone leader (None) over a still-alive group,
+        // or a recorded 0, still reaps. See `should_reap`.
+        if !should_reap(rec.started_ts, process_start_ts(pgid), group_alive) {
+            if group_alive {
+                eprintln!(
+                    "app: reap_orphans skipping pgid {pgid} (start-time mismatch / recycled leader)"
+                );
+            }
             continue;
         }
         unsafe {
@@ -169,6 +196,36 @@ mod tests {
             .await
             .unwrap();
         pool
+    }
+
+    #[test]
+    fn should_reap_decision_matrix() {
+        // Exact start-ts match on a live group -> reap.
+        assert!(should_reap(500, Some(500), true), "exact match -> reap");
+        // Positive mismatch (recycled leader) -> skip; never signal a stranger.
+        assert!(
+            !should_reap(500, Some(999), true),
+            "recycled leader (positive mismatch) -> skip"
+        );
+        // Leader gone (None) but the GROUP is still alive — claude's subagent child
+        // outlived claude. This is the LH4 case; it MUST reap.
+        assert!(
+            should_reap(500, None, true),
+            "leader-gone-but-group-alive -> reap"
+        );
+        // Recorded started_ts == 0 (ps failed at spawn) on a live group -> reap;
+        // the 0 sentinel must never make the guard skip a real survivor.
+        assert!(
+            should_reap(0, Some(123), true),
+            "recorded 0 + live group -> reap"
+        );
+        assert!(
+            should_reap(0, None, true),
+            "recorded 0 + leader gone + live group -> reap"
+        );
+        // Group already dead -> nothing to kill (the caller still clears the row).
+        assert!(!should_reap(500, Some(500), false), "dead group -> no reap");
+        assert!(!should_reap(0, None, false), "dead group (any ts) -> no reap");
     }
 
     #[tokio::test]
