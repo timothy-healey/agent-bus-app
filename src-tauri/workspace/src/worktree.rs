@@ -1,16 +1,18 @@
-//! Worktree cleanup for the Workspace context. Workspace owns the project
-//! filesystem layout (`paths::project_subdirs` includes `worktrees`), so it
-//! owns finding + safely removing leftover git worktrees. The real `git`
-//! calls are isolated behind the `WorktreeGit` seam (mirrors the `SpawnFn`
-//! seam in `runners/src/claude_cli.rs` and the `KeychainStore` trait in the
-//! `secrets` crate) so tests never touch a real repo.
+//! Worktree create + reset + cleanup for the Workspace context. Workspace owns
+//! the project filesystem layout (`paths::project_subdirs` includes
+//! `worktrees`), so it owns adding, resetting, finding, and safely removing git
+//! worktrees under `<project_root>/worktrees/`. The real `git` calls are
+//! isolated behind the `WorktreeGit` seam (mirrors the `SpawnFn` seam in
+//! `runners/src/claude_cli.rs` and the `KeychainStore` trait in the `secrets`
+//! crate) so tests never touch a real repo.
 //!
-//! IMPORTANT (honest scope): this app does NOT yet create per-task git
-//! worktrees — workers run under `--add-dir` scopes (`runners/src/scope.rs`),
-//! not isolated worktrees. This module is a self-contained cleanup utility for
-//! worktrees that exist under `<project_root>/worktrees/` (created by hand or by
-//! a future per-task-worktree feature). Every such worktree is reported as a
-//! cleanup candidate because none is tied to an active task today.
+//! Per-work-item worktree CREATION now exists (WT1): an `Role::Implementer`
+//! stage gets an isolated worktree via the runtime `WorktreeProvider` seam,
+//! which the app implements over `add`/`reset` here; the engine threads its path
+//! to the item's downstream stages, and boot recovery `reset`s a re-queued
+//! killed task's worktree (WT2). Every `add`/`reset`/`remove` is path-scoped to
+//! `<project_root>/worktrees/` via `worktree_under_root` (no git runs on a
+//! rejected path). `list_worktrees` remains the cleanup-candidate surface (S2).
 
 use crate::store::ProjectStore;
 use agent_bus_core::ProjectId;
