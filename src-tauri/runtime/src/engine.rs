@@ -226,6 +226,7 @@ pub fn resolve_target(pipeline: &Pipeline, stage_id: &str) -> RouteTarget {
     RouteTarget::None
 }
 
+use crate::invocation_audit::{AuditUsage, ErrorClass, InvocationOutcome};
 use crate::task::{Task, TaskState, MAX_ATTEMPTS};
 use runners::output::InvocationRequest;
 use runners::scope::{cleanup, prepare};
@@ -1165,9 +1166,11 @@ fn stage_store_capacity(ctx: &EngineContext, stage: &str) -> u32 {
 }
 
 /// Invoke the runner for a work-item and parse its emitted item list. Builds the
-/// scope (granting the artifact-dir write access), streams nothing (engine tests
-/// use non-streaming invoke), cleans up the scope file, and returns the parsed
-/// items. An invoke error or unparseable output maps to `Err`.
+/// scope (granting the artifact-dir write access), opens + settles the
+/// per-invocation audit (R3), publishes usage to the kernel sink (R5), and streams
+/// live-log prose deltas when a log-sink factory is wired (R4) — all best-effort
+/// side channels that never fail the invocation. Cleans up the scope file and
+/// returns the parsed items. An invoke error or unparseable output maps to `Err`.
 async fn invoke(
     ctx: &EngineContext,
     team: &Team,
@@ -1214,10 +1217,109 @@ async fn invoke(
         sandbox_profile: None,
     };
 
-    let result = ctx.runner.invoke(&req).await;
+    // R3: open an audit record for this invocation (outcome NULL = in-flight)
+    // BEFORE the runner call. Best-effort — an audit write must never fail a
+    // settle (mirrors the UsageSink discipline). `attempts` is the Task's counter
+    // at invoke time (VET F2), not an invocation-local count.
+    let audit_id = match &ctx.audit {
+        Some(store) => store
+            .record_start(&task.id.0, &team.id, &effective.model, task.attempts, now)
+            .await
+            .map_err(|e| eprintln!("runtime: invocation audit start failed: {e}"))
+            .ok(),
+        None => None,
+    };
+
+    // R4: stream display-only log deltas when a sink factory is wired; else use
+    // the non-streaming invoke. Both return the IDENTICAL RunnerOutput — the parse
+    // + settle/usage below are byte-for-byte the same on either path.
+    let result = match &ctx.log_sink {
+        Some(factory) => {
+            let sink = factory(&task.id.0);
+            ctx.runner.invoke_stream(&req, &sink).await
+        }
+        None => ctx.runner.invoke(&req).await,
+    };
     cleanup(&scope_settings.settings_path);
-    let output = result.map_err(|e| EngineError::Invoke(e.to_string()))?;
-    Ok(parse_items(&output.final_text))
+
+    let output = match result {
+        Ok(o) => o,
+        Err(e) => {
+            // R3: settle the audit with the operational error class (no verdict
+            // was produced). Best-effort. Then propagate as the engine error the
+            // operational-failure path already handles.
+            settle_audit(
+                ctx,
+                &audit_id,
+                &InvocationOutcome::Error(ErrorClass::of(&e)),
+                &AuditUsage::default(),
+            )
+            .await;
+            return Err(EngineError::Invoke(e.to_string()));
+        }
+    };
+
+    let items = parse_items(&output.final_text);
+
+    // R5: publish usage to Telemetry (Customer-Supplier via the kernel UsageSink
+    // seam). Best-effort; a sink failure never blocks the invocation. The kernel
+    // `UsageEvent.team_id` is the `TeamId` newtype — wrap the plain team id; the
+    // task id is already a `TaskId`.
+    if let Some(sink) = &ctx.usage_sink {
+        sink.record(agent_bus_core::UsageEvent {
+            ts: now_unix(),
+            team_id: agent_bus_core::TeamId(team.id.clone()),
+            task_id: Some(task.id.clone()),
+            model: output.usage.model.clone(),
+            input_tokens: output.usage.input_tokens,
+            output_tokens: output.usage.output_tokens,
+            cache_creation: output.usage.cache_creation,
+            cache_read: output.usage.cache_read,
+        });
+    }
+
+    // R3: settle the audit with the invocation outcome — the verdict the engine
+    // derives from the parsed item list (the first item's verdict, defaulting to
+    // Approve when the model emits none, mirroring the lane-settle default) — plus
+    // the recorded usage. Best-effort. DELIBERATELY outside any Task transaction:
+    // this records the *invocation* outcome (one Claude call), independent of the
+    // subsequent store/route bookkeeping (D2 / VET F1).
+    let verdict = items
+        .first()
+        .and_then(|i| i.verdict)
+        .unwrap_or(agent_bus_core::Verdict::Approve);
+    settle_audit(
+        ctx,
+        &audit_id,
+        &InvocationOutcome::Verdict(verdict),
+        &AuditUsage {
+            model: output.usage.model.clone(),
+            input_tokens: output.usage.input_tokens,
+            output_tokens: output.usage.output_tokens,
+            cache_creation: output.usage.cache_creation,
+            cache_read: output.usage.cache_read,
+        },
+    )
+    .await;
+
+    Ok(items)
+}
+
+/// Best-effort settle of an audit row (R3). No-op when audit is unwired or the
+/// start write was lost; a failure is logged, never propagated — an audit write
+/// must never fail a settle (mirrors UsageSink discipline). PRESERVED idiom from
+/// the deleted single-task pool.
+async fn settle_audit(
+    ctx: &EngineContext,
+    audit_id: &Option<String>,
+    outcome: &InvocationOutcome,
+    usage: &AuditUsage,
+) {
+    if let (Some(store), Some(id)) = (&ctx.audit, audit_id) {
+        if let Err(e) = store.record_settle(id, outcome, usage, now_unix()).await {
+            eprintln!("runtime: invocation audit settle failed: {e}");
+        }
+    }
 }
 
 /// The operational-failure path for a transformer (a synthetic revise
@@ -1294,6 +1396,7 @@ pub(crate) mod test_support {
         sqlx::query(include_str!("../../app/migrations/001_initial.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/008_nested_groups.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         pool
@@ -2319,5 +2422,164 @@ mod tests {
             "project default must apply when the task carries none; add_dirs = {:?}",
             received[0].add_dirs
         );
+    }
+
+    // ---- Task 3: per-invocation audit (R3) in the engine ----
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    /// A fresh in-memory pool that ALSO carries the invocation_audit table, plus
+    /// the standalone audit store sharing it (so a test can assign `ctx.audit`
+    /// and read the rows back).
+    async fn pool_with_audit() -> (sqlx::SqlitePool, Arc<crate::invocation_audit::InvocationAuditStore>) {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:").unwrap().foreign_keys(false);
+        let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+        // Same migration set as test_support::fresh_pool (shared backing pool).
+        for sql in [
+            include_str!("../../app/migrations/001_initial.sql"),
+            include_str!("../../app/migrations/003_runtime.sql"),
+            include_str!("../../app/migrations/006_fanout.sql"),
+            include_str!("../../app/migrations/007_invocation_audit.sql"),
+            include_str!("../../app/migrations/008_nested_groups.sql"),
+            include_str!("../../app/migrations/012_runtime_stores.sql"),
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let audit = Arc::new(crate::invocation_audit::InvocationAuditStore::new(pool.clone()));
+        (pool, audit)
+    }
+
+    #[tokio::test]
+    async fn invoke_records_a_started_then_settled_audit_with_the_verdict() {
+        let (pool, audit) = pool_with_audit().await;
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        // The model emits an item carrying an explicit revise verdict.
+        let out = RunnerOutput {
+            verdict: agent_bus_core::Verdict::Revise,
+            artifact_path: None,
+            final_text: "KEY: alpha\nVERDICT: revise".into(),
+            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3 },
+        };
+        let mut ctx = ctx_with(pool, p.clone(), Arc::new(FakeRunner::always(out))).await;
+        ctx.audit = Some(audit.clone());
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let rows = audit.list_for_task(&item.id.0).await.unwrap();
+        assert_eq!(rows.len(), 1, "exactly one audit row for the invocation");
+        let row = &rows[0];
+        assert_eq!(row.team_id, "research");
+        assert_eq!(row.attempts, 1);
+        assert!(row.settled_at.is_some(), "the row must be settled");
+        assert_eq!(row.outcome_kind.as_deref(), Some("verdict"));
+        assert_eq!(row.outcome.as_deref(), Some("revise"), "verdict derived from the parsed item");
+        assert_eq!(row.usage.input_tokens, 100);
+        assert_eq!(row.usage.output_tokens, 20);
+        assert_eq!(row.usage.cache_creation, 5);
+        assert_eq!(row.usage.cache_read, 3);
+    }
+
+    #[tokio::test]
+    async fn a_failing_invoke_settles_the_audit_with_the_error_class() {
+        let (pool, audit) = pool_with_audit().await;
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let runner = Arc::new(FakeRunner::new(vec![Err(runners::output::RunnerError::RateLimited("429".into()))]));
+        let mut ctx = ctx_with(pool, p.clone(), runner).await;
+        ctx.audit = Some(audit.clone());
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        // transform_once routes a failed invoke onto the operational-failure path.
+        let outcome = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(matches!(outcome, StepOutcome::Failed { .. }));
+
+        let rows = audit.list_for_task(&item.id.0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome_kind.as_deref(), Some("error"));
+        assert_eq!(rows[0].outcome.as_deref(), Some("error:rate_limited"));
+        assert!(rows[0].settled_at.is_some());
+    }
+
+    // ---- Task 4: usage (R5) published via the kernel sink ----
+
+    struct RecordingSink(std::sync::Mutex<Vec<agent_bus_core::UsageEvent>>);
+    impl agent_bus_core::UsageSink for RecordingSink {
+        fn record(&self, e: agent_bus_core::UsageEvent) {
+            self.0.lock().unwrap().push(e);
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_publishes_a_usage_event_to_the_sink() {
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let out = RunnerOutput {
+            verdict: agent_bus_core::Verdict::Approve,
+            artifact_path: None,
+            final_text: "KEY: alpha".into(),
+            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3 },
+        };
+        let mut ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
+        ctx.usage_sink = Some(sink.clone());
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(), 1, "one usage event per invocation");
+        let e = &events[0];
+        assert_eq!(e.team_id, agent_bus_core::TeamId("research".into()));
+        assert_eq!(e.task_id.as_ref().map(|t| t.0.as_str()), Some(item.id.0.as_str()));
+        assert_eq!(e.model, "claude-opus-4-7");
+        assert_eq!(e.input_tokens, 100);
+        assert_eq!(e.output_tokens, 20);
+        assert_eq!(e.cache_creation, 5);
+        assert_eq!(e.cache_read, 3);
+    }
+
+    // ---- Task 5: live-log streaming (R4) via the log-sink factory ----
+
+    #[tokio::test]
+    async fn invoke_streams_prose_deltas_when_a_log_sink_is_wired() {
+        use runners::output::LogSink;
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        // A FakeRunner with scripted deltas forwarded on invoke_stream.
+        let runner = Arc::new(FakeRunner::with_deltas(
+            vec![Ok(items_out("KEY: alpha"))],
+            vec![vec!["Analy".into(), "sing.".into()]],
+        ));
+        let mut ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
+
+        // A capturing factory: per task id, push (task_id, delta) pairs.
+        let seen: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_for_factory = seen.clone();
+        ctx.log_sink = Some(Arc::new(move |task_id: &str| -> LogSink {
+            let tid = task_id.to_string();
+            let captured = seen_for_factory.clone();
+            Box::new(move |delta: &str| captured.lock().unwrap().push((tid.clone(), delta.to_string())))
+        }));
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        // The settle is unchanged: the item still advances normally.
+        let outcome = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(matches!(outcome, StepOutcome::Advanced { .. }));
+
+        let captured = seen.lock().unwrap();
+        let deltas: Vec<&str> = captured.iter().map(|(_, d)| d.as_str()).collect();
+        assert_eq!(deltas, vec!["Analy", "sing."], "the scripted deltas streamed to the sink");
+        assert!(captured.iter().all(|(tid, _)| tid == &item.id.0), "deltas keyed by the task id");
     }
 }
