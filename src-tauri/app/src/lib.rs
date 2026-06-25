@@ -1564,6 +1564,10 @@ pub fn run() {
                             // Always ingest changed transcripts (the meter must stay
                             // fresh even with the auto-brake disabled).
                             let new = ingestor.ingest_changed(last_scan).await.unwrap_or(0);
+                            // Advance the watermark unconditionally, even past an errored
+                            // pass: full re-parse + INSERT OR IGNORE makes re-ingest
+                            // idempotent, and transcripts are append-only, so any line
+                            // missed by a failed pass is recovered on the file's next append.
                             last_scan = now;
                             // Bound table growth: keep two full windows of margin.
                             let _ = cc.prune(now - 2 * cfg.window_secs).await;
