@@ -1212,7 +1212,11 @@ async fn invoke(
     // default (A5) — task overrides project, via the single precedence fn. (Work-
     // items carry no per-item target_repo in v1, so this is latent today, but the
     // rule is now applied by the live engine rather than only by the deleted pool.)
-    if let Some(repo) = effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref()) {
+    // Compute the effective target repo once (task override → project default)
+    // and reuse it for both the `${target_repo}` var binding and the working dir.
+    let effective_repo =
+        effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref());
+    if let Some(repo) = effective_repo.clone() {
         vars = vars.with_target_repo(repo);
     }
     // LF26: the child `claude` runs in the work-item's resolved working dir —
@@ -1220,9 +1224,7 @@ async fn invoke(
     // per-item worktree wiring, so this is the effective `${target_repo}` (task
     // override → project default). `None` keeps the pre-LF26 inherit-cwd
     // behaviour for a topic-less run with no target repo configured.
-    let working_dir =
-        effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref())
-            .map(|p| p.to_string_lossy().into_owned());
+    let working_dir = effective_repo.map(|p| p.to_string_lossy().into_owned());
     // Grant write access to this stage's ABSOLUTE artifact dir (the L1 + LF26
     // fix): the dir is outside the worker's cwd, so it must be in scope.writes
     // (settings allow) AND surfaced as an --add-dir (the build_settings pass
