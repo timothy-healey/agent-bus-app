@@ -1547,16 +1547,33 @@ pub fn run() {
                     let pool = pool.clone();
                     let handle = handle.clone();
                     let process_registry = process_registry.clone();
+                    let ingestor = ingestor.clone();
                     tauri::async_runtime::spawn(async move {
                         use usage_telemetry::api::load_config;
                         use usage_telemetry::brake_policy::{BrakeDecision, AUTO_METER_REASON};
                         use usage_telemetry::snapshot::{auto_brake_decision, compute_snapshot};
+                        // High-water mark: start at boot (BEFORE the first sleep) so
+                        // the first sweep only picks up files modified during/after
+                        // boot — the boot backfill already covered the window.
+                        let mut last_scan = now_unix();
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                             let cfg = load_config(&pool).await;
+                            let now = now_unix();
+
+                            // Always ingest changed transcripts (the meter must stay
+                            // fresh even with the auto-brake disabled).
+                            let new = ingestor.ingest_changed(last_scan).await.unwrap_or(0);
+                            last_scan = now;
+                            // Bound table growth: keep two full windows of margin.
+                            let _ = cc.prune(now - 2 * cfg.window_secs).await;
+                            if new > 0 {
+                                let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                            }
+
+                            // Only the brake DECISION is gated on the enable flag.
                             if !cfg.auto_meter_enabled { continue; }
                             let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
-                            let now = now_unix();
                             if let Ok(snap) = compute_snapshot(&cc, &worker, &cfg, brake.is_on(), now).await {
                                 match auto_brake_decision(&snap, &cfg, auto_on) {
                                     BrakeDecision::SetOn(reason) => { brake.set_on(reason); process_registry.kill_all(); let _ = handle.emit(crate::events::USAGE_CHANGED, ()); }
