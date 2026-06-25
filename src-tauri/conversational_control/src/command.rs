@@ -5,6 +5,7 @@
 //! ToolCallRequest values from a different source, so dispatch is unchanged.
 
 use crate::catalog::ToolCatalog;
+use crate::validate::validate_args;
 use agent_bus_core::ToolCallRequest;
 use serde_json::json;
 
@@ -58,7 +59,7 @@ pub fn parse_command(input: &str, catalog: &ToolCatalog) -> Parsed {
         }
         let args = serde_json::from_str(args_str)
             .unwrap_or_else(|_| json!({}));
-        return Parsed::Tool(ToolCallRequest { tool_name: name.into(), args });
+        return validated_tool(name, args, catalog);
     }
 
     let Some((tool_name, arg_names)) = verb_mapping(verb) else {
@@ -85,7 +86,20 @@ pub fn parse_command(input: &str, catalog: &ToolCatalog) -> Parsed {
             args = serde_json::Value::Object(m);
         }
     }
-    Parsed::Tool(ToolCallRequest { tool_name: tool_name.into(), args })
+    validated_tool(tool_name, args, catalog)
+}
+
+/// Validate `args` against the catalog tool's published `input_schema` (T1) before
+/// producing a `Parsed::Tool`. A schema miss on a SLASH command is surfaced to the
+/// user as a `Parsed::Error` naming the offending property — the command is NOT
+/// dispatched. The catalog membership of `name` is the caller's precondition.
+fn validated_tool(name: &str, args: serde_json::Value, catalog: &ToolCatalog) -> Parsed {
+    if let Some(spec) = catalog.by_name(name) {
+        if let Err(e) = validate_args(&spec.input_schema, &args) {
+            return Parsed::Error(format!("/{name}: {e}"));
+        }
+    }
+    Parsed::Tool(ToolCallRequest { tool_name: name.into(), args })
 }
 
 #[cfg(test)]
@@ -172,5 +186,68 @@ mod tests {
     fn generic_tool_form_reaches_any_catalog_tool() {
         let p = parse_command("/tool usage_snapshot {}", &catalog());
         assert_eq!(p, Parsed::Tool(ToolCallRequest { tool_name: "usage_snapshot".into(), args: json!({}) }));
+    }
+
+    /// A catalog whose tools carry REAL derived-style schemas (required props),
+    /// so validate-before-dispatch (T1 Task 3) is exercised against them.
+    fn schema_catalog() -> ToolCatalog {
+        let spec = |n: &str, schema: serde_json::Value| ToolSpec {
+            name: n.into(), description: "d".into(),
+            input_schema: schema, supplier_context: "runtime".into(),
+        };
+        ToolCatalog::new(vec![
+            spec("approve_gate", json!({
+                "type": "object", "required": ["task_id"],
+                "properties": { "task_id": { "type": "string" } }
+            })),
+            spec("brake_on", json!({
+                "type": "object",
+                "properties": { "reason": { "type": ["string", "null"] } }
+            })),
+            spec("brake_off", json!({ "type": "object", "properties": {} })),
+            spec("usage_set_budget", json!({
+                "type": "object", "required": ["budget"],
+                "properties": { "budget": { "type": "integer" } }
+            })),
+        ])
+    }
+
+    #[test]
+    fn slash_command_with_valid_args_passes_validation() {
+        let p = parse_command("/approve T-041", &schema_catalog());
+        assert_eq!(p, Parsed::Tool(ToolCallRequest {
+            tool_name: "approve_gate".into(), args: json!({ "task_id": "T-041" }),
+        }));
+    }
+
+    #[test]
+    fn slash_command_missing_required_arg_is_surfaced_not_dispatched() {
+        // `/tool approve_gate {}` bypasses the positional-arg check, so the schema
+        // validation is the thing that must reject it (and name the prop).
+        let p = parse_command("/tool approve_gate {}", &schema_catalog());
+        match p {
+            Parsed::Error(e) => {
+                assert!(e.contains("task_id"), "must name the missing prop: {e}");
+                assert!(e.to_lowercase().contains("required"));
+            }
+            other => panic!("expected a surfaced error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_command_wrong_typed_arg_is_surfaced_not_dispatched() {
+        let p = parse_command("/tool usage_set_budget {\"budget\":\"lots\"}", &schema_catalog());
+        match p {
+            Parsed::Error(e) => assert!(e.contains("budget"), "must name the bad prop: {e}"),
+            other => panic!("expected a surfaced error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn brake_default_reason_validates_against_the_real_schema() {
+        // `/brake` -> {reason:"manual"} and `/unbrake` -> {} must both pass the
+        // optional-reason / no-arg schemas (no false rejection).
+        assert!(matches!(parse_command("/brake", &schema_catalog()), Parsed::Tool(_)));
+        assert!(matches!(parse_command("/unbrake", &schema_catalog()), Parsed::Tool(_)));
     }
 }

@@ -14,6 +14,7 @@ pub mod conversation;
 pub mod catalog;
 pub mod dispatch;
 pub mod command;
+pub mod validate;
 pub mod engine;
 pub mod summarise;
 pub mod store;
