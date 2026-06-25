@@ -90,6 +90,23 @@ describe("BoardView", () => {
     expect(onOpenCard).toHaveBeenCalledWith("gen:R-1:research");
   });
 
+  it("the generator card is keyboard-activatable and labelled (a11y, M3)", () => {
+    const onOpenCard = vi.fn();
+    render(
+      <BoardView
+        pipeline={pipeline()}
+        tasks={[]}
+        hasRun
+        onOpenCard={onOpenCard}
+        activeGenerators={[{ stage: "research", task_id: "gen:R-1:research" }]}
+      />,
+    );
+    const card = screen.getByRole("button", { name: /generator research scanning/i });
+    expect(card).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(card, { key: "Enter" });
+    expect(onOpenCard).toHaveBeenCalledWith("gen:R-1:research");
+  });
+
   it("shows an empty hint when there is no pipeline", () => {
     render(<BoardView pipeline={null} tasks={[]} onOpenCard={() => {}} />);
     expect(screen.getByText(/no active pipeline/i)).toBeInTheDocument();

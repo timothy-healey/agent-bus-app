@@ -139,7 +139,15 @@ export function BoardView({
                     key={g.task_id}
                     className="abp-card"
                     role="button"
+                    tabIndex={0}
+                    aria-label={`generator ${g.stage} scanning`}
                     onClick={() => onOpenCard(g.task_id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        if (e.key === " ") e.preventDefault();
+                        onOpenCard(g.task_id);
+                      }
+                    }}
                     style={{
                       border: "1px solid var(--accent-bd)",
                       borderRadius: "var(--r-md)",
