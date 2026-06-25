@@ -421,6 +421,37 @@ pub(crate) fn runner_for(
     }
 }
 
+/// Composition-root factory for the terminal / Design Session CHAT runner (T2),
+/// mirroring `runner_for`. When an anthropic key is resolvable (keychain account
+/// `"anthropic-api"`, then `ANTHROPIC_API_KEY` env — S1), pick the structured
+/// `AnthropicApiChatRunner` (native tool-use enabled); else the always-available
+/// `ClaudeChatRunner` (the CLI default, which degrades via the trait's default
+/// `chat_structured`). The API idiom never crosses the trait — Runtime/CC hold an
+/// opaque `Arc<dyn ChatRunner>` and never learn which kind they got (the ACL seal).
+pub(crate) fn chat_runner_for(
+    resolve_key: &dyn Fn() -> Option<String>,
+) -> Arc<dyn llm_chat::chat::ChatRunner> {
+    match resolve_key() {
+        Some(key) if !key.is_empty() => {
+            Arc::new(llm_chat::anthropic_api::AnthropicApiChatRunner::new(key))
+        }
+        _ => Arc::new(llm_chat::claude_cli::ClaudeChatRunner::new()),
+    }
+}
+
+/// The root's default chat-key resolver: keychain account `"anthropic-api"` first
+/// (S1, the same account `runner_for_team` uses), then the `ANTHROPIC_API_KEY`
+/// env var as a fallback. Returns `None` when neither is present (→ the CLI
+/// chat runner). The secret is read here at the root and never crosses the trait.
+pub(crate) fn resolve_chat_key(keychain: &Arc<dyn secrets::KeychainStore>) -> Option<String> {
+    if let Ok(k) = keychain.get(secrets::api::SERVICE, "anthropic-api") {
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -507,5 +538,31 @@ mod runner_factory_tests {
             Err(other) => panic!("expected Other, got {other:?}"),
             Ok(_) => panic!("expected a clear error, got a runner"),
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_runner_factory_tests {
+    use super::chat_runner_for;
+
+    // supports_structured() distinguishes the two kinds without exposing which
+    // concrete runner was built (the ACL seal): only the API runner returns true.
+    #[test]
+    fn resolvable_key_builds_the_structured_api_chat_runner() {
+        let r = chat_runner_for(&|| Some("sk-from-keychain".to_string()));
+        assert!(r.supports_structured(), "a resolvable key must build the API chat runner");
+    }
+
+    #[test]
+    fn no_key_builds_the_cli_chat_runner_which_degrades() {
+        let r = chat_runner_for(&|| None);
+        assert!(!r.supports_structured(), "no key must build the CLI chat runner (degrades)");
+    }
+
+    #[test]
+    fn empty_key_falls_back_to_the_cli_chat_runner() {
+        // A blank/whitespace key is treated as absent (no structured support).
+        let r = chat_runner_for(&|| Some(String::new()));
+        assert!(!r.supports_structured());
     }
 }
