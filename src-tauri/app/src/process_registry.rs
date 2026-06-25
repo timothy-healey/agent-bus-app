@@ -92,13 +92,18 @@ impl ProcessRegistry {
         self.inner.lock().unwrap().killing = Some(KillScope::Workers);
     }
 
-    /// Clear the latch — re-enable normal spawning (wire on brake-off / resume).
+    /// Clear the latch — re-enable normal spawning (wired on brake-off / resume
+    /// in LH8b).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn end_killing(&self) {
         self.inner.lock().unwrap().killing = None;
     }
 
     /// Register a freshly-spawned pgid under the lock (Worker scope, no owned
     /// Child). If the latch covers this scope the spawner self-kills instead.
+    /// The decision-only API (no `Child`); the production spawners use
+    /// `register_child_scoped`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn register_pgid(&self, pgid: i32) -> RegisterDecision {
         let mut g = self.inner.lock().unwrap();
         if g.killing.is_some_and(|k| k.covers(Scope::Worker)) {
@@ -135,22 +140,6 @@ impl ProcessRegistry {
         g.groups
             .remove(&pgid)
             .and_then(|(_, c)| c.lock().unwrap().take())
-    }
-
-    /// Record a live child process-group id (Worker scope, no owned Child).
-    /// Idempotent — re-registering the same pgid is a no-op.
-    pub fn register(&self, pgid: i32) {
-        self.inner
-            .lock()
-            .unwrap()
-            .groups
-            .insert(pgid, (Scope::Worker, Arc::new(Mutex::new(None))));
-    }
-
-    /// Drop a process-group id once its child has been waited on. A pgid that is
-    /// not present is fine (best-effort).
-    pub fn deregister(&self, pgid: i32) {
-        self.inner.lock().unwrap().groups.remove(&pgid);
     }
 
     /// Count of currently-registered groups (test/inspection helper).
@@ -617,30 +606,14 @@ mod tests {
     }
 
     #[test]
-    fn register_then_deregister_leaves_the_set_empty() {
+    fn register_pgid_then_count_reflects_inserts() {
         let reg = ProcessRegistry::new();
-        reg.register(1234);
-        reg.register(5678);
+        assert!(matches!(reg.register_pgid(1234), RegisterDecision::Registered));
+        assert!(matches!(reg.register_pgid(5678), RegisterDecision::Registered));
         assert_eq!(reg.len(), 2);
-        reg.deregister(1234);
-        assert_eq!(reg.len(), 1);
-        reg.deregister(5678);
-        assert_eq!(reg.len(), 0);
-    }
-
-    #[test]
-    fn deregister_unknown_pgid_is_a_noop() {
-        let reg = ProcessRegistry::new();
-        reg.deregister(9999);
-        assert_eq!(reg.len(), 0);
-    }
-
-    #[test]
-    fn register_is_idempotent_on_the_same_pgid() {
-        let reg = ProcessRegistry::new();
-        reg.register(42);
-        reg.register(42);
-        assert_eq!(reg.len(), 1);
+        // Idempotent on the same pgid (HashMap insert replaces).
+        assert!(matches!(reg.register_pgid(1234), RegisterDecision::Registered));
+        assert_eq!(reg.len(), 2);
     }
 
     #[cfg(unix)]
@@ -762,7 +735,7 @@ mod tests {
                 .expect("spawn");
             let pgid = child.id() as i32;
             let reg = ProcessRegistry::new();
-            reg.register(pgid);
+            reg.register_child_scoped(pgid, child, Scope::Worker);
 
             reg.kill_all();
 
@@ -787,7 +760,7 @@ mod tests {
                 .expect("spawn");
             let pgid = child.id() as i32;
             let reg = ProcessRegistry::new();
-            reg.register(pgid);
+            reg.register_child_scoped(pgid, child, Scope::Worker);
 
             let start = Instant::now();
             reg.kill_all();
