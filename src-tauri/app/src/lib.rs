@@ -937,14 +937,27 @@ async fn save_pipeline_edits(
 impl ToolDispatcher for RootDispatcher {
     async fn dispatch(&self, req: &ToolCallRequest) -> ToolCallResult {
         use tauri::Emitter;
+        // T1: deserialize `args` into the SAME per-tool arg struct the supplier
+        // derives its `input_schema` from (single source of truth). A bad-args
+        // deserialization is reported as a tool error — though by the time we get
+        // here the agentic loop / parser has already schema-validated the args.
         let a = &req.args;
-        let str_arg = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+        // Deserialize helper: maps a serde error into a uniform tool error.
+        macro_rules! parse_args {
+            ($t:ty) => {
+                match serde_json::from_value::<$t>(a.clone()) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("invalid arguments for `{}`: {e}", req.tool_name)),
+                }
+            };
+        }
         let result = match req.tool_name.as_str() {
             "inject_topic" => {
                 // ④d: inject is now Start-a-run. It returns the created Run; emit
                 // run-changed (a run started) + task-changed (the board refetches).
+                let args = parse_args!(runtime::api::args::InjectTopicArgs);
                 match runtime::api::inject_topic_inner(
-                    &self.runtime, str_arg("topic").unwrap_or_default(), str_arg("target_repo"),
+                    &self.runtime, args.topic, args.target_repo,
                 ).await {
                     Ok(run) => {
                         let _ = self.app.emit(crate::events::RUN_CHANGED, &run.id);
@@ -955,21 +968,28 @@ impl ToolDispatcher for RootDispatcher {
                 }
             }
             "approve_gate" | "reject_gate" | "revise_gate" => {
-                let task_id = str_arg("task_id").unwrap_or_default();
+                let args = parse_args!(runtime::api::args::GateArgs);
                 let verdict = match req.tool_name.as_str() {
                     "approve_gate" => agent_bus_core::Verdict::Approve,
                     "reject_gate" => agent_bus_core::Verdict::Reject,
                     _ => agent_bus_core::Verdict::Revise,
                 };
-                match runtime::api::apply_gate_verdict_inner(&self.runtime, &task_id, verdict).await {
+                match runtime::api::apply_gate_verdict_inner(&self.runtime, &args.task_id, verdict).await {
                     Ok(task) => { let _ = self.app.emit(crate::events::TASK_CHANGED, &task.id.0); serde_json::to_value(task).map(ok).unwrap_or_else(err) }
                     Err(e) => err(e),
                 }
             }
-            "brake_on" => { let s = self.runtime.brake.clone(); s.set_on(str_arg("reason").unwrap_or_else(|| "manual".into())); let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::to_value(s.state()).unwrap()) }
+            "brake_on" => {
+                let args = parse_args!(runtime::api::args::BrakeOnArgs);
+                let s = self.runtime.brake.clone();
+                s.set_on(args.reason.unwrap_or_else(|| "manual".into()));
+                let _ = self.app.emit(crate::events::USAGE_CHANGED, ());
+                ok(serde_json::to_value(s.state()).unwrap())
+            }
             "brake_off" => { self.runtime.brake.set_off(); let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::to_value(self.runtime.brake.state()).unwrap()) }
             "scale_team" => {
-                match runtime::api::scale_team_inner(&self.runtime, str_arg("team_id").unwrap_or_default()) {
+                let args = parse_args!(runtime::api::args::ScaleTeamArgs);
+                match runtime::api::scale_team_inner(&self.runtime, args.team_id) {
                     Ok(maxn) => ok(serde_json::json!({ "max": maxn })),
                     Err(e) => err(e),
                 }
@@ -983,9 +1003,9 @@ impl ToolDispatcher for RootDispatcher {
                 }
             }
             "usage_set_auto_meter" => {
-                let enabled = a.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                match usage_telemetry::api::set_auto_meter_inner(&self.usage.pool, enabled).await {
-                    Ok(()) => { let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::json!({ "auto_meter_enabled": enabled })) }
+                let args = parse_args!(usage_telemetry::api::args::SetAutoMeterArgs);
+                match usage_telemetry::api::set_auto_meter_inner(&self.usage.pool, args.enabled).await {
+                    Ok(()) => { let _ = self.app.emit(crate::events::USAGE_CHANGED, ()); ok(serde_json::json!({ "auto_meter_enabled": args.enabled })) }
                     Err(e) => err(e),
                 }
             }
