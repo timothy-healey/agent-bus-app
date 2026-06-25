@@ -118,6 +118,29 @@ describe("CardDrawer", () => {
     expect(log.textContent).toContain("working on it");
   });
 
+  it("renders output as prose and thinking dimmed with a marker", () => {
+    render(
+      <CardDrawer
+        task={task({ state: "running" })}
+        artifactMarkdown=""
+        logSegments={[
+          { kind: "thinking", text: "let me reason" },
+          { kind: "output", text: "the answer" },
+        ]}
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /live log/i }));
+    const out = screen.getByText("the answer");
+    expect(out).toBeInTheDocument();
+    const thinking = screen.getByText(/let me reason/);
+    // thinking is tagged for distinct styling + carries the marker
+    expect(thinking.closest("[data-log-kind='thinking']")).not.toBeNull();
+    expect(screen.getByText(/thinking/i)).toBeInTheDocument();
+  });
+
   it("renders an error treatment when the log contains an error (S1)", () => {
     render(
       <CardDrawer task={task({ state: "gated" })} artifactMarkdown="" logText="[error] runner crashed" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />,
