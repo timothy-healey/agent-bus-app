@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 
 /// Token usage for one chat turn. Structurally identical to `runners::RunnerUsage`
@@ -37,6 +38,30 @@ pub struct ChatReply {
     pub usage: ChatUsage,
 }
 
+/// A tool the model may call to emit structured output (the kernel shape that
+/// crosses the ACL). `input_schema` is a plain JSON Schema `Value` — the SAME
+/// schema a consumer already uses for prose-fenced validation (DS-Schema's
+/// `slice_schema`, T1's published `ToolSpec.input_schema`). NO anthropic idiom
+/// here: the runner maps this onto whatever the provider's tool shape is,
+/// sealed inside the concrete runner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// A structured (tool-call) reply: the tool the model chose plus its arguments
+/// as a JSON `Value` already shaped to the tool's `input_schema`, plus usage.
+/// Domain-shaped — no `tool_use`/`tool_result` envelope, no session id: those
+/// stay sealed inside the concrete runner (the ACL seal).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructuredReply {
+    pub tool_name: String,
+    pub args: Value,
+    pub usage: ChatUsage,
+}
+
 /// Mirrors `runners::RunnerError`'s classes so chat consumers handle failure the
 /// same way Runtime handles runner failure.
 #[derive(Debug)]
@@ -45,6 +70,11 @@ pub enum ChatError {
     Spawn(String),
     NoResult,
     Other(String),
+    /// The runner does not support the requested capability (e.g. structured
+    /// output via native tool-use). Returned by the DEFAULT `chat_structured`
+    /// impl so the CLI runner degrades and consumers fall back to the
+    /// prose+parse+repair path. NOT a failure — it is a capability signal.
+    Unsupported(String),
 }
 
 impl ChatError {
@@ -62,6 +92,7 @@ impl fmt::Display for ChatError {
             ChatError::Spawn(m) => write!(f, "spawn failed: {m}"),
             ChatError::NoResult => write!(f, "no result parsed from chat output"),
             ChatError::Other(m) => write!(f, "chat failed: {m}"),
+            ChatError::Unsupported(m) => write!(f, "unsupported chat capability: {m}"),
         }
     }
 }
@@ -88,6 +119,34 @@ pub trait ChatRunner: Send + Sync {
     async fn chat_stream(&self, req: &ChatRequest, sink: &DeltaSink) -> Result<ChatReply, ChatError> {
         let _ = sink;
         self.chat(req).await
+    }
+
+    /// Whether this runner can emit native structured output (tool-use). The
+    /// default is `false` so existing runners (the CLI) keep working and
+    /// consumers fall back to the prose+parse+repair path; the API runner
+    /// overrides it to `true`.
+    fn supports_structured(&self) -> bool {
+        false
+    }
+
+    /// Structured-output turn: ask the model to call one of `tools` and return
+    /// its `{tool_name, args}` natively (schema-valid by construction — no
+    /// prose-fenced-json parsing or repair loop). `force` optionally pins the
+    /// model to a specific tool name (forced tool_choice). The DEFAULT impl
+    /// returns `ChatError::Unsupported` so the CLI runner degrades; consumers
+    /// gate on `supports_structured()` before calling. The provider tool-use
+    /// idiom is sealed inside the concrete runner — only `ChatToolDef`/
+    /// `StructuredReply` (Value-based) cross this seam (the ACL seal).
+    async fn chat_structured(
+        &self,
+        req: &ChatRequest,
+        tools: &[ChatToolDef],
+        force: Option<&str>,
+    ) -> Result<StructuredReply, ChatError> {
+        let _ = (req, tools, force);
+        Err(ChatError::Unsupported(
+            "this chat runner does not support native structured output".into(),
+        ))
     }
 }
 
@@ -124,6 +183,37 @@ mod tests {
         let reply = fake.chat_stream(&req, &sink).await.unwrap();
         assert_eq!(reply.text, "hi");
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_chat_structured_is_unsupported() {
+        // The default ChatRunner does not support native tool-use; the CLI runner
+        // inherits this so consumers fall back to the prose+parse+repair path.
+        use crate::fake::FakeChatRunner;
+        let fake = FakeChatRunner::new(vec![ChatReply { text: "x".into(), usage: ChatUsage::default() }]);
+        assert!(!fake.supports_structured());
+        let req = ChatRequest {
+            dialogue_id: "d".into(), system_prompt: "s".into(), user_message: "u".into(),
+            model: "m".into(), thinking_budget: 0,
+        };
+        let tool = ChatToolDef {
+            name: "emit".into(), description: "emit a slice".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let err = fake.chat_structured(&req, &[tool], Some("emit")).await.unwrap_err();
+        assert!(matches!(err, ChatError::Unsupported(_)));
+    }
+
+    #[test]
+    fn structured_reply_carries_tool_args_usage_only() {
+        // Compile-time proof StructuredReply is kernel-shaped (no tool_use envelope).
+        let r = StructuredReply {
+            tool_name: "emit".into(),
+            args: serde_json::json!({"kind": "teams"}),
+            usage: ChatUsage::default(),
+        };
+        assert_eq!(r.tool_name, "emit");
+        assert_eq!(r.args["kind"], "teams");
     }
 
     #[test]
