@@ -35,11 +35,14 @@ impl ProcessRegistry {
     }
 
     /// Count of currently-registered groups (test/inspection helper).
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.groups.lock().unwrap().len()
     }
 
-    /// Whether the registry currently holds no live groups.
+    /// Whether the registry currently holds no live groups (test/inspection
+    /// helper).
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.groups.lock().unwrap().is_empty()
     }
@@ -249,6 +252,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::zombie_processes)] // kill_all reaps the group; no direct wait
         fn kill_all_terminates_a_well_behaved_group_and_empties_the_registry() {
             // `sh -c 'sleep 30 & wait'` => the shell leads the group, a child
             // sleep is in the same group, so killing the GROUP must take both.
@@ -274,6 +278,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::zombie_processes)] // kill_all reaps the group; no direct wait
         fn kill_all_escalates_to_sigkill_for_a_sigterm_ignoring_group() {
             // `trap '' TERM` makes the shell ignore SIGTERM; only SIGKILL ends it.
             let child = Command::new("sh")
