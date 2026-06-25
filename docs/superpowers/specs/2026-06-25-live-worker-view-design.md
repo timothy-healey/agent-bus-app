@@ -37,6 +37,16 @@ Thinking appears only when the team's effort > off (`--max-thinking-tokens` > 0)
 - **Frontend:** a `useActiveGenerators(runId)` hook accumulates currently-active generators (set on `active:true`, cleared on `active:false`). `BoardView` renders a **transient card** in the source lane for each active generator ("⟳ research · scanning…"), clickable.
 - **Opening it:** clicking the transient card sets `openTaskId` to its `gen:…` id. `App`/`CardDrawer` resolve a **synthetic Task** for a `gen:` id (no DB row) — a minimal Task (stage = source, state = running, no artifact/history) so the drawer opens on the **live-log tab** showing the stream; the artifact/review/lineage/history tabs show their empty states (a generator pass has no artifact). When the pass ends, the transient card clears and the drawer (if open on it) shows the settled/empty live-log state.
 
+## E. Card identity & content (LF32)
+
+Today a card's header leads with the raw `task.id` (`T-<uuid>`, rendered in accent) and its body renders `task.topic` — which is **empty for every generated work-item**, so the body is blank and the only human-meaningful string (`item_key`, the slug, e.g. `LWV-A1-logdelta-seam`) appears nowhere. Redesign so a card reads in plain language:
+
+- **Description source:** the generator/transformer **output contract** gains a `DESCRIPTION:` line per item — a short (≤ ~80 char) plain-language summary the agent writes alongside `KEY:`/`ARTIFACT:`/`VERDICT:`. `parse_items` captures it into `OutputItem.description`; the engine stores it on the work-item's existing `topic` field (no new column — the card already renders `topic`). Fallback when absent (legacy/transform items that emit no `DESCRIPTION:`): derive a readable title from the slug (de-kebab the `item_key`), then the stage label.
+- **Card head:** lead with the description (`topic`) as the prominent title; show the **slug** (`item_key`) as secondary muted/mono metadata; **drop the raw `task.id`** from the prominent accent slot (it remains available in the history/lineage tabs for debugging, not as the headline). The existing `{current_stage} · a{attempts}` line stays (right-aligned, already padded clear of the close ✕ — LF30).
+- **BoardView card** mirrors the same: title = description, sub = slug, not the `task.id`.
+
+This makes both the board cards and the drawer header legible without changing the work-item model beyond populating `topic`.
+
 ## D. Testing (no live `claude`)
 
 - **stream_json:** a fixture stream-json with a `thinking` block + a `text` block → `feed` yields both, tagged `Thinking`/`Output`; `final_text`/`parse_*` see only the output (thinking excluded). Mirror test for `llm_chat`.
@@ -44,6 +54,7 @@ Thinking appears only when the team's effort > off (`--max-thinking-tokens` > 0)
 - **useTaskLog:** accumulates ordered tagged segments; coalesces consecutive same-kind deltas.
 - **CardDrawer:** renders an output + thinking sequence with thinking visually distinct (assert the thinking marker/class).
 - **Generator card:** `useActiveGenerators` sets/clears on the status events; `BoardView` shows a transient source card while active and removes it on `active:false`; clicking opens the drawer on the live-log tab for the `gen:` id.
+- **Card identity (E):** `parse_items` captures `DESCRIPTION:` into `OutputItem.description`; the engine writes it to the work-item `topic`. An item with no `DESCRIPTION:` falls back to the de-kebabbed slug. `CardDrawer`/`BoardView` render the description as title + slug as secondary and no longer show the raw `task.id` in the headline (assert the `T-…` id is absent from the head and the slug/description present).
 
 ## Out of scope / non-goals
 - Persisting a finished worker's full log for after-the-fact viewing (separate deferred item; running-worker live view only).
@@ -53,4 +64,5 @@ Thinking appears only when the team's effort > off (`--max-thinking-tokens` > 0)
 ## Relationship to other items
 - Builds on **R4** (live-log + the CardDrawer tab) and **R** (`invoke_stream` streaming).
 - The generator card resolves **LF23** ("started a run, nothing happening").
+- §E resolves **LF32** (opaque `task.id` headline + blank body) and pairs with **LF31** (the generator card is the §C work).
 - Pairs with **LF22** (the terminal already shows a thinking indicator for the chat; this brings thinking to the worker stream).
