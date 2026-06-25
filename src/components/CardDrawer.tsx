@@ -1,5 +1,6 @@
 import { useState, type CSSProperties } from "react";
-import type { Task } from "../ipc/runtime";
+import type { InvocationRow, Task } from "../ipc/runtime";
+import type { Pipeline } from "../ipc/pipeline";
 import { useComments } from "../hooks/useComments";
 import { ArtifactView } from "./ArtifactView";
 import { CommentRail } from "./CommentRail";
@@ -7,8 +8,11 @@ import { ReviseComposePanel } from "./ReviseComposePanel";
 import { LineageTab } from "./LineageTab";
 import { CompareView, type ComparePane } from "./CompareView";
 import { Button } from "./ui/Button";
+import { classifyNeedsHuman } from "../lib/classifyNeedsHuman";
+import { outcomeLabel, isErrorOutcome } from "../lib/outcomeLabel";
+import { formatAge } from "../lib/age";
 
-type Tab = "artifact" | "live log" | "review" | "lineage";
+type Tab = "artifact" | "live log" | "review" | "lineage" | "history";
 
 export interface CardDrawerProps {
   task: Task;
@@ -32,6 +36,22 @@ export interface CardDrawerProps {
   onApprove: (taskId: string) => void;
   onRevise: (taskId: string, direction: string) => void;
   onReject: (taskId: string) => void;
+  /// The task's invocation audit trail, newest-first (L3). Drives the history
+  /// panel, the headline reason line, and the failure-vs-handoff classification.
+  /// Defaults to empty (a card with no recorded invocations).
+  invocations?: InvocationRow[];
+  /// The active pipeline — the classifier reads its terminal escalation node to
+  /// tell a hand-off from a failure. May be null before it loads.
+  pipeline?: Pipeline | null;
+  /// `now` in epoch seconds for deterministic invocation ages (defaults to the
+  /// wall clock; tests pass a fixed value).
+  now?: number;
+  /// L2 recovery actions on a `needs_human` card. Optional so existing gated-only
+  /// hosts keep working; absent handlers simply hide their buttons.
+  onRetry?: (taskId: string) => void;
+  onForceAdvance?: (taskId: string) => void;
+  onAbandon?: (taskId: string) => void;
+  onAccept?: (taskId: string) => void;
 }
 
 export function CardDrawer({
@@ -47,6 +67,13 @@ export function CardDrawer({
   onApprove,
   onRevise,
   onReject,
+  invocations = [],
+  pipeline = null,
+  now = Math.floor(Date.now() / 1000),
+  onRetry,
+  onForceAdvance,
+  onAbandon,
+  onAccept,
 }: CardDrawerProps) {
   const artifactPath = task.review_artifact ?? task.parent_artifact ?? `artifacts/${task.id}.md`;
   // Pass the viewed artifact body so the hook re-anchors comments addressed in
@@ -54,10 +81,22 @@ export function CardDrawer({
   const { reanchored, add, remove } = useComments(task.id, artifactPath, artifactMarkdown);
   const [tab, setTab] = useState<Tab>("artifact");
   const [revising, setRevising] = useState(false);
+  const [confirmingAbandon, setConfirmingAbandon] = useState(false);
   const [activeComment, setActiveComment] = useState<string | undefined>();
 
   const inlineCount = reanchored.filter((c) => c.kind === "inline").length;
   const gated = task.state === "gated";
+  const needsHuman = task.state === "needs_human";
+  // The classification frames the needs_human card: a failure escalation offers
+  // recovery; a clean hand-off offers accept/send-back.
+  const kind = needsHuman ? classifyNeedsHuman(invocations, pipeline) : null;
+  const latest = invocations[0];
+  // The card's headline reason line: the latest invocation's outcome, humanized.
+  const reason = latest
+    ? `${kind === "handoff" ? "ready for you" : "needs attention"}: ${outcomeLabel(latest.outcome)} at ${latest.team_id}`
+    : kind === "handoff"
+      ? "ready for you"
+      : "needs attention";
 
   const head: CSSProperties = { padding: "14px 18px", borderBottom: "1px solid var(--border)" };
   const tabBar: CSSProperties = {
@@ -123,6 +162,24 @@ export function CardDrawer({
           </span>
         </div>
         <div style={{ fontSize: 14.5, color: "var(--text)" }}>{task.topic}</div>
+        {needsHuman && (
+          <div
+            data-testid="reason-line"
+            data-kind={kind ?? ""}
+            role="status"
+            style={{
+              marginTop: 8,
+              padding: "6px 10px",
+              borderRadius: 4,
+              fontSize: "var(--ts-sm)",
+              borderLeft: `2px solid ${kind === "handoff" ? "var(--accent-bd)" : "var(--danger)"}`,
+              background: kind === "handoff" ? "var(--bg-2)" : "var(--danger-2)",
+              color: kind === "handoff" ? "var(--text-2)" : "var(--danger)",
+            }}
+          >
+            {reason}
+          </div>
+        )}
       </div>
 
       <div style={tabBar} role="tablist">
@@ -137,6 +194,9 @@ export function CardDrawer({
         </button>
         <button className="abp-tab" role="tab" aria-selected={tab === "lineage"} style={tabStyle("lineage")} onClick={() => setTab("lineage")}>
           lineage
+        </button>
+        <button className="abp-tab" role="tab" aria-selected={tab === "history"} style={tabStyle("history")} onClick={() => setTab("history")}>
+          history{invocations.length > 0 ? ` (${invocations.length})` : ""}
         </button>
       </div>
 
@@ -220,6 +280,57 @@ export function CardDrawer({
             )}
           </div>
         )}
+        {tab === "history" && (
+          <div data-testid="history-panel" style={{ flex: 1, overflowY: "auto", padding: "10px 14px" }}>
+            {invocations.length === 0 ? (
+              <div style={{ color: "var(--text-3)", fontSize: "var(--ts-base)", fontStyle: "italic", padding: "6px 4px" }}>
+                no invocations recorded for this task yet.
+              </div>
+            ) : (
+              <ul aria-label="invocation history" style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+                {invocations.map((inv) => {
+                  const err = isErrorOutcome(inv.outcome);
+                  const settled = inv.settled_at != null;
+                  return (
+                    <li
+                      key={inv.invocation_id}
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        alignItems: "baseline",
+                        gap: 8,
+                        padding: "8px 10px",
+                        borderRadius: 4,
+                        border: "1px solid var(--border)",
+                        background: "var(--bg-2)",
+                        fontSize: "var(--ts-sm)",
+                      }}
+                    >
+                      <span style={{ color: "var(--text)", fontWeight: 500 }}>{inv.team_id}</span>
+                      <span style={{ color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>{inv.model}</span>
+                      <span style={{ color: "var(--text-3)" }}>a{inv.attempts}</span>
+                      <span
+                        style={{
+                          marginLeft: "auto",
+                          color: err ? "var(--danger)" : "var(--text-2)",
+                          fontVariantNumeric: "tabular-nums",
+                        }}
+                      >
+                        {settled ? outcomeLabel(inv.outcome) : "in flight"}
+                      </span>
+                      <span style={{ flexBasis: "100%", color: "var(--text-3)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+                        {inv.input_tokens + inv.output_tokens > 0
+                          ? `${inv.input_tokens}↑ ${inv.output_tokens}↓ tokens · `
+                          : ""}
+                        {formatAge(inv.started_at, now)} ago
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
 
       {revising && (
@@ -235,28 +346,72 @@ export function CardDrawer({
         />
       )}
 
-      <div style={actionBar}>
+      <div style={actionBar} data-testid="action-bar" data-mode={gated ? "gated" : needsHuman ? `needs_human:${kind}` : "read-only"}>
         <span style={{ marginRight: "auto", color: "var(--text-3)", fontSize: 11 }}>
           {inlineCount > 0 ? `${inlineCount} comments` : "no comments"}
           {gated ? " · at gate" : ""}
         </span>
-        <Button variant="danger" disabled={!gated} onClick={() => onReject(task.id)}>
-          reject
-        </Button>
-        <Button
-          variant={inlineCount > 0 ? "primary" : "default"}
-          disabled={!gated}
-          onClick={() => setRevising(true)}
-        >
-          revise
-        </Button>
-        <Button
-          variant={inlineCount > 0 ? "default" : "primary"}
-          disabled={!gated}
-          onClick={() => onApprove(task.id)}
-        >
-          approve
-        </Button>
+
+        {gated && (
+          <>
+            <Button variant="danger" onClick={() => onReject(task.id)}>
+              reject
+            </Button>
+            <Button variant={inlineCount > 0 ? "primary" : "default"} onClick={() => setRevising(true)}>
+              revise
+            </Button>
+            <Button variant={inlineCount > 0 ? "default" : "primary"} onClick={() => onApprove(task.id)}>
+              approve
+            </Button>
+          </>
+        )}
+
+        {needsHuman && kind === "failure" && (
+          <>
+            {onRetry && (
+              <Button variant="default" onClick={() => onRetry(task.id)}>
+                retry
+              </Button>
+            )}
+            {onForceAdvance && (
+              <Button variant="primary" onClick={() => onForceAdvance(task.id)}>
+                approve and advance
+              </Button>
+            )}
+            {onAbandon && !confirmingAbandon && (
+              <Button variant="danger" onClick={() => setConfirmingAbandon(true)}>
+                abandon
+              </Button>
+            )}
+            {onAbandon && confirmingAbandon && (
+              <>
+                <Button variant="default" onClick={() => setConfirmingAbandon(false)}>
+                  cancel
+                </Button>
+                <Button variant="danger" onClick={() => { setConfirmingAbandon(false); onAbandon(task.id); }}>
+                  confirm abandon
+                </Button>
+              </>
+            )}
+          </>
+        )}
+
+        {needsHuman && kind === "handoff" && (
+          <>
+            <Button variant="default" onClick={() => setRevising(true)}>
+              send back
+            </Button>
+            {onAccept && (
+              <Button variant="primary" onClick={() => onAccept(task.id)}>
+                accept
+              </Button>
+            )}
+          </>
+        )}
+
+        {!gated && !needsHuman && (
+          <span style={{ color: "var(--text-3)", fontSize: 11, fontStyle: "italic" }}>read only</span>
+        )}
       </div>
     </div>
   );
