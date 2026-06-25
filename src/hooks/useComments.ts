@@ -34,7 +34,18 @@ export function useComments(
   const [comments, setComments] = useState<Comment[]>([]);
   const [reanchored, setReanchored] = useState<ReanchoredComment[]>([]);
 
+  // A `gen:` id is a synthetic generator-pass task (no real row, no artifact on
+  // disk). Comments are persisted/fetched through the Tauri runtime keyed by
+  // task id, so we must not list/add/remove against a synthetic id — guard every
+  // path to a no-op so the artifact tab simply shows empty for generator cards.
+  const synthetic = taskId.startsWith("gen:");
+
   const reload = useCallback(() => {
+    if (synthetic) {
+      setComments([]);
+      setReanchored([]);
+      return;
+    }
     listComments(taskId).then((list) => {
       setComments(list);
       if (versionMarkdown && versionMarkdown.trim()) {
@@ -50,7 +61,7 @@ export function useComments(
         );
       }
     });
-  }, [taskId, versionMarkdown]);
+  }, [taskId, versionMarkdown, synthetic]);
 
   useEffect(() => {
     reload();
@@ -58,6 +69,7 @@ export function useComments(
 
   const add = useCallback(
     async (input: AddCommentInput) => {
+      if (synthetic) return;
       await addComment({
         taskId,
         artifactPath,
@@ -68,7 +80,7 @@ export function useComments(
       });
       reload();
     },
-    [taskId, artifactPath, reload],
+    [taskId, artifactPath, reload, synthetic],
   );
 
   const remove = useCallback(
