@@ -36,6 +36,11 @@ export function useConversation() {
   const send = useCallback(async (input: string) => {
     const trimmed = input.trim();
     if (!trimmed) return;
+    // Optimistically echo the user's line so the chat registers INSTANTLY (the
+    // backend turn can take a while — claude thinking). Replaced by the
+    // authoritative turns (which re-include this user turn + the assistant reply)
+    // when sendMessage resolves.
+    setTurns((prev) => [...prev, { role: "user", text: trimmed, tool_calls: [], at: Date.now() }]);
     setBusy(true);
     try {
       const c = await sendMessage(trimmed);

@@ -171,3 +171,19 @@ No graceful shutdown. The per-team worker loops die with the process (no new cla
 > "the styling of the zoom controls on the graph look default and aren't readable around our styling. let's apply app styling to the controls"
 
 global.css HAD overrides for `.react-flow__controls*` but they tied the library's `dist/style.css` on specificity (single class) and lost the cascade. Re-prefixed them with the `.react-flow` ancestor (0,2,x > the lib's 0,1,x) so they reliably win, and covered bg/border/disabled + the icon fill (`svg`/`path`/`*`) so the controls read on the dark surface. Commit on `main`.
+
+---
+
+### LF22 · Terminal chat gives no feedback on send (no "registered/thinking") — `fixed`
+
+> "asking the claude prompt at the bottom didn't show claude thinking, it should indicate it's registered the chat"
+
+`useConversation.send` only updated `turns` AFTER the backend turn resolved (claude + agentic loop) and the `streaming` bubble only appears once deltas arrive — so between send and the response, nothing showed. Fixed: optimistically echo the user's line immediately (replaced by the authoritative turns on resolve) + a "thinking…" indicator (`pending` = busy, shown until streaming/turn lands), wired App `busy → Terminal pending`. Commit on `main`.
+
+---
+
+### LF23 · Started a run, no visible activity — `uninvestigated`
+
+> "i started a run but don't see anything happening"
+
+After LF19 the generator runs `claude`, but a generator pass produces NO work-item until it returns the candidate list, so the board shows no card + no "busy" while the (possibly long) research scan runs — looks idle. Likely needs a run/generator activity indicator (a "researching… / generator running" state, or surface the in-flight source pass) + verify the live generator actually returns parseable items (the output-contract live path is still unproven). To investigate (pairs with the live-run shakedown).

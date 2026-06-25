@@ -14,11 +14,14 @@ interface TerminalProps {
   /// Display-only live assistant prose streamed from the backend before the
   /// authoritative turn lands. Rendered as a transient bubble; empty => hidden.
   streaming?: string;
+  /// A turn is in flight (sent, awaiting the backend). Shows a "thinking"
+  /// indicator so the chat visibly registers the send before any prose streams.
+  pending?: boolean;
 }
 
 /// The always-present god terminal docked at the bottom. Collapsible to a thin
 /// bar (DESIGN.md). Max height 280px. Tool calls render as inline chips.
-export function Terminal({ turns, contextLine, onSend, streaming = "" }: TerminalProps) {
+export function Terminal({ turns, contextLine, onSend, streaming = "", pending = false }: TerminalProps) {
   const [value, setValue] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   // Drag-to-resize the docked terminal height (session-only). A pointer drag on
@@ -144,6 +147,14 @@ export function Terminal({ turns, contextLine, onSend, streaming = "" }: Termina
                 <div style={{ color: "var(--text)" }}>
                   {streaming}
                   <span style={{ color: "var(--accent)" }}>▍</span>
+                </div>
+              </div>
+            )}
+            {pending && !streaming && (
+              <div data-pending="true" style={{ marginBottom: 10 }}>
+                <div style={{ color: "var(--text-3)", marginBottom: 2 }}>claude</div>
+                <div style={{ color: "var(--text-3)" }}>
+                  thinking<span className="abp-pulse" style={{ color: "var(--accent)" }}>…</span>
                 </div>
               </div>
             )}
