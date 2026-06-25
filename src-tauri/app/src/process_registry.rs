@@ -411,6 +411,34 @@ mod tests {
         assert!(reg.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::zombie_processes)] // kill_all reaps the owned Child
+    fn register_racing_kill_all_never_lets_a_child_escape() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        let reg = Arc::new(ProcessRegistry::new());
+        // Spawn a long-lived child OURSELVES in its own group, then register it.
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30 & wait")
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pgid = child.id() as i32;
+        let dec = reg.register_child(pgid, child);
+        assert!(matches!(dec, RegisterDecision::Registered));
+        reg.kill_all();
+        assert!(reg.is_empty(), "registry drained");
+        let alive = |p: i32| unsafe { libc::kill(-p, 0) == 0 };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while alive(pgid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(pgid), "the registered child must be dead after kill_all");
+    }
+
     #[test]
     fn register_then_deregister_leaves_the_set_empty() {
         let reg = ProcessRegistry::new();
