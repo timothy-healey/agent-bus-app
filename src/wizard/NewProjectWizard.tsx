@@ -49,6 +49,11 @@ export function NewProjectWizard({
   const [draft, setDraft] = useState<DraftPipeline>(emptyDraft());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // G11 — live best-effort validity reported by the canvas. The PROMINENT banner +
+  // navigation block only kick in on a Continue/Create/leave-Canvas ATTEMPT (the
+  // subtle inline badges carry validity the rest of the time).
+  const [canvasValid, setCanvasValid] = useState(true);
+  const [showBanner, setShowBanner] = useState(false);
   // a stable per-open dialogue session id (D8).
   const sessionId = useMemo(() => `wiz-${Math.random().toString(36).slice(2)}`, [open]);
   const [templates, setTemplates] = useState<SeedTemplateSummary[]>([]);
@@ -63,6 +68,22 @@ export function NewProjectWizard({
 
   const idx = WIZARD_STEPS.indexOf(step);
   const go = (next: WizardStep) => setStep(next);
+
+  // G11 — attempt to move forward off the Canvas (to Review or Create). If the
+  // draft is invalid, reveal the prominent banner and BLOCK; otherwise proceed.
+  // Moving backward (to Basics) or staying never blocks. Returns whether allowed.
+  const attemptForwardFromCanvas = useCallback(
+    (target: WizardStep): boolean => {
+      // Only forward moves off the canvas are gated.
+      const movingForward = WIZARD_STEPS.indexOf(target) > WIZARD_STEPS.indexOf("canvas");
+      if (step === "canvas" && movingForward && !canvasValid) {
+        setShowBanner(true);
+        return false;
+      }
+      return true;
+    },
+    [step, canvasValid],
+  );
 
   // Leaving (Cancel / Escape / switching project) discards all wizard state, so
   // confirm when the draft is dirty (audit A3). Dirty = past the first step, or
@@ -107,6 +128,13 @@ export function NewProjectWizard({
   // Step 3 Create: hard-validate → write → activate via create_project_from_draft.
   // A hard-validation failure comes back as an error and nothing is written.
   async function create() {
+    // G11 — block + reveal the banner on a known-invalid draft rather than letting
+    // the backend reject it (the backend stays the hard authority either way).
+    if (!canvasValid) {
+      setShowBanner(true);
+      setStep("canvas");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -122,8 +150,10 @@ export function NewProjectWizard({
   const steps: NavStep[] = WIZARD_STEPS.map((s) => ({
     id: s,
     label: STEP_LABELS[s],
-    // Free navigation in B1; B2/G11 refines gating.
-    onSelect: () => go(s),
+    // G11 — the nav tree is free EXCEPT moving forward off an invalid Canvas, which
+    // reveals the banner + blocks (attempt-time gating, not an always-on disable).
+    // G12 — Basics→Canvas is draft-preserving (a plain go, never a re-Generate).
+    onSelect: () => { if (attemptForwardFromCanvas(s)) go(s); },
   }));
 
   // Switching to an existing project abandons the draft (confirm first).
@@ -147,7 +177,7 @@ export function NewProjectWizard({
         <Button onClick={() => go(WIZARD_STEPS[idx - 1])}>Back</Button>
       )}
       {step === "canvas" && (
-        <Button variant="primary" onClick={() => go("review")}>Continue</Button>
+        <Button variant="primary" onClick={() => { if (attemptForwardFromCanvas("review")) go("review"); }}>Continue</Button>
       )}
       {step === "review" && (
         <Button variant="primary" onClick={create} disabled={busy}>
@@ -197,7 +227,17 @@ export function NewProjectWizard({
 
       {step === "canvas" && (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <PipelineCanvas draft={draft} onChange={setDraft} />
+          <PipelineCanvas
+            draft={draft}
+            onChange={setDraft}
+            showBanner={showBanner}
+            onValidityChange={(valid) => {
+              setCanvasValid(valid);
+              // Once the draft is fixed, retract the prominent banner (it returns on
+              // the next blocked attempt).
+              if (valid) setShowBanner(false);
+            }}
+          />
         </div>
       )}
 

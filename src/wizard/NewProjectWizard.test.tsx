@@ -7,14 +7,15 @@ const kickoffMock = vi.fn();
 const listSeedTemplatesMock = vi.fn();
 const seedTemplateMock = vi.fn();
 const createMock = vi.fn();
+const bestEffortValidateMock = vi.fn();
 vi.mock("../ipc/pipeline", () => ({
   kickoffGenerate: (...a: unknown[]) => kickoffMock(...a),
   listSeedTemplates: (...a: unknown[]) => listSeedTemplatesMock(...a),
   seedTemplate: (...a: unknown[]) => seedTemplateMock(...a),
   createProjectFromDraft: (...a: unknown[]) => createMock(...a),
   // PipelineCanvas runs live best-effort validation; stub it so the shell test
-  // is isolated.
-  bestEffortValidate: vi.fn().mockResolvedValue([]),
+  // is isolated (default: valid).
+  bestEffortValidate: (...a: unknown[]) => bestEffortValidateMock(...a),
 }));
 
 // A draft with one team, enough to reach + render the review step.
@@ -48,6 +49,9 @@ describe("NewProjectWizard", () => {
     // default: no templates (the picker is hidden) unless a test opts in.
     listSeedTemplatesMock.mockReset();
     listSeedTemplatesMock.mockResolvedValue([]);
+    // default: the draft is valid (no issues) unless a test opts in.
+    bestEffortValidateMock.mockReset();
+    bestEffortValidateMock.mockResolvedValue([]);
   });
 
   it("does not render when open=false", () => {
@@ -156,5 +160,57 @@ describe("NewProjectWizard", () => {
     await openToReview();
     fireEvent.click(screen.getByRole("button", { name: /create project/i }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/unreachable/);
+  });
+});
+
+describe("NewProjectWizard — validation timing (G11)", () => {
+  beforeEach(() => {
+    kickoffMock.mockReset();
+    seedTemplateMock.mockReset();
+    createMock.mockReset();
+    listSeedTemplatesMock.mockReset();
+    listSeedTemplatesMock.mockResolvedValue([]);
+    bestEffortValidateMock.mockReset();
+  });
+
+  // Open the wizard onto the Canvas step with an invalid draft (issues present).
+  async function openToInvalidCanvas() {
+    bestEffortValidateMock.mockResolvedValue(["team 'research' has no prompt yet"]);
+    kickoffMock.mockResolvedValueOnce(draftWithTeam());
+    render(<NewProjectWizard open={true} onClose={() => {}} onCreated={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "Demo" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Root path" }), { target: { value: "/p" } });
+    fireEvent.change(screen.getByLabelText(/describe/i), { target: { value: "a research flow" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate/i }));
+    await screen.findByRole("button", { name: /add team/i });
+  }
+
+  it("does not show the prominent banner on the Canvas from the start", async () => {
+    await openToInvalidCanvas();
+    await waitFor(() => expect(bestEffortValidateMock).toHaveBeenCalled());
+    expect(screen.queryByRole("alert", { name: /validation issues/i })).not.toBeInTheDocument();
+  });
+
+  it("blocks Continue on an invalid draft and reveals the prominent banner", async () => {
+    await openToInvalidCanvas();
+    await waitFor(() => expect(bestEffortValidateMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    // Still on the canvas (the palette is the tell), banner now visible.
+    expect(screen.getByRole("button", { name: /add team/i })).toBeInTheDocument();
+    expect(await screen.findByRole("alert", { name: /validation issues/i })).toHaveTextContent(/no prompt yet/);
+  });
+
+  it("a valid draft proceeds past Continue to Review", async () => {
+    bestEffortValidateMock.mockResolvedValue([]);
+    kickoffMock.mockResolvedValueOnce(draftWithTeam());
+    render(<NewProjectWizard open={true} onClose={() => {}} onCreated={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/project name/i), { target: { value: "Demo" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Root path" }), { target: { value: "/p" } });
+    fireEvent.change(screen.getByLabelText(/describe/i), { target: { value: "a research flow" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate/i }));
+    await screen.findByRole("button", { name: /add team/i });
+    await waitFor(() => expect(bestEffortValidateMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(await screen.findByText(/prompts\/research\.md/)).toBeInTheDocument();
   });
 });
