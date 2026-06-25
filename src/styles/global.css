@@ -26,7 +26,10 @@ code, .mono {
    :focus-visible, so this single rule restores a visible accent ring app-wide. */
 :where(button, input, textarea, select, [role="tab"], a, [tabindex]):focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  /* Inset the ring so it draws INSIDE the element box — a positive offset pushes
+     it outside and gets clipped on full-width controls flush to an overflow
+     container (the authoring panes, drawers, etc.). Inset = clip-safe everywhere. */
+  outline-offset: -2px;
 }
 
 /* Tooltip is shown on hover OR keyboard focus-within (a11y A5). */

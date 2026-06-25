@@ -123,3 +123,19 @@ Root cause: `ProjectStore::remove` did a bare `DELETE FROM projects` while child
 > "can we make the size of the bottom chat draggable"
 
 Added a drag-to-resize handle on the docked terminal's top edge (pointer drag + ↑/↓ keyboard, clamped [120px, 80vh], role="separator"); the panel uses a resizable height instead of a fixed 280px max. Session-only. Frontend-only.
+
+---
+
+### LF16 · Directory picker stopped opening Finder (G7 reverted) — `fixed`
+
+> "the directory picker doesn't open finder anymore, it should be native but the styling of the box that displays the path should match our apps styling"
+
+G7 replaced the native folder dialog with an in-app FileTreePicker. Operator wants the native Finder back for folder selection, just with an app-styled path box. Reverted `FolderPickerField` Browse → native `pickFolder()` (plugin-dialog) + tokenized the path input. (Scope reads/writes keep the in-app FileTreePicker — multi-select-within-repo, where native is poor.) Commit on `main`.
+
+---
+
+### LF17 · Focus ring overflows / clipped on full-width inputs — `fixed`
+
+> "the accent highlighting the textbox overflows the visible section of its container, cutting off the horizontal edges. This happens in multiple places"
+
+Global `:focus-visible` used `outline-offset: 1px` (ring OUTSIDE the box) → clipped by overflow containers on full-width controls. Changed to `outline-offset: -2px` (inset) — clip-safe everywhere in one rule. Commit on `main`.
