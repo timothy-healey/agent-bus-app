@@ -58,6 +58,9 @@ impl ChatAccumulator {
                     .and_then(|c| c.as_array())
                 {
                     for block in content {
+                        // Only text blocks are the chat reply; thinking blocks are
+                        // reasoning, never part of the reply (no `text` field, so the
+                        // match naturally ignores them).
                         if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                             if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                                 delta.push_str(t);
@@ -159,6 +162,20 @@ mod tests {
 
     const FIRST: &str = include_str!("fixtures/chat-first-turn.txt");
     const FOLLOW: &str = include_str!("fixtures/chat-follow-up.txt");
+
+    #[test]
+    fn thinking_blocks_are_excluded_from_the_chat_reply_text() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#, "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"reasoning"},{"type":"text","text":"hello"}],"usage":{"output_tokens":1}}}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"hello","usage":{"output_tokens":1},"session_id":"s"}"#
+        );
+        let seen = std::sync::Mutex::new(Vec::<String>::new());
+        let (reply, _s) = parse_chat_stream_streaming(raw, "m", &mut |d: &str| seen.lock().unwrap().push(d.to_string())).unwrap();
+        assert_eq!(reply.text, "hello");
+        // only the visible prose was streamed to the terminal; reasoning excluded
+        assert_eq!(*seen.lock().unwrap(), vec!["hello".to_string()]);
+    }
 
     #[test]
     fn parses_first_turn_text_usage_and_session_id() {
