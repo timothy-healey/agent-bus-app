@@ -23,8 +23,10 @@ pub enum RegisterDecision {
 #[derive(Default)]
 struct Inner {
     /// pgid -> owned child handle (LH2: held until reaped, so kill_all never
-    /// signals a recycled pgid). For LH1a the value is `()`, upgraded in LH2a.
-    groups: HashMap<i32, ()>,
+    /// signals a recycled pgid). `None` once the reaper took it out to `.wait()`,
+    /// or when registered via the bare `register`/`register_pgid` helpers (tests
+    /// / back-compat) where no `Child` is owned.
+    groups: HashMap<i32, Arc<Mutex<Option<std::process::Child>>>>,
     /// Latch: while set, no new child may register (it self-kills instead).
     killing: bool,
 }
@@ -61,14 +63,41 @@ impl ProcessRegistry {
         if g.killing {
             return RegisterDecision::KillImmediately;
         }
-        g.groups.insert(pgid, ());
+        g.groups.insert(pgid, Arc::new(Mutex::new(None)));
         RegisterDecision::Registered
+    }
+
+    /// Register the owned Child under the lock (LH2). Returns the decision; on
+    /// `Registered` the entry holds the Child so kill_all signals only live pids.
+    pub(crate) fn register_child(
+        &self,
+        pgid: i32,
+        child: std::process::Child,
+    ) -> RegisterDecision {
+        let mut g = self.inner.lock().unwrap();
+        if g.killing {
+            return RegisterDecision::KillImmediately;
+        }
+        g.groups.insert(pgid, Arc::new(Mutex::new(Some(child))));
+        RegisterDecision::Registered
+    }
+
+    /// Take the owned Child out of the registry under the lock (the reaper calls
+    /// this immediately before `.wait()`), so kill_all can never observe a pgid
+    /// whose process was already reaped+recycled.
+    pub(crate) fn take_child(&self, pgid: i32) -> Option<std::process::Child> {
+        let mut g = self.inner.lock().unwrap();
+        g.groups.remove(&pgid).and_then(|c| c.lock().unwrap().take())
     }
 
     /// Record a live child process-group id (the spawner calls this right after
     /// spawn). Idempotent — re-registering the same pgid is a no-op.
     pub fn register(&self, pgid: i32) {
-        self.inner.lock().unwrap().groups.insert(pgid, ());
+        self.inner
+            .lock()
+            .unwrap()
+            .groups
+            .insert(pgid, Arc::new(Mutex::new(None)));
     }
 
     /// Drop a process-group id once its child has been waited on. A pgid that is
@@ -90,11 +119,6 @@ impl ProcessRegistry {
         self.inner.lock().unwrap().groups.is_empty()
     }
 
-    /// Snapshot of the live pgids (used by `kill_all` so the kill loop does not
-    /// hold the lock while sleeping).
-    fn snapshot(&self) -> Vec<i32> {
-        self.inner.lock().unwrap().groups.keys().copied().collect()
-    }
 
     /// Best-effort graceful kill of every registered process GROUP: SIGTERM the
     /// group, poll up to a ~2.5s grace window for it to exit, then SIGKILL any
@@ -107,19 +131,28 @@ impl ProcessRegistry {
         // on register instead of escaping the snapshot. The latch stays set until
         // end_killing() (brake-off / resume) — kill_all never clears it.
         self.begin_killing();
-        let pgids = self.snapshot();
-        if pgids.is_empty() {
-            self.inner.lock().unwrap().groups.clear();
+        // Take every entry OUT under the lock: we now own each `Child`, so the
+        // leader pid stays un-reaped (un-recyclable) until after we SIGKILL it —
+        // closing the PID-reuse window (LH2). Drains the registry.
+        let taken: Vec<(i32, Arc<Mutex<Option<std::process::Child>>>)> = {
+            let mut g = self.inner.lock().unwrap();
+            g.groups.drain().collect()
+        };
+        self.signal_and_reap(taken);
+    }
+
+    /// Shared kill primitive: SIGTERM each group, grace-poll ~2.5s, SIGKILL any
+    /// survivor, then `.wait()` each owned `Child` to reap the zombie. Holding the
+    /// owned `Child` until after SIGKILL means the leader pid cannot be recycled
+    /// mid-sweep (LH2). Idempotent — a gone group (ESRCH) is fine.
+    fn signal_and_reap(&self, taken: Vec<(i32, Arc<Mutex<Option<std::process::Child>>>)>) {
+        if taken.is_empty() {
             return;
         }
+        let pgids: Vec<i32> = taken.iter().map(|(p, _)| *p).collect();
         #[cfg(unix)]
         {
             use std::time::{Duration, Instant};
-            // NOTE: deferred pgid-reuse hazard — between snapshotting and
-            // signalling (or between reaping and deregistering), the OS could
-            // recycle a freed pgid for an unrelated group, so a stale entry could
-            // signal the wrong group. A full guard (e.g. revalidating ownership)
-            // is deferred per spec.
             // 1. SIGTERM every group.
             for &pgid in &pgids {
                 unsafe {
@@ -154,8 +187,14 @@ impl ProcessRegistry {
                 pgids.len()
             );
         }
-        // Drain regardless of platform/outcome — these handles are spent.
-        self.inner.lock().unwrap().groups.clear();
+        // Reap the owned children we took out so the leader pid is freed cleanly
+        // (no zombie). A spawner thread racing us finds take_child -> None and
+        // returns an interrupt error without double-waiting.
+        for (_pgid, slot) in taken {
+            if let Some(mut c) = slot.lock().unwrap().take() {
+                let _ = c.wait();
+            }
+        }
     }
 }
 
@@ -183,7 +222,21 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
         }
         let mut child = cmd.spawn().map_err(|e| RunnerError::Spawn(e.to_string()))?;
         let pgid = child.id() as i32;
-        match registry.register_pgid(pgid) {
+        // Take the pipe handles off the child FIRST: the registry owns the
+        // `Child` (LH2) so kill_all can signal only live, un-reaped pids, but the
+        // drain below needs the stdout/stderr handles which we keep locally.
+        use std::io::Read;
+        let stderr_handle = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = e.read_to_end(&mut buf);
+                buf
+            })
+        });
+        let mut stdout_pipe = child.stdout.take();
+        // Register the owned child under the lock. On a latched register the
+        // child was moved in here, so reclaim it via take_child to self-kill.
+        match registry.register_child(pgid, child) {
             RegisterDecision::Registered => {}
             RegisterDecision::KillImmediately => {
                 // A Stop/exit kill is in progress; this claim raced past the
@@ -193,7 +246,9 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
                 unsafe {
                     libc::kill(-pgid, libc::SIGKILL);
                 }
-                let _ = child.wait();
+                if let Some(mut c) = registry.take_child(pgid) {
+                    let _ = c.wait();
+                }
                 return Err(RunnerError::Other("spawn aborted: kill in progress".into()));
             }
         }
@@ -203,23 +258,20 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
         // child blocks writing stderr). Read stderr on a worker thread while this
         // thread reads stdout. (For the streaming path the engine still forwards
         // deltas via the stream parser over the returned stdout.)
-        use std::io::Read;
-        let stderr_handle = child.stderr.take().map(|mut e| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = e.read_to_end(&mut buf);
-                buf
-            })
-        });
         let mut stdout = Vec::new();
-        if let Some(mut o) = child.stdout.take() {
+        if let Some(mut o) = stdout_pipe.take() {
             let _ = o.read_to_end(&mut stdout);
         }
         let stderr = stderr_handle
             .map(|h| h.join().unwrap_or_default())
             .unwrap_or_default();
-        let status = child.wait().map_err(|e| RunnerError::Spawn(e.to_string()));
-        registry.deregister(pgid);
+        // Take the owned Child out of the registry under the lock BEFORE waiting,
+        // so kill_all can never observe (and signal) an already-reaped pgid.
+        let status = match registry.take_child(pgid) {
+            Some(mut c) => c.wait().map_err(|e| RunnerError::Spawn(e.to_string())),
+            // kill_all reaped + removed our entry already; the group is dead.
+            None => Err(RunnerError::Other("spawn aborted: kill in progress".into())),
+        };
         let status = status?;
         runners::claude_cli::interpret_runner_output(stdout, stderr, status.success())
     })
@@ -252,20 +304,7 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
         }
         let mut child = cmd.spawn().map_err(|e| ChatError::Spawn(e.to_string()))?;
         let pgid = child.id() as i32;
-        match registry.register_pgid(pgid) {
-            RegisterDecision::Registered => {}
-            RegisterDecision::KillImmediately => {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(-pgid, libc::SIGKILL);
-                }
-                let _ = child.wait();
-                return Err(ChatError::Spawn("spawn aborted: kill in progress".into()));
-            }
-        }
-        // Drain BOTH pipes CONCURRENTLY, then wait — see killable_spawn: a
-        // sequential stdout-then-stderr drain deadlocks once the child writes
-        // more than the ~64KB stderr pipe buffer before stdout EOF.
+        // Take the pipe handles off the child FIRST (the registry owns the Child).
         use std::io::Read;
         let stderr_handle = child.stderr.take().map(|mut e| {
             std::thread::spawn(move || {
@@ -274,15 +313,34 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
                 buf
             })
         });
+        let mut stdout_pipe = child.stdout.take();
+        // Register the owned child under the lock. On a latched register reclaim
+        // it via take_child to self-kill (chat is exempt from a workers-only
+        // latch — see LH5; for now an All-scope latch self-kills it).
+        match registry.register_child(pgid, child) {
+            RegisterDecision::Registered => {}
+            RegisterDecision::KillImmediately => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+                if let Some(mut c) = registry.take_child(pgid) {
+                    let _ = c.wait();
+                }
+                return Err(ChatError::Spawn("spawn aborted: kill in progress".into()));
+            }
+        }
         let mut stdout = Vec::new();
-        if let Some(mut o) = child.stdout.take() {
+        if let Some(mut o) = stdout_pipe.take() {
             let _ = o.read_to_end(&mut stdout);
         }
         let stderr = stderr_handle
             .map(|h| h.join().unwrap_or_default())
             .unwrap_or_default();
-        let status = child.wait().map_err(|e| ChatError::Spawn(e.to_string()));
-        registry.deregister(pgid);
+        let status = match registry.take_child(pgid) {
+            Some(mut c) => c.wait().map_err(|e| ChatError::Spawn(e.to_string())),
+            None => Err(ChatError::Spawn("spawn aborted: kill in progress".into())),
+        };
         let status = status?;
         llm_chat::claude_cli::interpret_chat_output(stdout, stderr, status.success())
     })
@@ -333,6 +391,24 @@ mod tests {
         // The spawner must have killed its own child and surfaced a failure.
         assert!(out.is_err(), "a latched spawn must not succeed");
         assert!(reg.is_empty(), "the self-killed child is never registered");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reaping_takes_the_child_out_before_wait_so_kill_all_skips_it() {
+        // A child that exits immediately; the spawner reaps it. After the spawner
+        // returns, the registry holds NO live Child for that pgid, so a later
+        // kill_all has nothing to signal (the pgid is unreachable, not recycled).
+        let reg = Arc::new(ProcessRegistry::new());
+        let out = (super::killable_spawn(&reg))(
+            &["sh".into(), "-c".into(), "printf done".into()],
+            None,
+        );
+        assert_eq!(out.unwrap(), "done");
+        assert!(reg.is_empty(), "reaped child removed from the registry");
+        // kill_all over the now-empty registry is a no-op and signals nothing.
+        reg.kill_all();
+        assert!(reg.is_empty());
     }
 
     #[test]
