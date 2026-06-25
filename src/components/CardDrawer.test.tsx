@@ -388,4 +388,32 @@ describe("CardDrawer", () => {
     expect(screen.getByText(/v1 body/)).toBeInTheDocument();
     expect(screen.getByText(/rev body/)).toBeInTheDocument();
   });
+
+  it("gives only the active tab tabIndex 0 (roving tabindex)", () => {
+    render(<CardDrawer task={task()} artifactMarkdown="# Plan" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />);
+    expect(screen.getByRole("tab", { name: /artifact/i })).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("tab", { name: /live log/i })).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByRole("tab", { name: /history/i })).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("ArrowRight moves the active tab to live log", () => {
+    render(<CardDrawer task={task()} artifactMarkdown="# Plan" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />);
+    fireEvent.keyDown(screen.getByRole("tab", { name: /artifact/i }), { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: /live log/i })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /live log/i })).toHaveAttribute("tabindex", "0");
+  });
+
+  it("ArrowLeft wraps from artifact to history", () => {
+    render(<CardDrawer task={task()} artifactMarkdown="# Plan" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />);
+    fireEvent.keyDown(screen.getByRole("tab", { name: /artifact/i }), { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: /history/i })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("End jumps to the last (history) tab; Home returns to artifact", () => {
+    render(<CardDrawer task={task()} artifactMarkdown="# Plan" onApprove={() => {}} onRevise={() => {}} onReject={() => {}} />);
+    fireEvent.keyDown(screen.getByRole("tab", { name: /artifact/i }), { key: "End" });
+    expect(screen.getByRole("tab", { name: /history/i })).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(screen.getByRole("tab", { name: /history/i }), { key: "Home" });
+    expect(screen.getByRole("tab", { name: /artifact/i })).toHaveAttribute("aria-selected", "true");
+  });
 });

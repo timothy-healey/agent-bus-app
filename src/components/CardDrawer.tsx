@@ -11,6 +11,7 @@ import { Button } from "./ui/Button";
 import { classifyNeedsHuman } from "../lib/classifyNeedsHuman";
 import { outcomeLabel, isErrorOutcome } from "../lib/outcomeLabel";
 import { formatAge } from "../lib/age";
+import { rovingTabKey } from "../lib/roving";
 
 type Tab = "artifact" | "live log" | "review" | "lineage" | "history";
 
@@ -91,6 +92,15 @@ export function CardDrawer({
   // this version (B1); absent a body it falls back to v1 carry-over.
   const { reanchored, add, remove } = useComments(task.id, artifactPath, artifactMarkdown);
   const [tab, setTab] = useState<Tab>(initialTab ?? "artifact");
+  const TAB_ORDER: Tab[] = ["artifact", "live log", "review", "lineage", "history"];
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  function onTabKeyDown(e: React.KeyboardEvent<HTMLButtonElement>) {
+    const next = rovingTabKey(e.key, TAB_ORDER.indexOf(tab), TAB_ORDER.length);
+    if (next === null) return;
+    e.preventDefault();
+    setTab(TAB_ORDER[next]);
+    tabRefs.current[next]?.focus();
+  }
   const [revising, setRevising] = useState(false);
   const [confirmingAbandon, setConfirmingAbandon] = useState(false);
   const [activeComment, setActiveComment] = useState<string | undefined>();
@@ -236,19 +246,19 @@ export function CardDrawer({
       </div>
 
       <div style={tabBar} role="tablist">
-        <button className="abp-tab" role="tab" aria-selected={tab === "artifact"} style={tabStyle("artifact")} onClick={() => setTab("artifact")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "artifact"} tabIndex={tab === "artifact" ? 0 : -1} ref={(el) => { tabRefs.current[0] = el; }} onKeyDown={onTabKeyDown} style={tabStyle("artifact")} onClick={() => setTab("artifact")}>
           artifact{inlineCount > 0 ? ` (${inlineCount})` : ""}
         </button>
-        <button className="abp-tab" role="tab" aria-selected={tab === "live log"} style={tabStyle("live log")} onClick={() => setTab("live log")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "live log"} tabIndex={tab === "live log" ? 0 : -1} ref={(el) => { tabRefs.current[1] = el; }} onKeyDown={onTabKeyDown} style={tabStyle("live log")} onClick={() => setTab("live log")}>
           live log
         </button>
-        <button className="abp-tab" role="tab" aria-selected={tab === "review"} style={tabStyle("review")} onClick={() => setTab("review")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "review"} tabIndex={tab === "review" ? 0 : -1} ref={(el) => { tabRefs.current[2] = el; }} onKeyDown={onTabKeyDown} style={tabStyle("review")} onClick={() => setTab("review")}>
           review
         </button>
-        <button className="abp-tab" role="tab" aria-selected={tab === "lineage"} style={tabStyle("lineage")} onClick={() => setTab("lineage")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "lineage"} tabIndex={tab === "lineage" ? 0 : -1} ref={(el) => { tabRefs.current[3] = el; }} onKeyDown={onTabKeyDown} style={tabStyle("lineage")} onClick={() => setTab("lineage")}>
           lineage
         </button>
-        <button className="abp-tab" role="tab" aria-selected={tab === "history"} style={tabStyle("history")} onClick={() => setTab("history")}>
+        <button className="abp-tab" role="tab" aria-selected={tab === "history"} tabIndex={tab === "history" ? 0 : -1} ref={(el) => { tabRefs.current[4] = el; }} onKeyDown={onTabKeyDown} style={tabStyle("history")} onClick={() => setTab("history")}>
           history{invocations.length > 0 ? ` (${invocations.length})` : ""}
         </button>
       </div>
