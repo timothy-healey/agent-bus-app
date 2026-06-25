@@ -154,6 +154,27 @@ describe("CardDrawer", () => {
     expect(screen.getByText("scanning the repo")).toBeInTheDocument();
   });
 
+  it("renders live thinking (no prose yet) instead of the loading skeleton (M2)", () => {
+    render(
+      <CardDrawer
+        task={task({ id: "gen:R-1:research", state: "running", current_stage: "research" })}
+        artifactMarkdown=""
+        logSegments={[{ kind: "thinking", text: "reasoning about the repo" }]}
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /live log/i }));
+    const log = screen.getByTestId("live-log");
+    // a thinking-only stream is streaming, not loading — the thinking shows.
+    expect(log.getAttribute("data-log-state")).toBe("streaming");
+    expect(screen.queryByLabelText("log loading")).not.toBeInTheDocument();
+    const thinking = screen.getByText(/reasoning about the repo/);
+    expect(thinking.closest("[data-log-kind='thinking']")).not.toBeNull();
+    expect(screen.getByText(/thinking/i)).toBeInTheDocument();
+  });
+
   it("renders output as prose and thinking dimmed with a marker", () => {
     render(
       <CardDrawer
