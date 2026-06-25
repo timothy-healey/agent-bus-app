@@ -1,3 +1,4 @@
+mod brake_persist;
 mod events;
 mod pipeline_activator;
 mod process_records;
