@@ -155,3 +155,11 @@ The NodeDrawer header places Delete flush-right (justify-content: space-between)
 > "app: generator loop step failed for `research`: runner invocation failed: ... Error: Input must be provided either through stdin or as a prompt argument when using --print"
 
 First real `claude` invocation. A run is topic-less (the prompts are the work), so `compose_invocation_message(topic="")` yielded an empty user message → `claude --print` rejects an empty prompt. Only bit the LIVE CLI (FakeRunner ignores the message). Fixed: `engine::invoke` falls back to a non-empty directive (`fallback_user_message`) — "Begin…" for the source, or "Process this work item; read your input artifact at <path>…" for a transformer. The real instructions stay in the system prompt (responsibility + output contract). Commit on `main`.
+
+---
+
+### LF20 · Exit/brake doesn't stop in-flight claude subprocesses — `uninvestigated`
+
+> "does exiting the app send a signal to stop ongoing work?"
+
+No graceful shutdown. The per-team worker loops die with the process (no new claims), but an in-flight `claude` invocation is spawned via blocking `std::process::Command::output()` (no kill handle / process group / death-signal), so it ORPHANS and keeps running after quit — potentially still writing the worktree (implementers mutate the target repo). Brake only blocks new claims; it doesn't kill a running subprocess. On restart `release_orphaned_running` recovers the DB row but doesn't reap the process (risking a double-run). Fix would need: a Tauri `RunEvent::ExitRequested` handler that brakes + reaps children; killable spawns (`.spawn()` + tracked child handles, kill-on-exit; Linux PR_SET_PDEATHSIG / kill the process group); and brake-kills-running semantics. Likely roadmap item(s).
