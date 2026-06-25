@@ -899,10 +899,69 @@ async fn brake_off(
     registry: tauri::State<'_, Arc<process_registry::ProcessRegistry>>,
     brake_store: tauri::State<'_, Arc<brake_persist::BrakeStore>>,
 ) -> Result<runtime::brake::BrakeState, String> {
+    resume_brake(runtime.as_ref(), registry.as_ref(), brake_store.as_ref()).await;
+    Ok(runtime.brake.state())
+}
+
+/// LH8b: the full Resume side-effect, shared by the `brake_off` (Resume) command
+/// and the LF33 `start_run` resume-if-braked path. Clears the runtime brake,
+/// persists the OFF row so the resume survives an app restart, AND clears the
+/// registry kill latch so spawning is re-enabled. Both callers MUST use this — a
+/// half-clear (brake off without `end_killing`) leaves the chunk-5 kill latch set
+/// and worker spawning silently disabled.
+async fn resume_brake(
+    runtime: &RuntimeState,
+    registry: &process_registry::ProcessRegistry,
+    brake_store: &brake_persist::BrakeStore,
+) {
     runtime.brake.set_off();
     let _ = brake_store.save(false, None, now_unix()).await;
     registry.end_killing(); // LH8b: resume re-enables spawning
-    Ok(runtime.brake.state())
+}
+
+/// LF33 predicate: a Start press should clear the brake (resume) only when it
+/// RESUMED a pre-existing run AND the brake was on. A freshly Started run, or a
+/// Resumed run with the brake already off, leaves the brake alone. Pure so it is
+/// unit-testable without an AppHandle.
+fn should_clear_brake(braked: bool, resumed: bool) -> bool {
+    braked && resumed
+}
+
+/// LF33: the frontend "Start run" button. Root-crate wrapper over the runtime
+/// resolver so the composition root can emit `run-changed` (the runtime crate
+/// stays Tauri-unaware) and resume the brake on a resume. Replaces the raw
+/// `runtime::api::start_run` in the invoke handler. IDEMPOTENT: if an incomplete
+/// run already exists for the active project it is returned as-is (a double-press
+/// never creates a second run — the LF33 bug); if that run was Stopped (braked)
+/// the press resumes it through the SAME full brake-off path the dedicated Resume
+/// uses (`resume_brake`: clear brake + persist OFF + `end_killing()`), so a
+/// Start-while-stopped re-enables worker spawning rather than half-clearing the
+/// brake and leaving the chunk-5 kill latch set. ALWAYS emits `run-changed` with
+/// the run id so `useRuns` refetches and the board + the `● Running` control
+/// update live.
+#[tauri::command(rename_all = "snake_case")]
+async fn start_run(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, Arc<RuntimeState>>,
+    registry: tauri::State<'_, Arc<process_registry::ProcessRegistry>>,
+    brake_store: tauri::State<'_, Arc<brake_persist::BrakeStore>>,
+    _topic: Option<String>,
+) -> Result<runtime::run_store::Run, String> {
+    let outcome = runtime::api::start_or_resume_run_inner(runtime.as_ref()).await?;
+    let resumed = matches!(outcome, runtime::api::StartOutcome::Resumed(_));
+    if should_clear_brake(runtime.brake.is_on(), resumed) {
+        // KEY CORRECTION (LF33): route a Start-while-braked resume through the
+        // SAME full brake-off path the dedicated Resume (`brake_off`) uses. The
+        // chunk-5 `brake_on` sets a kill latch that only `end_killing()` clears;
+        // clearing the brake WITHOUT `end_killing()` would leave spawning disabled
+        // and the resume would silently do nothing.
+        resume_brake(runtime.as_ref(), registry.as_ref(), brake_store.as_ref()).await;
+    }
+    let run = outcome.into_run();
+    // ALWAYS emit so the board + the ● Running/Stop control update live even when
+    // we resumed/returned the existing run (this is the LF33 close-the-loop fix).
+    let _ = app.emit(crate::events::RUN_CHANGED, &run.id);
+    Ok(run)
 }
 
 /// OHS command: activate a project's runtime (swap the active pipeline + respawn
@@ -1846,7 +1905,7 @@ pub fn run() {
             pipeline_to_draft_cmd,
             save_pipeline_edits,
             runtime::api::inject_topic,
-            runtime::api::start_run,
+            start_run,
             runtime::api::approve_gate,
             runtime::api::reject_gate,
             runtime::api::revise_gate,
@@ -2910,5 +2969,35 @@ mod composite_engine_tests {
         assert_eq!(d, BrakeDecision::NoChange);
         assert!(brake.is_on());
         assert_eq!(brake.state().reason.as_deref(), Some("rate-limit"));
+    }
+}
+
+#[cfg(test)]
+mod start_run_wrapper_tests {
+    use super::*;
+    use runtime::brake::Brake;
+    use std::sync::Arc;
+
+    // The wrapper's side-effect decision: a Resumed run while braked must clear
+    // the brake (resume); a Started run, or a Resumed run while not braked, leaves
+    // the brake untouched. `should_clear_brake` is the pure predicate the command
+    // uses before touching the brake/persistence.
+    #[test]
+    fn resumed_while_braked_clears_the_brake() {
+        let brake = Arc::new(Brake::new());
+        brake.set_on("manual");
+        assert!(should_clear_brake(brake.is_on(), /* resumed = */ true));
+    }
+
+    #[test]
+    fn started_never_clears_the_brake() {
+        let brake = Arc::new(Brake::new());
+        brake.set_on("manual");
+        assert!(!should_clear_brake(brake.is_on(), /* resumed = */ false));
+    }
+
+    #[test]
+    fn resumed_while_not_braked_is_a_noop() {
+        assert!(!should_clear_brake(/* braked = */ false, /* resumed = */ true));
     }
 }
