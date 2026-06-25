@@ -119,26 +119,34 @@ pub async fn usage_set_auto_meter(
     usage_snapshot(state).await
 }
 
-/// OHS contract — consumed by Conversational Control (Plan 6).
+/// The JSON Schema for an arg struct, derived via `schemars` (T1 — one source of
+/// truth with the typed dispatch path). PUBLIC so T2 (N-NativeToolUse) can reuse
+/// it as the forced tool-use `input_schema` on the API path.
+pub fn arg_schema<T: JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
+}
+
+/// OHS contract — consumed by Conversational Control (Plan 6). Each
+/// `input_schema` is DERIVED from its arg struct (T1 anti-drift).
 pub fn tools() -> Vec<ToolSpec> {
     let ctx = "usage-telemetry";
     vec![
         ToolSpec {
             name: "usage_snapshot".into(),
             description: "Return the current rolling-window usage meter (total, %, band, burn rate, per-team breakdown).".into(),
-            input_schema: json!({ "type": "object", "properties": {} }),
+            input_schema: arg_schema::<args::UsageSnapshotArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "usage_set_budget".into(),
             description: "Set the rolling-window token budget (the meter's denominator).".into(),
-            input_schema: json!({ "type": "object", "properties": { "budget": { "type": "integer" } }, "required": ["budget"] }),
+            input_schema: arg_schema::<args::SetBudgetArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "usage_set_auto_meter".into(),
             description: "Enable or disable the reactive auto-meter brake (trips the system brake when the usage window crosses the threshold).".into(),
-            input_schema: json!({ "type": "object", "properties": { "enabled": { "type": "boolean" } }, "required": ["enabled"] }),
+            input_schema: arg_schema::<args::SetAutoMeterArgs>(),
             supplier_context: ctx.into(),
         },
     ]
@@ -205,6 +213,23 @@ mod tests {
     fn tools_include_set_auto_meter() {
         let t = tools();
         assert!(t.iter().any(|s| s.name == "usage_set_auto_meter"));
+    }
+
+    #[test]
+    fn derived_schemas_carry_the_right_required_props() {
+        let s = |n: &str| tools().into_iter().find(|t| t.name == n).unwrap().input_schema;
+        // usage_set_budget: budget required + integer-typed.
+        let b = s("usage_set_budget");
+        assert!(b["required"].as_array().unwrap().iter().any(|v| v == "budget"));
+        assert!(b["properties"]["budget"].is_object());
+        // usage_set_auto_meter: enabled required + boolean.
+        let m = s("usage_set_auto_meter");
+        assert!(m["required"].as_array().unwrap().iter().any(|v| v == "enabled"));
+        // usage_snapshot: no required props.
+        let snap = s("usage_snapshot");
+        assert_eq!(snap["required"].as_array().map(|a| a.len()).unwrap_or(0), 0);
+        // GENERATED, not literal.
+        assert_eq!(b, arg_schema::<args::SetBudgetArgs>());
     }
 
     #[test]
