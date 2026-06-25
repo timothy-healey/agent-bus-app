@@ -92,13 +92,15 @@ export function NodeContextMenu({ x, y, nodeId, actions, onClose }: NodeContextM
   );
 }
 
+// Aligned to DESIGN.md §Popover: elevated surface-3, border-2, popover shadow,
+// small radius — the same family as the selection-comment composer.
 const menu: CSSProperties = {
   position: "fixed",
   zIndex: 60,
   minWidth: 160,
   padding: "var(--sp-1)",
-  background: "var(--surface)",
-  border: "1px solid var(--border)",
+  background: "var(--surface-3)",
+  border: "1px solid var(--border-2)",
   borderRadius: "var(--r-sm)",
   boxShadow: "var(--shadow-popover)",
   display: "flex",
@@ -109,7 +111,7 @@ const item: CSSProperties = {
   display: "block",
   width: "100%",
   textAlign: "left",
-  fontFamily: "inherit",
+  fontFamily: "var(--font-mono)",
   fontSize: "var(--ts-base)",
   padding: "var(--sp-2) var(--sp-3)",
   background: "transparent",
