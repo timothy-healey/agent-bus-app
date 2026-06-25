@@ -14,7 +14,7 @@
 //! enforce this named contract for the DDD seed.
 
 use crate::draft::{DraftPipeline, DraftTeam};
-use crate::model::{Escalation, Gate, Routes, SCHEMA_VERSION};
+use crate::model::{Escalation, Gate, Role, Routes, Store, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 
 /// A light summary of a bundled seed template, for the kickoff picker.
@@ -29,9 +29,10 @@ pub struct SeedTemplate {
 pub fn seed_templates() -> Vec<SeedTemplate> {
     vec![SeedTemplate {
         id: "ddd-spec-plan-impl".to_string(),
-        name: "DDD Spec → Plan → Implement".to_string(),
-        description: "Domain-driven design pipeline: research → spec → plan → \
-            implement, with two human-review gates."
+        name: "DDD: Spec → Plan → Implement".to_string(),
+        description: "Domain-driven design pipeline: research → spec → spec-review \
+            → plan → plan-review → implement → code-review → hand off to human, \
+            with a spec-approval human gate."
             .to_string(),
     }]
 }
@@ -45,11 +46,13 @@ pub fn seed_template(id: &str) -> Option<DraftPipeline> {
     }
 }
 
-/// Build a `DraftTeam` with an inline prompt body + a single on_approve route.
-/// Helper so the seed reads as a flow. Other routes default to None.
-fn team(id: &str, name: &str, prompt: &str, on_approve: &str) -> DraftTeam {
+/// Build a producer `DraftTeam` with an inline prompt body, an on_approve route,
+/// and a bounded store capacity. Other routes default to None.
+fn producer(id: &str, name: &str, prompt: &str, on_approve: &str, capacity: u32) -> DraftTeam {
     let mut t = DraftTeam::new(id, name);
     t.prompt_body = prompt.to_string();
+    t.role = Role::Producer;
+    t.store = Store { capacity };
     t.outputs = Routes {
         on_approve: Some(on_approve.to_string()),
         on_revise: None,
@@ -58,85 +61,116 @@ fn team(id: &str, name: &str, prompt: &str, on_approve: &str) -> DraftTeam {
     t
 }
 
-/// The DDD spec→plan→implement seed, recovered from the historical bundled
-/// template (00ef101^:.../ddd-spec-plan-impl.yaml) and reshaped as a draft:
-/// inline prompt bodies (DD4), two human gates, one escalation. schema_version
-/// is current (DD5).
+/// Build a reviewer `DraftTeam` (role set EXPLICITLY — never inferred from the
+/// name): all three routes wired — approve→downstream, revise→its writer,
+/// decline→needs-human — so the team is well-connected by construction (G3/G15).
+fn reviewer(id: &str, name: &str, prompt: &str, on_approve: &str, revise_to: &str, capacity: u32) -> DraftTeam {
+    let mut t = DraftTeam::new(id, name);
+    t.prompt_body = prompt.to_string();
+    t.role = Role::Reviewer;
+    t.store = Store { capacity };
+    t.outputs = Routes {
+        on_approve: Some(on_approve.to_string()),
+        on_revise: Some(revise_to.to_string()),
+        on_reject: Some("needs-human".to_string()),
+    };
+    t
+}
+
+/// The canonical DDD seed (G15): research → spec → spec-review → plan →
+/// plan-review → implement → code-review → hand off to human. A complete,
+/// creatable `DraftPipeline` — explicit reviewer roles with revise/decline routes,
+/// the spec-approval human gate, sensible bounded-store capacities, inline prompt
+/// bodies — that passes hard validation after `to_pipeline()` on the current
+/// role/store/gate model. `needs-human` is the terminal hand-off-to-human node.
 fn ddd_seed() -> DraftPipeline {
     let mut d = DraftPipeline::empty();
     d.id = "ddd-spec-plan-impl".to_string();
-    d.name = "DDD Spec → Plan → Implement".to_string();
-    d.description = "Domain-driven design pipeline with two human gates.".to_string();
+    d.name = "DDD: Spec → Plan → Implement".to_string();
+    d.description =
+        "Research → spec → spec-review → plan → plan-review → implement → code-review \
+         → hand off to human, with a spec-approval human gate."
+            .to_string();
     d.schema_version = SCHEMA_VERSION;
 
     d.teams = vec![
-        team(
+        // The entry/source — scans the repo, no input store concern.
+        producer(
             "research",
             "Research",
-            "You investigate the target repository and existing artifacts, then \
-             write a findings/critique analysis the spec writers will build on.",
+            "You investigate the target repository and existing artifacts, then write a \
+             findings/critique analysis the spec writers will build on.",
             "spec-writers",
+            8,
         ),
-        team(
+        producer(
             "spec-writers",
             "Spec Writers",
-            "You turn the research findings into a clear specification document \
-             with explicit requirements and boundaries.",
+            "You turn the research findings into a clear specification document with \
+             explicit requirements, scope, and boundaries.",
             "spec-reviewers",
+            6,
         ),
-        team(
+        // Spec review — approve routes to the spec-approval human gate.
+        reviewer(
             "spec-reviewers",
             "Spec Reviewers",
-            "You review the specification for completeness, soundness, and clarity, \
-             then approve, request revision, or reject.",
-            "gate-1-spec",
+            "You review the specification for completeness, soundness, and clarity. \
+             Approve to send it to the human sign-off gate, request revision back to \
+             the spec writers, or decline.",
+            "gate-spec",
+            "spec-writers",
+            4,
         ),
-        team(
+        producer(
             "plan-writers",
             "Plan Writers",
             "You turn the approved specification into a concrete, step-by-step \
              implementation plan.",
             "plan-reviewers",
+            6,
         ),
-        team(
+        reviewer(
             "plan-reviewers",
             "Plan Reviewers",
-            "You review the implementation plan against the spec, then approve, \
-             request revision, or reject.",
-            "gate-2-plan",
+            "You review the implementation plan against the approved spec. Approve to \
+             send it to the implementers, request revision back to the plan writers, \
+             or decline.",
+            "implementers",
+            "plan-writers",
+            4,
         ),
-        team(
+        producer(
             "implementers",
             "Implementers",
-            "You implement the approved plan in a worktree, committing the changes.",
-            "done",
+            "You implement the approved plan in a worktree, committing the changes, \
+             then hand the diff to code review.",
+            "code-reviewers",
+            6,
         ),
-        {
-            let mut done = DraftTeam::new("done", "Done");
-            done.prompt_body =
-                "You summarize the completed work. Terminal node — no further routing."
-                    .to_string();
-            done
-        },
+        // Code review — approve hands the finished work off to a human (needs-human).
+        reviewer(
+            "code-reviewers",
+            "Code Reviewers",
+            "You review the implemented changes against the plan and spec. Approve to \
+             hand the finished work off to a human, request revision back to the \
+             implementers, or decline.",
+            "needs-human",
+            "implementers",
+            4,
+        ),
     ];
 
-    // Revise/reject edges (recovered from the historical template).
+    // Producers that should be able to send work back / escalate too. (Reviewers
+    // already carry all three via the `reviewer` helper.)
     for t in d.teams.iter_mut() {
         match t.id.as_str() {
             "spec-writers" => {
                 t.outputs.on_revise = Some("research".into());
                 t.outputs.on_reject = Some("needs-human".into());
             }
-            "spec-reviewers" => {
-                t.outputs.on_revise = Some("spec-writers".into());
-                t.outputs.on_reject = Some("needs-human".into());
-            }
             "plan-writers" => {
                 t.outputs.on_revise = Some("spec-writers".into());
-                t.outputs.on_reject = Some("needs-human".into());
-            }
-            "plan-reviewers" => {
-                t.outputs.on_revise = Some("plan-writers".into());
                 t.outputs.on_reject = Some("needs-human".into());
             }
             "implementers" => {
@@ -147,19 +181,14 @@ fn ddd_seed() -> DraftPipeline {
         }
     }
 
-    d.gates = vec![
-        Gate {
-            id: "gate-1-spec".into(),
-            label: "Gate 1 — Spec Approval".into(),
-            downstream: "plan-writers".into(),
-        },
-        Gate {
-            id: "gate-2-plan".into(),
-            label: "Gate 2 — Plan Approval".into(),
-            downstream: "implementers".into(),
-        },
-    ];
+    // The spec-approval human gate (G15): approved specs route on to the planners.
+    d.gates = vec![Gate {
+        id: "gate-spec".into(),
+        label: "Spec Approval (human)".into(),
+        downstream: "plan-writers".into(),
+    }];
 
+    // The terminal hand-off-to-human node (declines + the final code-review approve).
     d.escalations = vec![Escalation {
         id: "needs-human".into(),
         triggers: vec!["attempts >= 3".into(), "verdict == reject".into()],
@@ -188,13 +217,56 @@ mod tests {
     }
 
     #[test]
-    fn ddd_seed_is_a_draft_with_seven_teams_and_two_gates() {
+    fn ddd_seed_is_the_full_eight_stage_flow_with_the_spec_gate() {
+        // G15: research → spec → spec-review → plan → plan-review → implement →
+        // code-review (7 teams), one spec-approval human gate, one needs-human
+        // (hand-off-to-human) terminal escalation.
         let d = seed_template("ddd-spec-plan-impl").unwrap();
         assert_eq!(d.teams.len(), 7);
-        assert_eq!(d.gates.len(), 2);
+        let ids: Vec<&str> = d.teams.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "research",
+                "spec-writers",
+                "spec-reviewers",
+                "plan-writers",
+                "plan-reviewers",
+                "implementers",
+                "code-reviewers",
+            ]
+        );
+        assert_eq!(d.gates.len(), 1);
+        assert_eq!(d.gates[0].id, "gate-spec");
         assert_eq!(d.escalations.len(), 1);
+        assert_eq!(d.escalations[0].id, "needs-human");
         assert_eq!(d.id, "ddd-spec-plan-impl");
         assert_eq!(d.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn ddd_seed_reviewers_have_explicit_roles_and_revise_decline_routes() {
+        // G15/G3: every review stage sets role=Reviewer EXPLICITLY (not inferred)
+        // and carries approve + revise→its writer + decline→needs-human.
+        let d = seed_template("ddd-spec-plan-impl").unwrap();
+        for id in ["spec-reviewers", "plan-reviewers", "code-reviewers"] {
+            let r = d.teams.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(r.role, Role::Reviewer, "{id} must be a reviewer");
+            assert!(r.outputs.on_approve.is_some(), "{id} missing approve route");
+            assert!(r.outputs.on_revise.is_some(), "{id} missing revise route");
+            assert_eq!(r.outputs.on_reject.as_deref(), Some("needs-human"), "{id} must decline to needs-human");
+        }
+        // The final code review hands approved work off to a human.
+        let code = d.teams.iter().find(|t| t.id == "code-reviewers").unwrap();
+        assert_eq!(code.outputs.on_approve.as_deref(), Some("needs-human"));
+    }
+
+    #[test]
+    fn ddd_seed_stores_have_nonzero_capacity() {
+        let d = seed_template("ddd-spec-plan-impl").unwrap();
+        for t in &d.teams {
+            assert!(t.store.capacity >= 1, "team {} has a zero-capacity store", t.id);
+        }
     }
 
     #[test]
