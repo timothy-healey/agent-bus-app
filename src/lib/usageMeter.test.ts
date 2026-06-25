@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bandColorVar, windowLine, formatBurn, resetCountdown } from "./usageMeter";
+import { bandColorVar, brakeEta, windowLine, formatBurn, resetCountdown } from "./usageMeter";
 
 describe("usageMeter helpers", () => {
   it("maps each band to its colour var", () => {
@@ -25,5 +25,18 @@ describe("usageMeter helpers", () => {
     expect(resetCountdown(90)).toBe("↻ 2m");
     expect(resetCountdown(7_320)).toBe("↻ 2h 2m");
     expect(resetCountdown(0)).toBe("↻ 0m");
+  });
+
+  it("formats brake ETA from an absolute unix timestamp and now", () => {
+    // est_brake_at is 30 min ahead of now
+    expect(brakeEta(1000 + 1800, 1000)).toBe("~30min");
+    // 90 min ahead -> hours+min
+    expect(brakeEta(1000 + 5400, 1000)).toBe("~1h 30min");
+  });
+  it("returns null when est_brake_at is null", () => {
+    expect(brakeEta(null, 1000)).toBeNull();
+  });
+  it("returns null when the projected time is already past", () => {
+    expect(brakeEta(900, 1000)).toBeNull();
   });
 });
