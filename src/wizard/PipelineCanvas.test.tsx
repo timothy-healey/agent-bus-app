@@ -40,10 +40,69 @@ describe("PipelineCanvas", () => {
     expect(screen.getByRole("dialog", { name: /team · team-1/i })).toBeInTheDocument();
   });
 
-  it("surfaces best-effort validation issues in the amber banner", async () => {
+  it("does NOT show the prominent banner from the start (subtle badges only) — G11", async () => {
     const { bestEffortValidate } = await import("../ipc/pipeline");
     (bestEffortValidate as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(["team 'a' has no prompt yet"]);
     render(<PipelineCanvas draft={addTeam(emptyDraft(), "a", "A")} onChange={() => {}} />);
-    await waitFor(() => expect(screen.getByRole("status", { name: /validation issues/i })).toHaveTextContent(/no prompt yet/));
+    // give the async validation a tick
+    await waitFor(() => expect(bestEffortValidate).toHaveBeenCalled());
+    expect(screen.queryByRole("alert", { name: /validation issues/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the prominent banner only when showBanner is set — G11", async () => {
+    const { bestEffortValidate } = await import("../ipc/pipeline");
+    (bestEffortValidate as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(["team 'a' has no prompt yet"]);
+    render(<PipelineCanvas draft={addTeam(emptyDraft(), "a", "A")} onChange={() => {}} showBanner />);
+    await waitFor(() => expect(screen.getByRole("alert", { name: /validation issues/i })).toHaveTextContent(/no prompt yet/));
+  });
+
+  it("reports validity to the host via onValidityChange — G11", async () => {
+    const { bestEffortValidate } = await import("../ipc/pipeline");
+    (bestEffortValidate as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(["team 'a' has no prompt yet"]);
+    const onValidityChange = vi.fn();
+    render(<PipelineCanvas draft={addTeam(emptyDraft(), "a", "A")} onChange={() => {}} onValidityChange={onValidityChange} />);
+    await waitFor(() => expect(onValidityChange).toHaveBeenCalledWith(false, ["team 'a' has no prompt yet"]));
+  });
+});
+
+describe("PipelineCanvas — node delete (G9)", () => {
+  it("right-click opens a context menu with Delete, which removes the node", async () => {
+    let draft = addTeam(emptyDraft(), "research", "Research");
+    const onChange = (d: DraftPipeline) => { draft = d; rerender(<PipelineCanvas draft={draft} onChange={onChange} />); };
+    const { rerender, container } = render(<PipelineCanvas draft={draft} onChange={onChange} />);
+    // The custom node renders the team's aria-label; right-click it.
+    const node = await screen.findByLabelText(/team research/i);
+    fireEvent.contextMenu(node);
+    const item = await screen.findByRole("menuitem", { name: /delete node/i });
+    fireEvent.click(item);
+    expect(draft.teams).toHaveLength(0);
+    expect(container).toBeTruthy();
+  });
+
+  it("Delete key removes the selected node (and is guarded inside text inputs)", async () => {
+    let draft = addTeam(emptyDraft(), "research", "Research");
+    const onChange = (d: DraftPipeline) => { draft = d; rerender(<PipelineCanvas draft={draft} onChange={onChange} />); };
+    const { rerender } = render(<PipelineCanvas draft={draft} onChange={onChange} />);
+    // select the node (opens its drawer)
+    const node = await screen.findByLabelText(/team research/i);
+    fireEvent.click(node);
+    // typing Delete while focused in the drawer's name field must NOT delete
+    const nameField = screen.getByLabelText("name for research");
+    nameField.focus();
+    fireEvent.keyDown(screen.getByTestId("pipeline-canvas"), { key: "Delete" });
+    expect(draft.teams).toHaveLength(1);
+    // blur the field, then Delete on the canvas removes the selected node
+    nameField.blur();
+    fireEvent.keyDown(screen.getByTestId("pipeline-canvas"), { key: "Delete" });
+    expect(draft.teams).toHaveLength(0);
+  });
+
+  it("the NodeDrawer header Delete button removes the node", async () => {
+    let draft = addTeam(emptyDraft(), "research", "Research");
+    const onChange = (d: DraftPipeline) => { draft = d; rerender(<PipelineCanvas draft={draft} onChange={onChange} />); };
+    const { rerender } = render(<PipelineCanvas draft={draft} onChange={onChange} />);
+    fireEvent.click(await screen.findByLabelText(/team research/i));
+    fireEvent.click(screen.getByRole("button", { name: /delete research/i }));
+    expect(draft.teams).toHaveLength(0);
   });
 });
