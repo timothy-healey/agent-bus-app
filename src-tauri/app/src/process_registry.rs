@@ -183,7 +183,20 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
         }
         let mut child = cmd.spawn().map_err(|e| RunnerError::Spawn(e.to_string()))?;
         let pgid = child.id() as i32;
-        registry.register(pgid);
+        match registry.register_pgid(pgid) {
+            RegisterDecision::Registered => {}
+            RegisterDecision::KillImmediately => {
+                // A Stop/exit kill is in progress; this claim raced past the
+                // brake gate. Kill the child we just spawned (whole group) so it
+                // cannot escape, then surface an interrupt-class failure.
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                return Err(RunnerError::Other("spawn aborted: kill in progress".into()));
+            }
+        }
         // Drain BOTH pipes CONCURRENTLY, then wait. A sequential stdout-then-
         // stderr drain deadlocks when the child writes more than one pipe buffer
         // (~64KB) to stderr before stdout reaches EOF (parent blocks on stdout,
@@ -239,7 +252,17 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
         }
         let mut child = cmd.spawn().map_err(|e| ChatError::Spawn(e.to_string()))?;
         let pgid = child.id() as i32;
-        registry.register(pgid);
+        match registry.register_pgid(pgid) {
+            RegisterDecision::Registered => {}
+            RegisterDecision::KillImmediately => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                return Err(ChatError::Spawn("spawn aborted: kill in progress".into()));
+            }
+        }
         // Drain BOTH pipes CONCURRENTLY, then wait — see killable_spawn: a
         // sequential stdout-then-stderr drain deadlocks once the child writes
         // more than the ~64KB stderr pipe buffer before stdout EOF.
@@ -295,6 +318,21 @@ mod tests {
             matches!(reg.register_pgid(7), RegisterDecision::KillImmediately),
             "after kill_all the latch is held until end_killing()"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawner_self_kills_when_latch_is_set_and_does_not_register() {
+        let reg = Arc::new(ProcessRegistry::new());
+        reg.begin_killing(); // a Stop already happened; this claim raced past the gate
+        // Spawn a child that would live 30s if it escaped.
+        let out = (super::killable_spawn(&reg))(
+            &["sh".into(), "-c".into(), "sleep 30".into()],
+            None,
+        );
+        // The spawner must have killed its own child and surfaced a failure.
+        assert!(out.is_err(), "a latched spawn must not succeed");
+        assert!(reg.is_empty(), "the self-killed child is never registered");
     }
 
     #[test]
