@@ -1247,6 +1247,7 @@ async fn invoke(
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
         sandbox_profile: None,
+        working_dir: None,
     };
 
     // R3: open an audit record for this invocation (outcome NULL = in-flight)

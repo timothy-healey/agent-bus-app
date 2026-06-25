@@ -262,6 +262,7 @@ impl ConversationEngine for LlmEngine {
             user_message: input.to_string(),
             model: self.model.clone(),
             thinking_budget: self.thinking_budget,
+            working_dir: None,
         };
         // Display-only streaming when a delta emitter is attached; reset clears
         // the live bubble first (prose sink stays prose-only — vet F1).
@@ -416,6 +417,7 @@ impl ConversationEngine for AgenticChatEngine {
                 user_message: next_user_message.clone(),
                 model: self.model.clone(),
                 thinking_budget: self.thinking_budget,
+                working_dir: None,
             };
 
             // T2: on a runner that supports NATIVE tool-use (the anthropic-api
