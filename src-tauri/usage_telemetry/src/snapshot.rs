@@ -141,16 +141,16 @@ mod tests {
         let pool = fresh_pool().await;
         let cc = CcUsageStore::new(pool.clone());
         let worker = WorkerUsageStore::new(pool.clone());
-        cc.ingest(&parse_transcript(SAMPLE)).await.unwrap(); // 2120 tokens
+        cc.ingest(&parse_transcript(SAMPLE)).await.unwrap(); // 2170 tokens (all-tokens incl. cache, LF34)
 
         // worker rows (team attribution + per-task cost); NOT counted in total (cli)
         let now = cc.oldest_in_window(0).await.unwrap().unwrap() + 100;
         worker.insert(&UsageEvent { ts: now, team_id: TeamId("research".into()), task_id: Some(TaskId("T-1".into())), model: "m".into(), input_tokens: 100, output_tokens: 20, cache_creation: 0, cache_read: 0 }).await.unwrap();
 
-        let cfg = UsageConfig { window_budget: 4240, ..UsageConfig::default() };
+        let cfg = UsageConfig { window_budget: 4340, ..UsageConfig::default() };
         let snap = compute_snapshot(&cc, &worker, &cfg, false, now + 60).await.unwrap();
-        assert_eq!(snap.window_total, 2120);          // cc only (D3)
-        assert!((snap.window_pct - 0.5).abs() < 1e-9); // 2120 / 4240
+        assert_eq!(snap.window_total, 2170);          // cc only (D3); all tokens incl. cache (LF34)
+        assert!((snap.window_pct - 0.5).abs() < 1e-9); // 2170 / 4340
         assert_eq!(snap.band, ThresholdBand::Safe);
         assert_eq!(snap.by_team, vec![TeamSlice { team_id: "research".into(), tokens: 120 }]);
         assert_eq!(snap.tokens_by_task.get("T-1"), Some(&120));
