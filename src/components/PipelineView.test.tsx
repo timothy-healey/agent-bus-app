@@ -122,9 +122,12 @@ describe("PipelineView", () => {
     // A containment box is drawn for the nested (depth-2) fork group.
     const box = container.querySelector('[data-nesting-depth="2"]');
     expect(box).not.toBeNull();
-    // The nested fork node is indented relative to a non-nested node at the same column.
+    // The nested fork node carries depth 2 (the value that drives indentation) —
+    // assert it explicitly so a regression to depth 0 / no indent fails here,
+    // rather than only checking the node exists.
     const innerNode = container.querySelector('[data-node-id="inner"]');
     expect(innerNode).not.toBeNull();
+    expect(innerNode?.getAttribute("data-node-depth")).toBe("2");
   });
 
   it("renders an Edit pipeline button when onEdit is provided and calls it", () => {
