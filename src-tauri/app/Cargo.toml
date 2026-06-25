@@ -34,6 +34,7 @@ conversational_control = { path = "../conversational_control" }
 llm_chat = { path = "../llm_chat" }
 secrets = { path = "../secrets" }
 skills = { path = "../skills" }
+libc = "0.2"
 sqlx = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
