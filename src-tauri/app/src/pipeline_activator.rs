@@ -246,7 +246,21 @@ impl PipelineActivator {
                     continue;
                 };
                 let ctx = ctx_builder(run.id.clone());
-                match engine::generate_once(&ctx, &team).await {
+                let task_id = engine::generator_task_id(&run.id, &team.id);
+                let _ = handle.emit(
+                    crate::events::GENERATOR_STATUS,
+                    serde_json::json!({ "run_id": run.id, "stage": team.id, "task_id": task_id, "active": true }),
+                );
+                let step = engine::generate_once(&ctx, &team).await;
+                if let Ok(outcome) = &step {
+                    if engine::generator_pass_settled(outcome) {
+                        let _ = handle.emit(
+                            crate::events::GENERATOR_STATUS,
+                            serde_json::json!({ "run_id": run.id, "stage": team.id, "task_id": task_id, "active": false }),
+                        );
+                    }
+                }
+                match step {
                     Ok(StepOutcome::Generated { keys }) if !keys.is_empty() => {
                         let _ = handle.emit(crate::events::TASK_CHANGED, "generated");
                         // No sleep: keep filling downstream until backpressure/dry.
@@ -260,6 +274,11 @@ impl PipelineActivator {
                     }
                     Err(e) => {
                         eprintln!("app: generator loop step failed for `{}`: {e}", team.id);
+                        // a failed step never leaves the card stuck "active":
+                        let _ = handle.emit(
+                            crate::events::GENERATOR_STATUS,
+                            serde_json::json!({ "run_id": run.id, "stage": team.id, "task_id": engine::generator_task_id(&run.id, &team.id), "active": false }),
+                        );
                         tokio::time::sleep(LOOP_IDLE_SLEEP).await;
                     }
                 }
