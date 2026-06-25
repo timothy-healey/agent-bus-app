@@ -474,54 +474,58 @@ pub fn scale_team_inner(state: &RuntimeState, team_id: String) -> Result<u32, St
         .ok_or_else(|| format!("unknown team: {team_id}"))
 }
 
-/// OHS contract — consumed by Conversational Control (Plan 6).
+/// The JSON Schema for an arg struct, derived via `schemars` (T1 — one source of
+/// truth with the typed dispatch path). PUBLIC so T2 (N-NativeToolUse) can reuse
+/// it as the forced tool-use `input_schema` on the API path.
+pub fn arg_schema<T: JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
+}
+
+/// OHS contract — consumed by Conversational Control (Plan 6). Each tool's
+/// `input_schema` is DERIVED from its arg struct (T1 anti-drift), not hand-written.
 pub fn tools() -> Vec<ToolSpec> {
     let ctx = "runtime";
     vec![
         ToolSpec {
             name: "inject_topic".into(),
             description: "Start a run (the topic is recorded as optional run context; the source team generates the work).".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": { "topic": { "type": "string" }, "target_repo": { "type": ["string","null"] } },
-                "required": ["topic"]
-            }),
+            input_schema: arg_schema::<args::InjectTopicArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "approve_gate".into(),
             description: "Approve a gated task, routing it to the gate's downstream.".into(),
-            input_schema: json!({ "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }),
+            input_schema: arg_schema::<args::GateArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "reject_gate".into(),
             description: "Reject a gated task (escalates to needs-human).".into(),
-            input_schema: json!({ "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }),
+            input_schema: arg_schema::<args::GateArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "revise_gate".into(),
             description: "Send a gated task back to its writer for revision.".into(),
-            input_schema: json!({ "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }),
+            input_schema: arg_schema::<args::GateArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "brake_on".into(),
             description: "Halt new claims (in-flight workers complete).".into(),
-            input_schema: json!({ "type": "object", "properties": { "reason": { "type": ["string","null"] } } }),
+            input_schema: arg_schema::<args::BrakeOnArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "brake_off".into(),
             description: "Release the brake.".into(),
-            input_schema: json!({ "type": "object", "properties": {} }),
+            input_schema: arg_schema::<args::NoArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
             name: "scale_team".into(),
             description: "Report a team's configured worker ceiling (v1).".into(),
-            input_schema: json!({ "type": "object", "properties": { "team_id": { "type": "string" } }, "required": ["team_id"] }),
+            input_schema: arg_schema::<args::ScaleTeamArgs>(),
             supplier_context: ctx.into(),
         },
     ]
@@ -574,6 +578,44 @@ mod tests {
         for name in ["inject_topic", "approve_gate", "reject_gate", "revise_gate", "brake_on", "brake_off", "scale_team"] {
             assert!(t.iter().any(|s| s.name == name), "missing tool {name}");
         }
+    }
+
+    /// Helper: a tool's derived input_schema by name.
+    fn schema_of(name: &str) -> serde_json::Value {
+        tools().into_iter().find(|s| s.name == name).unwrap().input_schema
+    }
+
+    #[test]
+    fn derived_schemas_carry_the_right_required_and_optional_props() {
+        // inject_topic: topic required, target_repo optional.
+        let s = schema_of("inject_topic");
+        assert!(s["properties"]["topic"].is_object());
+        assert!(s["properties"]["target_repo"].is_object());
+        let req: Vec<&str> = s["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(req.contains(&"topic"));
+        assert!(!req.contains(&"target_repo"), "target_repo is optional, must not be required");
+
+        // approve_gate: task_id required (shared GateArgs).
+        let g = schema_of("approve_gate");
+        assert!(g["properties"]["task_id"].is_object());
+        assert_eq!(g["required"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(), vec!["task_id"]);
+
+        // brake_on: reason optional => no `required` (or empty).
+        let b = schema_of("brake_on");
+        assert!(b["properties"]["reason"].is_object());
+        let b_req = b["required"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(b_req, 0, "brake_on has no required props");
+
+        // scale_team: team_id required.
+        let st = schema_of("scale_team");
+        assert!(st["required"].as_array().unwrap().iter().any(|v| v == "team_id"));
+    }
+
+    #[test]
+    fn derived_schema_matches_schema_for_the_arg_struct() {
+        // Proves the schema is GENERATED from the arg type (no drift), not a literal.
+        assert_eq!(schema_of("inject_topic"), arg_schema::<args::InjectTopicArgs>());
+        assert_eq!(schema_of("scale_team"), arg_schema::<args::ScaleTeamArgs>());
     }
 
     async fn state_with_two_team_pipeline() -> RuntimeState {

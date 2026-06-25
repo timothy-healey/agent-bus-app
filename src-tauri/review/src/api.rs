@@ -169,34 +169,27 @@ pub async fn record_verdict(
     })
 }
 
+/// The JSON Schema for an arg struct, derived via `schemars` (T1 — one source of
+/// truth with the typed dispatch path). PUBLIC so T2 (N-NativeToolUse) can reuse
+/// it as the forced tool-use `input_schema` on the API path.
+pub fn arg_schema<T: JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
+}
+
 /// The Review OHS tool catalog (consumed by Conversational Control in Plan 6).
+/// Each `input_schema` is DERIVED from its arg struct (T1 anti-drift).
 pub fn tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "add_comment".into(),
             description: "Add an inline or direction comment to a task's artifact.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "artifact_path": {"type": "string"},
-                    "note": {"type": "string"},
-                    "anchor_text": {"type": ["string", "null"]},
-                    "anchor_offset": {"type": ["integer", "null"]},
-                    "kind": {"type": "string", "enum": ["inline", "direction"]}
-                },
-                "required": ["task_id", "artifact_path", "note"]
-            }),
+            input_schema: arg_schema::<args::AddCommentArgs>(),
             supplier_context: "review".into(),
         },
         ToolSpec {
             name: "list_comments".into(),
             description: "List all comments for a task.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {"task_id": {"type": "string"}},
-                "required": ["task_id"]
-            }),
+            input_schema: arg_schema::<args::ListCommentsArgs>(),
             supplier_context: "review".into(),
         },
         ToolSpec {
@@ -205,27 +198,13 @@ pub fn tools() -> Vec<ToolSpec> {
                           <!-- addressed: <comment-id> --> markers; returns each comment with \
                           a derived status (open/addressed) and effective offset."
                 .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "version_markdown": {"type": "string"}
-                },
-                "required": ["task_id", "version_markdown"]
-            }),
+            input_schema: arg_schema::<args::ReanchorCommentsArgs>(),
             supplier_context: "review".into(),
         },
         ToolSpec {
             name: "record_verdict".into(),
             description: "Record a review verdict (approve/revise/reject) for a task.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "verdict": {"type": "string", "enum": ["approve", "revise", "reject"]}
-                },
-                "required": ["task_id", "verdict"]
-            }),
+            input_schema: arg_schema::<args::RecordVerdictArgs>(),
             supplier_context: "review".into(),
         },
     ]
@@ -283,6 +262,27 @@ mod tests {
         assert!(names.contains(&"record_verdict"));
         assert!(names.contains(&"reanchor_comments"));
         assert!(specs.iter().all(|s| s.supplier_context == "review"));
+    }
+
+    fn schema_of(name: &str) -> serde_json::Value {
+        tools().into_iter().find(|s| s.name == name).unwrap().input_schema
+    }
+
+    #[test]
+    fn derived_schemas_carry_the_right_required_and_optional_props() {
+        // add_comment: task_id/artifact_path/note required; anchors + kind optional.
+        let s = schema_of("add_comment");
+        let req: Vec<&str> = s["required"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert!(req.contains(&"task_id") && req.contains(&"artifact_path") && req.contains(&"note"));
+        assert!(!req.contains(&"anchor_text") && !req.contains(&"kind"));
+        assert!(s["properties"]["anchor_offset"].is_object());
+
+        // record_verdict: derived from the Verdict enum (one source of truth).
+        let v = schema_of("record_verdict");
+        let vreq: Vec<&str> = v["required"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        assert!(vreq.contains(&"task_id") && vreq.contains(&"verdict"));
+        // proves it is GENERATED from the arg struct, not a hand literal.
+        assert_eq!(v, arg_schema::<args::RecordVerdictArgs>());
     }
 
     #[test]
