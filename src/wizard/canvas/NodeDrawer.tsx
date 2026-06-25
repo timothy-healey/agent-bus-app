@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import type { DraftPipeline, DraftTeam, EffortMode } from "../../ipc/pipeline";
 import { regenerateTeamPrompt } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Drawer } from "../../components/ui/Drawer";
 import { Button } from "../../components/ui/Button";
 import { SkillAutocomplete } from "./SkillAutocomplete";
@@ -165,6 +165,8 @@ const HELP = {
   runner: "Which Claude is invoked and how hard it thinks. Model + effort; an API-key env var name when using the anthropic-api runner.",
   scale: "Worker concurrency for this team: minimum kept warm and maximum it can burst to.",
   store: "Bounded input buffer (WIP limit) — how many tasks can queue for this team before upstream back-pressures.",
+  quorum: "Proceed once N of the M lanes approve (N-of-M). Blank means all must approve. A set quorum governs success and overrides early-cancel.",
+  cancel: "Resolve the join to needs-human the instant one lane fails, cancelling the rest. Ignored while a quorum is set (the quorum decides success).",
 } as const;
 
 /// A fieldset legend with an inline G8 InfoTip.
@@ -530,8 +532,13 @@ function ForkEditor({ draft, id }: { draft: DraftPipeline; id: string }) {
 
 function JoinEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string; onChange: (d: DraftPipeline) => void }) {
   const j = draft.joins.find((x) => x.id === id);
+  // Hooks run unconditionally, so the help-text ids sit above the early return.
+  const quorumRangeId = useId();
+  const cancelHintId = useId();
   if (!j) return null;
   const m = j.waits_for.length;
+  // DD7: a set quorum governs success and the runtime ignores cancel_on_reject.
+  const quorumSet = j.quorum != null;
 
   return (
     <div style={{ display: "grid", gap: "var(--sp-4)" }}>
@@ -549,13 +556,14 @@ function JoinEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string;
       </fieldset>
 
       <fieldset style={group}>
-        <legend style={legend}>Quorum (N of M)</legend>
+        <TipLegend text={HELP.quorum}>Quorum (N of M)</TipLegend>
         <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
           <input
             type="number"
             min={1}
             max={Math.max(1, m)}
             aria-label={`quorum for ${id}`}
+            aria-describedby={quorumRangeId}
             value={j.quorum ?? ""}
             placeholder={`all ${m}`}
             onChange={(e) => {
@@ -564,24 +572,25 @@ function JoinEditor({ draft, id, onChange }: { draft: DraftPipeline; id: string;
             }}
             style={{ ...inp, width: 80 }}
           />
-          <span style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)" }}>of {m} lanes (blank = all must approve)</span>
+          <span id={quorumRangeId} style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)" }}>of {m} lanes (blank = all must approve)</span>
         </div>
       </fieldset>
 
       <fieldset style={group}>
-        <legend style={legend}>Early-cancel on reject</legend>
-        <label style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--ts-base)", color: "var(--text-2)" }}>
+        <TipLegend text={HELP.cancel}>Early-cancel on reject</TipLegend>
+        <label style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--ts-base)", color: quorumSet ? "var(--text-4)" : "var(--text-2)", cursor: quorumSet ? "not-allowed" : "default" }}>
           <input
             type="checkbox"
             aria-label={`early cancel for ${id}`}
+            aria-describedby={quorumSet ? cancelHintId : undefined}
             checked={!!j.cancel_on_reject}
-            disabled={j.quorum != null}
+            disabled={quorumSet}
             onChange={(e) => onChange(setJoinCancelOnReject(draft, id, e.target.checked))}
           />
           Cancel outstanding lanes the moment one fails
         </label>
-        {j.quorum != null && (
-          <p style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)", marginTop: "var(--sp-1)" }}>Ignored while a quorum is set.</p>
+        {quorumSet && (
+          <p id={cancelHintId} style={{ color: "var(--text-3)", fontSize: "var(--ts-sm)", marginTop: "var(--sp-1)" }}>Ignored while a quorum is set.</p>
         )}
       </fieldset>
     </div>
