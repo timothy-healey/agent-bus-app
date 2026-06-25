@@ -17,7 +17,7 @@ import { Drawer } from "./components/ui/Drawer";
 import { CardDrawer } from "./components/CardDrawer";
 import { activateProject, readArtifact, removeProject, workspaceSetTargetRepo, workspaceSetSkillSources, listWorktrees, removeWorktree, getGitConfig, setGitConfig, type GitConfig, type Project } from "./ipc/workspace";
 import { setRunnerApiKey, clearRunnerApiKey, getRunnerApiKeyStatus, ANTHROPIC_API_KEY_ID } from "./ipc/secrets";
-import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, startRun as startRunCmd, type Task } from "./ipc/runtime";
+import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as brakeOffCmd, brakeState as brakeStateCmd, startRun as startRunCmd, listInvocations, retryTask, forceAdvance, abandonTask, acceptTask, type Task, type InvocationRow } from "./ipc/runtime";
 import { recordVerdict, addComment } from "./ipc/review";
 import { listPipelines, loadPipeline, pipelineToDraft, type DraftPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
@@ -139,6 +139,61 @@ export default function App() {
     const s = next ? await brakeOnCmd("manual") : await brakeOffCmd();
     setBrake(s);
   }
+
+  // L3: the open card's invocation audit trail (newest-first) — drives the
+  // CardDrawer history panel + the failure-vs-handoff classification. Reloaded
+  // whenever the open card or the task data changes (an action settles a row).
+  const [invocations, setInvocations] = useState<InvocationRow[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!openTaskId) {
+      setInvocations([]);
+      return;
+    }
+    (async () => {
+      try {
+        const rows = await listInvocations(openTaskId);
+        if (!cancelled) setInvocations(rows);
+      } catch {
+        // a load failure leaves the trail empty (the panel shows its empty state).
+        if (!cancelled) setInvocations([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [openTaskId, tasks]);
+
+  // L2: a surfaced recovery-action failure (catch → dismissible alert, mirroring
+  // the project-delete fix) so a failed action never throws an unhandled rejection.
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Run an L2 recovery command, surfacing any failure as a dismissible alert and
+  // refreshing the board on success. Keeps the card open (the operator sees the
+  // state change in place) unless the caller closes it.
+  const runRecovery = useCallback(
+    async (fn: (taskId: string) => Promise<unknown>, taskId: string) => {
+      setActionError(null);
+      try {
+        await fn(taskId);
+        reloadTasks();
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [reloadTasks],
+  );
+
+  const handleRetry = useCallback((taskId: string) => runRecovery(retryTask, taskId), [runRecovery]);
+  const handleForceAdvance = useCallback((taskId: string) => runRecovery(forceAdvance, taskId), [runRecovery]);
+  const handleAbandon = useCallback(
+    (taskId: string) => runRecovery(async (id) => { await abandonTask(id); setOpenTaskId(null); }, taskId),
+    [runRecovery],
+  );
+  const handleAccept = useCallback(
+    (taskId: string) => runRecovery(async (id) => { await acceptTask(id); setOpenTaskId(null); }, taskId),
+    [runRecovery],
+  );
 
   // Load the open task's artifact body via the Workspace read_artifact OHS
   // command (D10). Empty until loaded / when the task has no artifact path.
@@ -288,6 +343,12 @@ export default function App() {
           <button aria-label="dismiss error" onClick={() => setDeleteError(null)} style={{ background: "transparent", border: "none", color: "var(--danger)", cursor: "pointer", fontFamily: "inherit" }}>✕</button>
         </div>
       )}
+      {actionError && (
+        <div role="alert" style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", padding: "var(--sp-2) var(--sp-4)", background: "var(--danger-2)", borderBottom: "1px solid var(--danger)", color: "var(--danger)", fontSize: "var(--ts-sm)" }}>
+          <span style={{ flex: 1 }}>Action failed: {actionError}</span>
+          <button aria-label="dismiss action error" onClick={() => setActionError(null)} style={{ background: "transparent", border: "none", color: "var(--danger)", cursor: "pointer", fontFamily: "inherit" }}>✕</button>
+        </div>
+      )}
       <ViewSwitcher active={view} onChange={setView} />
       {/* ④e: the run selector + Start run control scope the run-scoped views
           (board/list). Hidden on pipeline/settings and when no project is active. */}
@@ -369,6 +430,12 @@ export default function App() {
             onApprove={handleApprove}
             onRevise={handleRevise}
             onReject={handleReject}
+            invocations={invocations}
+            pipeline={pipeline}
+            onRetry={handleRetry}
+            onForceAdvance={handleForceAdvance}
+            onAbandon={handleAbandon}
+            onAccept={handleAccept}
           />
         )}
       </Drawer>
