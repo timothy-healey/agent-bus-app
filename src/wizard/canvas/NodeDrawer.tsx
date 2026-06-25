@@ -54,9 +54,16 @@ interface NodeDrawerProps {
   targetRepo?: string | null;
 }
 
-type Kind = "team" | "gate" | "fork" | "join" | "escalation" | "unknown";
+type Kind = "team" | "gate" | "fork" | "join" | "escalation" | "store" | "unknown";
+
+/// The G1 store node id is synthetic: `store:<team-id>`.
+const STORE_PREFIX = "store:";
+function storeTeamId(id: string): string | null {
+  return id.startsWith(STORE_PREFIX) ? id.slice(STORE_PREFIX.length) : null;
+}
 
 function kindOf(draft: DraftPipeline, id: string): Kind {
+  if (storeTeamId(id)) return "store";
   if (draft.teams.some((t) => t.id === id)) return "team";
   if (draft.gates.some((g) => g.id === id)) return "gate";
   if (draft.forks.some((f) => f.id === id)) return "fork";
@@ -68,22 +75,27 @@ function kindOf(draft: DraftPipeline, id: string): Kind {
 export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], onDelete, targetRepo }: NodeDrawerProps) {
   const open = selectedId != null;
   const kind = selectedId ? kindOf(draft, selectedId) : "unknown";
+  // A store node shows its OWNING team id (not the synthetic `store:<id>`).
+  const displayId = selectedId ? (storeTeamId(selectedId) ?? selectedId) : "";
+  // Store nodes are derived (projected) — they are never deletable.
+  const deletable = kind !== "store";
 
   return (
-    <Drawer open={open} onClose={onClose} label={selectedId ? `${kind} · ${selectedId}` : "node"}>
+    <Drawer open={open} onClose={onClose} label={selectedId ? `${kind} · ${displayId}` : "node"}>
       {selectedId && (
         <div style={body}>
           <header style={{ marginBottom: "var(--sp-5)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)" }}>
             <div style={{ fontSize: "var(--ts-sm)", color: "var(--text-3)", textTransform: "capitalize", letterSpacing: "0.04em" }}>
-              {kind} · <span style={{ color: "var(--text-2)" }}>{selectedId}</span>
+              {kind} · <span style={{ color: "var(--text-2)" }}>{displayId}</span>
             </div>
-            {onDelete && (
+            {onDelete && deletable && (
               <Button variant="danger" size="sm" onClick={() => onDelete(selectedId)} aria-label={`delete ${selectedId}`}>
                 Delete
               </Button>
             )}
           </header>
           {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} skills={skills} targetRepo={targetRepo} />}
+          {kind === "store" && <StoreEditor draft={draft} teamId={displayId} onChange={onChange} />}
           {kind === "gate" && <GateEditor draft={draft} id={selectedId} onChange={onChange} />}
           {kind === "join" && <JoinEditor draft={draft} id={selectedId} onChange={onChange} />}
           {kind === "fork" && <ForkEditor draft={draft} id={selectedId} />}
@@ -95,6 +107,36 @@ export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], 
         </div>
       )}
     </Drawer>
+  );
+}
+
+/// G1 — the store node drawer. A store is a derived projection of its team's
+/// bounded input buffer, so its only authoring control edits the owning team's
+/// `store.capacity` (via setTeamStoreCapacity). Live occupancy is a runtime/board
+/// concern (④e), not authored here.
+function StoreEditor({ draft, teamId, onChange }: { draft: DraftPipeline; teamId: string; onChange: (d: DraftPipeline) => void }) {
+  const t = draft.teams.find((x) => x.id === teamId);
+  if (!t) return null;
+  return (
+    <div style={{ display: "grid", gap: "var(--sp-4)" }}>
+      <p style={{ color: "var(--text-3)", fontSize: "var(--ts-base)", margin: 0 }}>
+        The bounded input buffer for <span style={{ color: "var(--text-2)" }}>{t.name || teamId}</span>. The WIP limit
+        back-pressures upstream when this many tasks are queued.
+      </p>
+      <fieldset style={group}>
+        <TipLegend text={HELP.store}>Store capacity</TipLegend>
+        <Field label="WIP limit">
+          <input
+            type="number"
+            min={1}
+            aria-label={`store capacity for ${teamId}`}
+            value={t.store?.capacity ?? 8}
+            onChange={(e) => onChange(setTeamStoreCapacity(draft, teamId, Number(e.target.value) || 1))}
+            style={inp}
+          />
+        </Field>
+      </fieldset>
+    </div>
   );
 }
 
