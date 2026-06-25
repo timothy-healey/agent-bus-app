@@ -255,6 +255,13 @@ pub fn artifact_base_for(app_data: &Path, project_id: &str) -> PathBuf {
 pub fn resolve_under_base(base: &Path, path: &str) -> Result<PathBuf, String> {
     let p = Path::new(path);
     let candidate = if p.is_absolute() {
+        // `starts_with` is lexical and does NOT collapse `..`, so an absolute
+        // path like `<base>/../../../../etc/passwd` would otherwise pass the
+        // guard below. Reject any `..` component first (mirrors the relative
+        // branch's escape rule).
+        if p.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err("artifact path may not escape the artifact base".into());
+        }
         p.to_path_buf()
     } else {
         let mut out = base.to_path_buf();
@@ -513,6 +520,18 @@ mod tests {
         // a relative path is still accepted, resolved under the base
         let rel = super::resolve_under_base(&base, "spec/k-v1.md").unwrap();
         assert_eq!(rel, std::path::PathBuf::from("/data/projects/p/artifacts/spec/k-v1.md"));
+    }
+
+    #[test]
+    fn resolve_under_base_rejects_absolute_with_parent_dir_escape() {
+        // An absolute path that lexically starts under the base but climbs out
+        // via `..` must be rejected — `starts_with` does NOT collapse `..`.
+        let base = std::path::PathBuf::from("/data/projects/p/artifacts");
+        assert!(super::resolve_under_base(
+            &base,
+            "/data/projects/p/artifacts/../../../../etc/passwd"
+        )
+        .is_err());
     }
 
     #[test]
