@@ -171,9 +171,11 @@ impl ProjectStore {
             .bind(&id.0)
             .execute(&mut *tx)
             .await?;
-        // workers reference tasks (nullable, no declared FK) — clear the link so
-        // an idle worker row never dangles at a just-deleted task.
-        sqlx::query("UPDATE workers SET task_id = NULL WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)")
+        // workers reference tasks (nullable, no declared FK). Delete the project's
+        // worker rows outright (before the tasks they point at) so deleting a
+        // project leaves ZERO worker remnants — an idle worker tied to a
+        // just-deleted project's task has no reason to survive.
+        sqlx::query("DELETE FROM workers WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)")
             .bind(&id.0)
             .execute(&mut *tx)
             .await?;
@@ -535,7 +537,9 @@ mod tests {
         // Project gone.
         assert!(matches!(store.get(&p.id).await, Err(ProjectStoreError::NotFound(_))));
 
-        // No orphaned children anywhere in the chain.
+        // No orphaned children anywhere in the chain — including the project's
+        // worker rows, which are now DELETED (not nulled): deleting a project
+        // leaves zero worker remnants.
         for (table, predicate) in [
             ("conversations", "1=1"),
             ("tasks", "1=1"),
@@ -544,6 +548,7 @@ mod tests {
             ("invocation_audit", "task_id = 'task1'"),
             ("stores", "run_id = 'run1'"),
             ("generator_ledger", "run_id = 'run1'"),
+            ("workers", "id = 'w1'"),
         ] {
             let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"))
                 .fetch_one(&pool)
@@ -551,14 +556,6 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "expected no rows left in {table}, found {n}");
         }
-
-        // The worker row survives with its task link cleared (idle worker).
-        let worker_task: Option<String> =
-            sqlx::query_scalar("SELECT task_id FROM workers WHERE id = 'w1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(worker_task, None);
     }
 
     #[tokio::test]
