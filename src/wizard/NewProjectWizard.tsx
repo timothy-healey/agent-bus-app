@@ -100,7 +100,22 @@ export function NewProjectWizard({
 
   if (!open) return null;
 
+  // G12 — a draft exists once the canvas has any node (generated / seeded /
+  // hand-authored). When it does, Basics offers a draft-preserving Continue and
+  // Generate becomes a confirm-gated Regenerate, so the authored draft is never
+  // silently clobbered.
+  const hasDraft =
+    draft.teams.length > 0 ||
+    draft.gates.length > 0 ||
+    draft.forks.length > 0 ||
+    draft.joins.length > 0 ||
+    draft.escalations.length > 0;
+
   async function generate() {
+    // G12 — Regenerate must never silently replace an authored draft.
+    if (hasDraft && !window.confirm("Replace the current draft? Your authored graph will be overwritten.")) {
+      return;
+    }
     setBusy(true);
     try {
       const d = await kickoffGenerate(sessionId, description);
@@ -202,9 +217,18 @@ export function NewProjectWizard({
           <div style={lbl}><FolderPickerField label="Root path" value={root} onChange={setRoot} placeholder="~/projects/example" /></div>
           <div style={lbl}><FolderPickerField label="Target repo (optional)" value={targetRepo} onChange={setTargetRepo} placeholder="~/projects/your-repo" /></div>
           <label style={lbl}>Describe what you're building<textarea aria-label="Describe what you're building" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} style={inp} /></label>
-          <Button variant="primary" onClick={generate} disabled={busy || !name.trim() || !root.trim() || !description.trim()}>
-            {busy ? "Generating…" : "Generate"}
-          </Button>
+          <div style={{ display: "flex", gap: "var(--sp-2)", flexWrap: "wrap" }}>
+            {/* G12 — when a draft exists, Continue is the draft-preserving path and
+                Generate becomes a confirm-gated Regenerate (in `generate`). */}
+            {hasDraft && (
+              <Button variant="primary" onClick={() => go("canvas")} aria-label="continue to canvas">
+                Continue →
+              </Button>
+            )}
+            <Button variant={hasDraft ? "default" : "primary"} onClick={generate} disabled={busy || !name.trim() || !root.trim() || !description.trim()}>
+              {busy ? "Generating…" : hasDraft ? "Regenerate" : "Generate"}
+            </Button>
+          </div>
           {templates.length > 0 && (
             <div style={{ marginTop: "var(--sp-4)" }}>
               <div style={{ fontSize: "var(--ts-sm)", color: "var(--text-3)", marginBottom: "var(--sp-2)" }}>Or start from a template</div>
