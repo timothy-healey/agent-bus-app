@@ -3,7 +3,7 @@
 /// `Event<T>` envelope (`{ payload }`) the callbacks read. Backed by the in-memory
 /// event bus in `backend.ts`, which `window.__E2E__.emit` and the command handlers
 /// fire into.
-import { busListen } from "./backend";
+import { busListen, busEmit } from "./backend";
 
 export type UnlistenFn = () => void;
 
@@ -27,6 +27,5 @@ export async function listen<T>(event: string, handler: EventCallback<T>): Promi
 /// `emit` is exported for completeness (the app emits only from the backend, but
 /// the real module exposes it). Routes through the same bus.
 export async function emit(event: string, payload?: unknown): Promise<void> {
-  const { busEmit } = await import("./backend");
   busEmit(event, payload);
 }
