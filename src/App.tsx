@@ -39,6 +39,9 @@ export default function App() {
   // (e.g. after a delete) — so the switcher can move between projects and a
   // delete lands on the next project (or the empty state when none remain).
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  // Surfaced delete failure (every delete site — switcher, AuthoringLayout,
+  // Settings — awaits handleDeleteProject; without this it's an unhandled rejection).
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const activeProject: Project | null =
     projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null;
 
@@ -53,9 +56,18 @@ export default function App() {
   // fallback land on the next project (or the empty state when none remain).
   const handleDeleteProject = useCallback(
     async (id: string) => {
-      await removeProject(id);
-      setSelectedProjectId((cur) => (cur === id ? null : cur));
-      reload();
+      setDeleteError(null);
+      try {
+        await removeProject(id);
+        // Only reset selection + reload on success; the activeProject fallback
+        // (?? projects[0]) lands on the next project (or empty when none remain).
+        setSelectedProjectId((cur) => (cur === id ? null : cur));
+        reload();
+      } catch (e) {
+        // Surface the failure instead of throwing an unhandled rejection back
+        // through whichever site awaited us.
+        setDeleteError(e instanceof Error ? e.message : String(e));
+      }
     },
     [reload],
   );
@@ -270,6 +282,12 @@ export default function App() {
         brakeReason={brake.reason ?? undefined}
         onToggleBrake={toggleBrake}
       />
+      {deleteError && (
+        <div role="alert" style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", padding: "var(--sp-2) var(--sp-4)", background: "var(--danger-2)", borderBottom: "1px solid var(--danger)", color: "var(--danger)", fontSize: "var(--ts-sm)" }}>
+          <span style={{ flex: 1 }}>Couldn't delete project: {deleteError}</span>
+          <button aria-label="dismiss error" onClick={() => setDeleteError(null)} style={{ background: "transparent", border: "none", color: "var(--danger)", cursor: "pointer", fontFamily: "inherit" }}>✕</button>
+        </div>
+      )}
       <ViewSwitcher active={view} onChange={setView} />
       {/* ④e: the run selector + Start run control scope the run-scoped views
           (board/list). Hidden on pipeline/settings and when no project is active. */}

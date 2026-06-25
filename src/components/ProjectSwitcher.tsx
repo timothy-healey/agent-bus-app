@@ -25,8 +25,13 @@ export function ProjectSwitcher({ projects, activeProjectId, onSelect, onDelete 
 
   async function doDelete() {
     if (!active || !onDelete) return;
-    await onDelete(active.id);
-    setConfirming(false);
+    // onDelete surfaces its own failure (App's handleDeleteProject catches);
+    // the finally guarantees the confirm row resets either way and no rejection escapes.
+    try {
+      await onDelete(active.id);
+    } finally {
+      setConfirming(false);
+    }
   }
 
   return (
