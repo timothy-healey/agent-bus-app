@@ -507,10 +507,20 @@ mod tests {
         );
         assert_eq!(out.unwrap(), "ok");
         // The spawner runs the blocking drain+wait on the calling thread;
-        // persistence is fire-and-forget via the runtime handle, so allow a
-        // brief settle.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(store.list().await.unwrap().is_empty(), "record removed after reap");
+        // persistence is fire-and-forget via the runtime handle. POLL for the
+        // reap-delete to settle rather than a fixed sleep — a fixed sleep is flaky
+        // under parallel test load (the async delete may not have run yet).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if store.list().await.unwrap().is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "live-process record not removed after reap within 5s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[test]
