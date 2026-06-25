@@ -206,6 +206,7 @@ mod tests {
             settings_path: "/tmp/s.json".into(),
             add_dirs: vec![],
             sandbox_profile: None,
+            working_dir: None,
         }
     }
 

@@ -110,6 +110,7 @@ mod tests {
             settings_path: String::new(),
             add_dirs: vec![],
             sandbox_profile: None,
+            working_dir: None,
         }
     }
 

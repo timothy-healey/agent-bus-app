@@ -13,7 +13,7 @@ use async_trait::async_trait;
 /// real implementation can await the child process. Returns Err(RunnerError)
 /// on spawn failure (the one error class the parser can't produce).
 pub type SpawnFn =
-    Box<dyn Fn(&[String]) -> Result<String, RunnerError> + Send + Sync>;
+    Box<dyn Fn(&[String], Option<&str>) -> Result<String, RunnerError> + Send + Sync>;
 
 /// Map a finished subprocess's (stdout, stderr, success) into the spawn result.
 /// Pure so it is unit-tested without a live `claude`. On success the stdout is
@@ -50,14 +50,18 @@ impl ClaudeCliRunner {
     /// The production runner: spawns `claude` and captures stdout.
     pub fn new() -> Self {
         Self {
-            spawn: Box::new(|args: &[String]| {
+            spawn: Box::new(|args: &[String], cwd: Option<&str>| {
                 // args[0] is the program (CLAUDE_BIN, or sandbox-exec when the
                 // S3 wrap is active). args[1..] are its arguments.
                 let (program, rest) = args
                     .split_first()
                     .ok_or_else(|| RunnerError::Spawn("empty argv".into()))?;
-                let output = std::process::Command::new(program)
-                    .args(rest)
+                let mut cmd = std::process::Command::new(program);
+                cmd.args(rest);
+                if let Some(dir) = cwd {
+                    cmd.current_dir(dir);
+                }
+                let output = cmd
                     .output()
                     .map_err(|e| RunnerError::Spawn(e.to_string()))?;
                 interpret_runner_output(
@@ -93,7 +97,7 @@ impl ClaudeCliRunner {
         if let Some(profile) = &req.sandbox_profile {
             argv = crate::command::sandbox_wrap(profile, &argv);
         }
-        let stdout = (self.spawn)(&argv)?;
+        let stdout = (self.spawn)(&argv, req.working_dir.as_deref())?;
         parse_stream_streaming(&stdout, &req.model, forward)
     }
 }
@@ -136,13 +140,30 @@ mod tests {
             settings_path: "/tmp/s.json".into(),
             add_dirs: vec![],
             sandbox_profile: None,
+            working_dir: None,
         }
+    }
+
+    #[tokio::test]
+    async fn spawner_receives_the_request_working_dir() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let s = seen.clone();
+        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, cwd| {
+            *s.lock().unwrap() = cwd.map(|c| c.to_string());
+            Ok(canned.to_string())
+        }));
+        let mut r = req();
+        r.working_dir = Some("/tmp/work-here".into());
+        runner.invoke(&r).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("/tmp/work-here"));
     }
 
     #[tokio::test]
     async fn invoke_parses_canned_stdout_without_a_real_binary() {
         let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve\nARTIFACT: a.md","usage":{"input_tokens":5,"output_tokens":7}}"#;
-        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args| {
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
             // confirm the args were built (spec command line) before "spawning"
             assert!(args.contains(&"--print".to_string()));
             Ok(canned.to_string())
@@ -156,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_argv_starts_with_claude_bin_when_no_sandbox() {
         let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
-        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args| {
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
             // program name is now the first argv element handed to the SpawnFn
             assert_eq!(args[0], crate::command::CLAUDE_BIN);
             assert!(args.iter().any(|a| a == "--print"));
@@ -169,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_argv_is_sandbox_wrapped_when_profile_present() {
         let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
-        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args| {
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
             assert_eq!(args[0], "sandbox-exec");
             assert_eq!(args[1], "-p");
             assert_eq!(args[2], "(version 1)(deny default)");
@@ -184,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_propagates_spawn_failure() {
-        let runner = ClaudeCliRunner::with_spawner(Box::new(|_| {
+        let runner = ClaudeCliRunner::with_spawner(Box::new(|_, _cwd| {
             Err(RunnerError::Spawn("no binary".into()))
         }));
         let err = runner.invoke(&req()).await.unwrap_err();
@@ -193,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_propagates_rate_limit_from_stream() {
-        let runner = ClaudeCliRunner::with_spawner(Box::new(|_| {
+        let runner = ClaudeCliRunner::with_spawner(Box::new(|_, _cwd| {
             Ok(r#"{"type":"error","error":{"message":"429 rate limit"}}"#.to_string())
         }));
         let err = runner.invoke(&req()).await.unwrap_err();
@@ -211,7 +232,7 @@ mod tests {
         let canned = r#"{"type":"system","model":"claude-opus-4-7"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Analysing.\nVERDICT: approve"}]}}
 {"type":"result","subtype":"success","is_error":false,"result":"Analysing.\nVERDICT: approve","usage":{"input_tokens":5,"output_tokens":7}}"#;
-        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args| Ok(canned.to_string())));
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, _cwd| Ok(canned.to_string())));
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
         let sink: LogSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
@@ -225,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_and_invoke_stream_produce_identical_output() {
         let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve\nARTIFACT: a.md","usage":{"input_tokens":5,"output_tokens":7}}"#;
-        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args| Ok(canned.to_string())));
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, _cwd| Ok(canned.to_string())));
         let plain = runner.invoke(&req()).await.unwrap();
         let noop: crate::output::LogSink = Box::new(|_d: &str| {});
         let streamed = runner.invoke_stream(&req(), &noop).await.unwrap();

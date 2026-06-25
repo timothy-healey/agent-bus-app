@@ -69,6 +69,7 @@ mod tests {
             settings_path: "/p/.agent-bus/runtime/T-1-research-1700.settings.json".into(),
             add_dirs: vec!["/repo".into(), "/p/artifacts/analyses".into()],
             sandbox_profile: None,
+            working_dir: None,
         }
     }
 
