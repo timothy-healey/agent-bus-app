@@ -142,6 +142,44 @@ describe("draftToFlow — store nodes (G1)", () => {
   });
 });
 
+describe("draftToFlow — reviewer route validation (G2, Task 5)", () => {
+  function reviewer(): DraftPipeline {
+    let d = addTeam(emptyDraft(), "rev", "Rev");
+    d = setTeamRole(d, "rev", "reviewer");
+    // give it a prompt so the only warnings come from missing routes
+    d = { ...d, teams: d.teams.map((t) => ({ ...t, prompt_body: "judge" })) };
+    return d;
+  }
+
+  it("warns a reviewer with no revise route", () => {
+    const { nodes } = draftToFlow(reviewer());
+    const warns = nodes.find((n) => n.id === "rev")!.data.warnings.join(" ");
+    expect(warns).toMatch(/revise/i);
+  });
+
+  it("warns a reviewer with no decline route", () => {
+    const { nodes } = draftToFlow(reviewer());
+    const warns = nodes.find((n) => n.id === "rev")!.data.warnings.join(" ");
+    expect(warns).toMatch(/decline/i);
+  });
+
+  it("a fully-wired reviewer has no route warnings", () => {
+    let d = addTeam(addTeam(reviewer(), "w", "W"), "esc", "Esc");
+    d = connect(d, "rev", "w", "revise");
+    d = connect(d, "rev", "esc", "reject");
+    const { nodes } = draftToFlow(d);
+    const warns = nodes.find((n) => n.id === "rev")!.data.warnings.join(" ");
+    expect(warns).not.toMatch(/revise|decline/i);
+  });
+
+  it("a producer team is never warned about revise/decline routes", () => {
+    const d = addTeam(emptyDraft(), "p", "P"); // producer, no prompt
+    const { nodes } = draftToFlow(d);
+    const warns = nodes.find((n) => n.id === "p")!.data.warnings.join(" ");
+    expect(warns).not.toMatch(/revise|decline/i);
+  });
+});
+
 describe("draftToFlow — reviewer outcome edges (G2)", () => {
   function reviewerDraft(): DraftPipeline {
     let d = addTeam(addTeam(addTeam(emptyDraft(), "rev", "Rev"), "w", "W"), "build", "Build");

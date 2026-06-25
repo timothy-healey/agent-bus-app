@@ -76,6 +76,15 @@ const ZERO: XY = { x: 0, y: 0 };
 function teamWarnings(t: DraftTeam): string[] {
   const w: string[] = [];
   if (!t.prompt_body || t.prompt_body.trim() === "") w.push("no prompt yet");
+  // G2 (Task 5) — an under-connected reviewer is the LF1/LF2 root issue. A reviewer
+  // that judges work must be able to send it back (revise) AND escalate a failure
+  // (decline / on_reject). Subtle inline node warnings (the loud banner stays
+  // attempt-gated, per G11). Producers never carry these.
+  if (inferTeamRole(t) === "reviewer") {
+    const o = t.outputs ?? {};
+    if (!o.on_revise) w.push("reviewer has no revise route");
+    if (!o.on_reject) w.push("reviewer has no decline route");
+  }
   return w;
 }
 
