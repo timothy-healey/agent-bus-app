@@ -166,9 +166,14 @@ mod tests {
     #[tokio::test]
     async fn load_config_returns_seeded_defaults() {
         let cfg = load_config(&fresh_pool().await).await;
-        assert_eq!(cfg.window_budget, 2_600_000);
+        assert_eq!(cfg.window_budget, 190_000_000); // all-tokens basis (LF34); tunable estimate, not an exact claude.ai mirror (G6)
         assert_eq!(cfg.window_secs, 18_000);
         assert!(!cfg.auto_meter_enabled); // v1 default OFF (D8)
+    }
+
+    #[test]
+    fn default_window_budget_is_all_tokens_calibration() {
+        assert_eq!(UsageConfig::default().window_budget, 190_000_000);
     }
 
     #[tokio::test]

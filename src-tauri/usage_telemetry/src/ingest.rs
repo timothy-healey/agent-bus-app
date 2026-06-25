@@ -156,7 +156,8 @@ mod tests {
 
         let n = ing.ingest_changed(0).await.unwrap();
         assert_eq!(n, 2); // msg_aaa + msg_bbb; non-usage + partial skipped
-        assert_eq!(cc.window_tokens(0).await.unwrap(), 1500 + 620); // 1500 (A) + 620 (B)
+        // all-tokens basis incl. cache (LF34): A = 1200+300+40+10 = 1550 ; B = 620.
+        assert_eq!(cc.window_tokens(0).await.unwrap(), 1550 + 620);
 
         // second pass with the same files: dedup => 0 new
         assert_eq!(ing.ingest_changed(0).await.unwrap(), 0);
@@ -210,7 +211,8 @@ mod tests {
 
         let n = ing.backfill_window(window_secs, now).await.unwrap();
         assert_eq!(n, 1); // only the recent file (msg_aaa)
-        assert_eq!(cc.window_tokens(0).await.unwrap(), 1500);
+        // all-tokens basis incl. cache (LF34): 1200+300+40+10 = 1550.
+        assert_eq!(cc.window_tokens(0).await.unwrap(), 1550);
     }
 
     #[tokio::test]

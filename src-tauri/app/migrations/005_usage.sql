@@ -31,12 +31,15 @@ CREATE TABLE IF NOT EXISTS cc_usage_log (
   cache_read      INTEGER NOT NULL DEFAULT 0
 );
 
--- Single-row meter configuration (budget denominator + thresholds). v1 has no
--- Settings UI (v1.1); this gives the meter a denominator and the brake policy
--- its thresholds. Seeded with the Pro-estimate default.
+-- Single-row meter configuration (budget denominator + thresholds). This gives
+-- the meter a denominator and the brake policy its thresholds. Seeded with the
+-- all-tokens calibration (LF34): the window counts input+output+cache_creation+
+-- cache_read, and cache_read dominates real throughput — ~67.2M live ≈ 35% on
+-- claude.ai ⟹ ~192M, rounded to 190_000_000. Tunable estimate, NOT an exact
+-- claude.ai mirror (G6); the operator adjusts it in Settings → Usage.
 CREATE TABLE IF NOT EXISTS usage_config (
   id                  INTEGER PRIMARY KEY CHECK (id = 1),
-  window_budget       INTEGER NOT NULL DEFAULT 2600000,
+  window_budget       INTEGER NOT NULL DEFAULT 190000000,
   window_secs         INTEGER NOT NULL DEFAULT 18000,    -- 5h
   brake_on_pct        REAL NOT NULL DEFAULT 0.95,
   brake_off_pct       REAL NOT NULL DEFAULT 0.85,
