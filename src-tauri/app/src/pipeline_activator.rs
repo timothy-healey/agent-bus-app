@@ -59,6 +59,9 @@ pub struct WorkerDeps {
     pub ledger: Arc<GeneratorLedger>,
     /// The fork/join barrier aggregate store (FanOutGroup; P1–P3).
     pub fanout: Arc<FanOutStore>,
+    /// Live child process-group registry (LF20): the killable worker spawner
+    /// registers each `claude` group so the exit/brake triggers can kill them.
+    pub process_registry: Arc<crate::process_registry::ProcessRegistry>,
 }
 
 /// Owns the runtime-activation lifecycle: swap the active pipeline + (re)spawn
@@ -184,7 +187,16 @@ impl PipelineActivator {
     /// keep the loop alive on claude-cli rather than panicking — we never crash
     /// the whole pool over one team's runner config.
     fn runner_for_team(&self, team: &Team) -> Arc<dyn Runner> {
+        use agent_bus_core::RunnerKind;
         let effective = team.effective_runner();
+        // LF20: the claude-cli worker runner is built with the killable spawner so
+        // its `claude` process group is registered + reachable by `kill_all`. The
+        // anthropic-api runner is NOT subprocess-based and needs no registry.
+        if let RunnerKind::ClaudeCli = effective.kind {
+            return crate::process_registry::build_killable_worker_runner(
+                self.deps.process_registry.clone(),
+            );
+        }
         let keychain = self.deps.keychain.clone();
         let resolve_key = |c: &pipeline::model::RunnerConfig| -> Option<String> {
             let account = c.api_key_env.as_deref().unwrap_or("anthropic-api");
@@ -204,7 +216,9 @@ impl PipelineActivator {
                     "app: team `{}` runner selection failed ({e}); falling back to claude-cli",
                     team.id
                 );
-                Arc::new(ClaudeCliRunner::new())
+                crate::process_registry::build_killable_worker_runner(
+                    self.deps.process_registry.clone(),
+                )
             }
         }
     }
@@ -357,6 +371,8 @@ impl PipelineActivator {
             runner: runner.clone(),
             project_root: std::path::PathBuf::from(&project_root),
             target_repo: target_repo.clone(),
+            // Populated properly from the app-data dir in Task 12.
+            artifact_base: std::path::PathBuf::from(&project_root).join("artifacts"),
             read_prompt: read_prompt.clone(),
             revision_reader: revision_reader.clone(),
             usage_sink: usage_sink.clone(),
@@ -430,12 +446,17 @@ pub(crate) fn runner_for(
 /// opaque `Arc<dyn ChatRunner>` and never learn which kind they got (the ACL seal).
 pub(crate) fn chat_runner_for(
     resolve_key: &dyn Fn() -> Option<String>,
+    registry: &Arc<crate::process_registry::ProcessRegistry>,
 ) -> Arc<dyn llm_chat::chat::ChatRunner> {
     match resolve_key() {
         Some(key) if !key.is_empty() => {
             Arc::new(llm_chat::anthropic_api::AnthropicApiChatRunner::new(key))
         }
-        _ => Arc::new(llm_chat::claude_cli::ClaudeChatRunner::new()),
+        // LF20: the CLI chat runner is built with the killable spawner so its
+        // `claude` process group is registered + reachable by `kill_all`.
+        _ => Arc::new(llm_chat::claude_cli::ClaudeChatRunner::with_spawner(
+            crate::process_registry::killable_chat_spawn(registry),
+        )),
     }
 }
 
@@ -544,25 +565,29 @@ mod runner_factory_tests {
 #[cfg(test)]
 mod chat_runner_factory_tests {
     use super::chat_runner_for;
+    use std::sync::Arc;
 
     // supports_structured() distinguishes the two kinds without exposing which
     // concrete runner was built (the ACL seal): only the API runner returns true.
     #[test]
     fn resolvable_key_builds_the_structured_api_chat_runner() {
-        let r = chat_runner_for(&|| Some("sk-from-keychain".to_string()));
+        let reg = Arc::new(crate::process_registry::ProcessRegistry::new());
+        let r = chat_runner_for(&|| Some("sk-from-keychain".to_string()), &reg);
         assert!(r.supports_structured(), "a resolvable key must build the API chat runner");
     }
 
     #[test]
     fn no_key_builds_the_cli_chat_runner_which_degrades() {
-        let r = chat_runner_for(&|| None);
+        let reg = Arc::new(crate::process_registry::ProcessRegistry::new());
+        let r = chat_runner_for(&|| None, &reg);
         assert!(!r.supports_structured(), "no key must build the CLI chat runner (degrades)");
     }
 
     #[test]
     fn empty_key_falls_back_to_the_cli_chat_runner() {
         // A blank/whitespace key is treated as absent (no structured support).
-        let r = chat_runner_for(&|| Some(String::new()));
+        let reg = Arc::new(crate::process_registry::ProcessRegistry::new());
+        let r = chat_runner_for(&|| Some(String::new()), &reg);
         assert!(!r.supports_structured());
     }
 }
