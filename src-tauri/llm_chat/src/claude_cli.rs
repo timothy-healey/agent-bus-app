@@ -14,7 +14,7 @@ use async_trait::async_trait;
 /// the real implementation can run the child process; tests inject canned
 /// stdout. Returns Err(ChatError) on spawn failure (the one error class the
 /// parser can't produce).
-pub type SpawnFn = Box<dyn Fn(&[String]) -> Result<String, ChatError> + Send + Sync>;
+pub type SpawnFn = Box<dyn Fn(&[String], Option<&str>) -> Result<String, ChatError> + Send + Sync>;
 
 /// Map a finished subprocess's (stdout, stderr, success) into the spawn result.
 /// Pure so it is unit-tested without a live `claude`. On success the stdout is
@@ -55,9 +55,13 @@ impl ClaudeChatRunner {
     /// The production runner: spawns `claude` and captures stdout.
     pub fn new() -> Self {
         Self {
-            spawn: Box::new(|args: &[String]| {
-                let output = std::process::Command::new(CLAUDE_BIN)
-                    .args(args)
+            spawn: Box::new(|args: &[String], cwd: Option<&str>| {
+                let mut cmd = std::process::Command::new(CLAUDE_BIN);
+                cmd.args(args);
+                if let Some(dir) = cwd {
+                    cmd.current_dir(dir);
+                }
+                let output = cmd
                     .output()
                     .map_err(|e| ChatError::Spawn(e.to_string()))?;
                 interpret_chat_output(
@@ -87,7 +91,7 @@ impl ClaudeChatRunner {
         forward: &mut dyn FnMut(&str),
     ) -> Result<ChatReply, ChatError> {
         let args = build_chat_args(req, resume);
-        let stdout = (self.spawn)(&args)?;
+        let stdout = (self.spawn)(&args, req.working_dir.as_deref())?;
         let (reply, session_id) = parse_chat_stream_streaming(&stdout, &req.model, forward)?;
         if let Some(sid) = session_id {
             self.sessions.record(&req.dialogue_id, &sid);
@@ -158,7 +162,22 @@ mod tests {
             user_message: msg.into(),
             model: "claude-opus-4-8".into(),
             thinking_budget: 8192,
+            working_dir: None,
         }
+    }
+
+    #[tokio::test]
+    async fn chat_spawner_receives_the_request_working_dir() {
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let s = seen.clone();
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |_args, cwd| {
+            *s.lock().unwrap() = cwd.map(|c| c.to_string());
+            Ok(FIRST.to_string())
+        }));
+        let mut r = req("hi");
+        r.working_dir = Some("/tmp/chat-here".into());
+        runner.chat(&r).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("/tmp/chat-here"));
     }
 
     #[tokio::test]
@@ -166,7 +185,7 @@ mod tests {
         // Record the args each call saw so we can assert --resume presence.
         let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
-        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args| {
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args, _cwd| {
             s.lock().unwrap().push(args.to_vec());
             Ok(FIRST.to_string())
         }));
@@ -186,7 +205,7 @@ mod tests {
         let s = seen.clone();
         // First call returns FIRST (session sess-first), second returns FOLLOW.
         let n = Arc::new(Mutex::new(0usize));
-        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args| {
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args, _cwd| {
             s.lock().unwrap().push(args.to_vec());
             let mut k = n.lock().unwrap();
             let out = if *k == 0 { FIRST } else { FOLLOW };
@@ -208,7 +227,7 @@ mod tests {
         // Seed a known session, then make a --resume call fail with NoResult
         // (empty stdout) but a fresh (no --resume) call succeed.
         let n = Arc::new(Mutex::new(0usize));
-        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args| {
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args, _cwd| {
             let mut k = n.lock().unwrap();
             *k += 1;
             // call 1: first turn -> FIRST (captures sess-first)
@@ -230,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_stream_forwards_prose_deltas_and_returns_final_reply() {
-        let runner = ClaudeChatRunner::with_spawner(Box::new(move |_args| Ok(FIRST.to_string())));
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |_args, _cwd| Ok(FIRST.to_string())));
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
         let sink: crate::chat::DeltaSink = Box::new(move |d: &str| s.lock().unwrap().push(d.to_string()));
@@ -245,7 +264,7 @@ mod tests {
         let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
         let n = Arc::new(Mutex::new(0usize));
-        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args| {
+        let runner = ClaudeChatRunner::with_spawner(Box::new(move |args, _cwd| {
             s.lock().unwrap().push(args.to_vec());
             let mut k = n.lock().unwrap();
             let out = if *k == 0 { FIRST } else { FOLLOW };
@@ -262,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_failure_propagates_and_is_not_retried() {
-        let runner = ClaudeChatRunner::with_spawner(Box::new(|_| {
+        let runner = ClaudeChatRunner::with_spawner(Box::new(|_, _cwd| {
             Err(ChatError::Spawn("no binary".into()))
         }));
         let err = runner.chat(&req("x")).await.unwrap_err();
@@ -271,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_propagates_and_is_not_retried() {
-        let runner = ClaudeChatRunner::with_spawner(Box::new(|_| {
+        let runner = ClaudeChatRunner::with_spawner(Box::new(|_, _cwd| {
             Ok(r#"{"type":"error","error":{"message":"429 rate limit"}}"#.to_string())
         }));
         let err = runner.chat(&req("x")).await.unwrap_err();

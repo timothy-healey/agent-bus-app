@@ -51,6 +51,7 @@ mod tests {
             user_message: "how is T-042 going?".into(),
             model: "claude-opus-4-8".into(),
             thinking_budget: 8192,
+            working_dir: None,
         }
     }
 

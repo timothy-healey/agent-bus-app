@@ -282,6 +282,7 @@ mod tests {
             user_message: "emit the team set".into(),
             model: "claude-opus-4-8".into(),
             thinking_budget: 8192,
+            working_dir: None,
         }
     }
 

@@ -218,6 +218,7 @@ mod tests {
             user_message: msg.into(),
             model: "m".into(),
             thinking_budget: 0,
+            working_dir: None,
         }
     }
 
