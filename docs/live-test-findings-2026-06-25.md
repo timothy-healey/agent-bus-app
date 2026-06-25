@@ -107,3 +107,11 @@ Likely area: `NewProjectWizard` step navigation — going Canvas → Basics → 
 > "with the changes we make to remove the modal and use screens we could probably have some nicer navigations. We could set up a column on the left with a clickable nav tree on top of the continue+back buttons. Surface the delete action in the switcher."
 
 Design idea raised during the C4 brainstorm (not a raw test finding): once the canvas is full-page (G10), add a left navigation column with a clickable nav tree (Basics / Canvas / Review + project switcher) above the continue/back buttons, and surface delete-project in the switcher (overlaps G13).
+
+---
+
+### LF14 · Project delete fails (FK 787) + leaves remnants — `fixed (tag fix-project-delete-cascade)`
+
+> Live error: "database error: FOREIGN KEY constraint failed (code 787)" on delete-project (ProjectSwitcher). Operator: "delete should cascade so there's no longer any remnants of the project pieces."
+
+Root cause: `ProjectStore::remove` did a bare `DELETE FROM projects` while child rows (conversations/tasks/comments/audit/runs/stores/ledger/workers) reference it; FK enforcement blocked it. Fixed: transactional cascade of ALL DB children + worker rows, + on-disk cleanup (scaffolded subdirs + git-worktree teardown) guarded to NEVER touch `target_repo` (skips if target_repo == root or nested). Commits a158619 / 621f95c / 4c05870 / 9bab60a.
