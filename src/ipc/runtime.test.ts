@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { injectTopic, listTasks, approveGate, reviseGate, rejectGate, brakeOn, brakeOff, brakeState, startRun, listRuns, runStoreOccupancy, type Run, type StoreOccupancy } from "./runtime";
+import { injectTopic, listTasks, approveGate, reviseGate, rejectGate, brakeOn, brakeOff, brakeState, startRun, listRuns, runStoreOccupancy, listInvocations, retryTask, forceAdvance, abandonTask, acceptTask, type Run, type StoreOccupancy, type InvocationRow } from "./runtime";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
@@ -69,5 +69,32 @@ describe("runtime ipc", () => {
     const got = await runStoreOccupancy("R-1");
     expect(invokeMock).toHaveBeenCalledWith("run_store_occupancy", { run_id: "R-1" });
     expect(got).toEqual(occ);
+  });
+
+  it("listInvocations calls list_invocations and returns InvocationRow[] intact", async () => {
+    const rows: InvocationRow[] = [
+      {
+        invocation_id: "I-1", team_id: "spec", model: "claude-opus-4-8", attempts: 3,
+        started_at: 100, settled_at: 110, outcome: "error:model_unavailable",
+        input_tokens: 50, output_tokens: 12,
+      },
+    ];
+    invokeMock.mockResolvedValueOnce(rows);
+    const got = await listInvocations("T-1");
+    expect(invokeMock).toHaveBeenCalledWith("list_invocations", { task_id: "T-1" });
+    // the wire shape round-trips intact (wire-contract).
+    expect(got).toEqual(rows);
+  });
+
+  it("retry/forceAdvance/abandon/accept pass task_id to their commands", async () => {
+    invokeMock.mockResolvedValue({ id: "T-1", state: "queued" });
+    await retryTask("T-1");
+    expect(invokeMock).toHaveBeenCalledWith("retry_task", { task_id: "T-1" });
+    await forceAdvance("T-1");
+    expect(invokeMock).toHaveBeenCalledWith("force_advance", { task_id: "T-1" });
+    await abandonTask("T-1");
+    expect(invokeMock).toHaveBeenCalledWith("abandon_task", { task_id: "T-1" });
+    await acceptTask("T-1");
+    expect(invokeMock).toHaveBeenCalledWith("accept_task", { task_id: "T-1" });
   });
 });

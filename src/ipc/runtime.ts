@@ -39,6 +39,23 @@ export interface BrakeState {
   reason: string | null;
 }
 
+/// One invocation as the L3 history panel surfaces it (plan H). Mirrors the Rust
+/// `InvocationRow` DTO — the sealed audit read shape. `outcome` is the single
+/// encoded string: `verdict:approve|revise|reject`, `error:<class>` (one of
+/// `rate_limited`/`model_unavailable`/`spawn`/`no_result`/`other`), or `""` for an
+/// in-flight (not-yet-settled) invocation.
+export interface InvocationRow {
+  invocation_id: string;
+  team_id: string;
+  model: string;
+  attempts: number;
+  started_at: number;
+  settled_at: number | null;
+  outcome: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
 /// One execution of a pipeline — the unit the board scopes to (Runtime redesign
 /// ④a/④e). The newest not-`completed` run is the active one. Mirrors the Rust
 /// `Run` serde type.
@@ -94,6 +111,34 @@ export async function reviseGate(taskId: string): Promise<Task> {
 
 export async function rejectGate(taskId: string): Promise<Task> {
   return await invoke<Task>("reject_gate", { task_id: taskId });
+}
+
+/// L3: a task's invocation audit trail, newest-first (the CardDrawer history
+/// panel + the headline reason line).
+export async function listInvocations(taskId: string): Promise<InvocationRow[]> {
+  return await invoke<InvocationRow[]>("list_invocations", { task_id: taskId });
+}
+
+/// L2: requeue a needs-human task at the stage that escalated it (attempts reset;
+/// the run re-opened). Returns the re-read Task.
+export async function retryTask(taskId: string): Promise<Task> {
+  return await invoke<Task>("retry_task", { task_id: taskId });
+}
+
+/// L2: override-approve a needs-human task into the failed stage's downstream
+/// store (surfaces backpressure if full — the item is never lost).
+export async function forceAdvance(taskId: string): Promise<Task> {
+  return await invoke<Task>("force_advance", { task_id: taskId });
+}
+
+/// L2: abandon a needs-human task (mark done; kept for lineage).
+export async function abandonTask(taskId: string): Promise<Task> {
+  return await invoke<Task>("abandon_task", { task_id: taskId });
+}
+
+/// L2: accept a needs-human hand-off (mark the deliverable done; kept for lineage).
+export async function acceptTask(taskId: string): Promise<Task> {
+  return await invoke<Task>("accept_task", { task_id: taskId });
 }
 
 export async function brakeOn(reason?: string): Promise<BrakeState> {
