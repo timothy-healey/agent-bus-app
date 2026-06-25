@@ -53,6 +53,7 @@ impl FakeChatRunner {
             ChatError::Spawn(m) => ChatError::Spawn(m.clone()),
             ChatError::NoResult => ChatError::NoResult,
             ChatError::Other(m) => ChatError::Other(m.clone()),
+            ChatError::Unsupported(m) => ChatError::Unsupported(m.clone()),
         })
     }
 
