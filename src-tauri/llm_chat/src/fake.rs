@@ -2,7 +2,9 @@
 //! order (clamping to the last when exhausted) and records every ChatRequest it
 //! received, so tests can assert what was asked without a live `claude`.
 
-use crate::chat::{ChatError, ChatReply, ChatRequest, ChatRunner, DeltaSink};
+use crate::chat::{
+    ChatError, ChatReply, ChatRequest, ChatRunner, ChatToolDef, DeltaSink, StructuredReply,
+};
 use async_trait::async_trait;
 use std::sync::Mutex;
 
@@ -90,6 +92,117 @@ impl ChatRunner for FakeChatRunner {
             }
         }
         Ok(self.reply_at(idx))
+    }
+}
+
+/// A structured-capable ChatRunner test double (the anthropic-api path stand-in).
+/// `supports_structured()` is true; `chat_structured` returns seeded
+/// `StructuredReply`s in order (clamping to the last) and records the
+/// `(ChatRequest, tool names, forced tool)` of every call so tests can assert the
+/// structured seam was driven. `chat`/`chat_stream` return seeded plain replies.
+pub struct FakeStructuredChatRunner {
+    structured: Vec<StructuredReply>,
+    replies: Vec<ChatReply>,
+    error: Option<ChatError>,
+    cursor: Mutex<usize>,
+    pub received: Mutex<Vec<ChatRequest>>,
+    /// Per structured call: (tool names offered, forced tool name).
+    pub structured_calls: Mutex<Vec<(Vec<String>, Option<String>)>>,
+}
+
+impl FakeStructuredChatRunner {
+    /// Seed the structured replies returned by `chat_structured` in order.
+    pub fn new(structured: Vec<StructuredReply>) -> Self {
+        Self {
+            structured,
+            replies: vec![],
+            error: None,
+            cursor: Mutex::new(0),
+            received: Mutex::new(vec![]),
+            structured_calls: Mutex::new(vec![]),
+        }
+    }
+
+    /// Seed structured replies AND plain `chat` replies.
+    pub fn with_chat(structured: Vec<StructuredReply>, replies: Vec<ChatReply>) -> Self {
+        Self {
+            structured,
+            replies,
+            error: None,
+            cursor: Mutex::new(0),
+            received: Mutex::new(vec![]),
+            structured_calls: Mutex::new(vec![]),
+        }
+    }
+
+    /// Seed an error every `chat_structured` call returns.
+    pub fn failing(error: ChatError) -> Self {
+        Self {
+            structured: vec![],
+            replies: vec![],
+            error: Some(error),
+            cursor: Mutex::new(0),
+            received: Mutex::new(vec![]),
+            structured_calls: Mutex::new(vec![]),
+        }
+    }
+
+    fn next_idx(&self) -> usize {
+        let mut c = self.cursor.lock().unwrap();
+        let i = *c;
+        *c += 1;
+        i
+    }
+
+    fn clone_error(&self) -> Option<ChatError> {
+        self.error.as_ref().map(|err| match err {
+            ChatError::RateLimited(m) => ChatError::RateLimited(m.clone()),
+            ChatError::Spawn(m) => ChatError::Spawn(m.clone()),
+            ChatError::NoResult => ChatError::NoResult,
+            ChatError::Other(m) => ChatError::Other(m.clone()),
+            ChatError::Unsupported(m) => ChatError::Unsupported(m.clone()),
+        })
+    }
+}
+
+#[async_trait]
+impl ChatRunner for FakeStructuredChatRunner {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatReply, ChatError> {
+        self.received.lock().unwrap().push(req.clone());
+        if let Some(err) = self.clone_error() {
+            return Err(err);
+        }
+        let idx = self.next_idx();
+        Ok(self
+            .replies
+            .get(idx.min(self.replies.len().saturating_sub(1)))
+            .cloned()
+            .unwrap_or(ChatReply { text: String::new(), usage: Default::default() }))
+    }
+
+    fn supports_structured(&self) -> bool {
+        true
+    }
+
+    async fn chat_structured(
+        &self,
+        req: &ChatRequest,
+        tools: &[ChatToolDef],
+        force: Option<&str>,
+    ) -> Result<StructuredReply, ChatError> {
+        self.received.lock().unwrap().push(req.clone());
+        self.structured_calls
+            .lock()
+            .unwrap()
+            .push((tools.iter().map(|t| t.name.clone()).collect(), force.map(|s| s.to_string())));
+        if let Some(err) = self.clone_error() {
+            return Err(err);
+        }
+        let idx = self.next_idx();
+        self.structured
+            .get(idx.min(self.structured.len().saturating_sub(1)))
+            .cloned()
+            .ok_or(ChatError::NoResult)
     }
 }
 

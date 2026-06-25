@@ -7,7 +7,7 @@
 //! prose is never parsed for state.
 
 use crate::draft::{apply_kickoff_slice, apply_slice, best_effort_validate, DraftPipeline, KickoffSlice, PromptSlice, Slice, TeamsSlice, WiringSlice};
-use llm_chat::chat::{ChatRequest, ChatRunner};
+use llm_chat::chat::{ChatRequest, ChatRunner, ChatToolDef};
 use serde::{Deserialize, Serialize};
 
 /// Compact JSON Schema for a slice type, derived from the Rust type via schemars.
@@ -15,6 +15,58 @@ use serde::{Deserialize, Serialize};
 /// `parse_slice` are generated from the SAME types, so they can never drift.
 fn slice_schema<T: schemars::JsonSchema>() -> String {
     serde_json::to_string(&schemars::schema_for!(T)).unwrap_or_default()
+}
+
+/// The slice schema as a JSON `Value` (the structured-output path's tool
+/// `input_schema`). Same single source of truth as `slice_schema` — derived from
+/// the SAME Rust type via schemars — so the prose-prompt schema and the native
+/// tool schema can never drift. Falls back to a permissive object schema if
+/// serialization ever fails (the parse-after still validates the shape).
+fn slice_schema_value<T: schemars::JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T))
+        .unwrap_or_else(|_| serde_json::json!({ "type": "object" }))
+}
+
+/// The single tool name the structured-emit path forces. The model MUST call it,
+/// so its `input_schema` (the slice schema) is the only shape it can return.
+const EMIT_TOOL: &str = "emit_slice";
+
+/// Emit a typed value `T` via the runner's NATIVE structured-output path: one
+/// forced tool whose `input_schema` is the derived schema for `T`. The model's
+/// `StructuredReply.args` is the slice object itself, deserialized into `T` — no
+/// prose-fenced-json extraction and NO repair loop (forced tool_choice guarantees
+/// a schema-shaped call). The runner is consumed via the `ChatRunner` trait only:
+/// Design Session never sees the anthropic tool_use idiom (the ACL seal). Returns
+/// `(reply_prose, Some(T))` on success, `(error_or_empty, None)` otherwise — the
+/// SAME contract as `chat_with_repair_parsed` so callers are path-agnostic.
+async fn emit_structured<T: serde::de::DeserializeOwned + schemars::JsonSchema>(
+    runner: &dyn ChatRunner,
+    dialogue_id: &str,
+    system_prompt: &str,
+    user_message: String,
+    tool_description: &str,
+) -> (String, Option<T>) {
+    let tools = [ChatToolDef {
+        name: EMIT_TOOL.to_string(),
+        description: tool_description.to_string(),
+        input_schema: slice_schema_value::<T>(),
+    }];
+    let req = ChatRequest {
+        dialogue_id: dialogue_id.to_string(),
+        system_prompt: system_prompt.to_string(),
+        user_message,
+        model: "claude-opus-4-8".to_string(),
+        thinking_budget: 8192,
+    };
+    match runner.chat_structured(&req, &tools, Some(EMIT_TOOL)).await {
+        Ok(reply) => match serde_json::from_value::<T>(reply.args) {
+            // The forced schema guarantees the shape; a deserialize miss here is
+            // treated like the prose path's parse miss — draft unchanged.
+            Ok(value) => (String::new(), Some(value)),
+            Err(_) => (String::new(), None),
+        },
+        Err(e) => (format!("[design session error] {e}"), None),
+    }
 }
 
 /// The kickoff one-shot system prompt (G5/G3): prose + a fenced ```json
@@ -269,14 +321,29 @@ pub async fn kickoff_generate(
     draft.id = slug_id(description);
 
     let dialogue_id = format!("{session_id}:kickoff");
-    let (_text, slice) = chat_with_repair_parsed(
-        runner,
-        &dialogue_id,
-        &kickoff_system_prompt(),
-        description.to_string(),
-        extract_and_parse_as::<KickoffSlice>,
-    )
-    .await;
+    // On a runner that supports native structured output (the anthropic-api path),
+    // force the kickoff tool whose input_schema is the derived KickoffSlice schema
+    // — a schema-valid slice with no prose extraction or repair. Else the CLI
+    // prose+parse+repair path (unchanged). Same (_text, slice) contract either way.
+    let (_text, slice) = if runner.supports_structured() {
+        emit_structured::<KickoffSlice>(
+            runner,
+            &dialogue_id,
+            &kickoff_system_prompt(),
+            description.to_string(),
+            "Emit the COMPLETE recommended pipeline graph (teams, gates, escalations).",
+        )
+        .await
+    } else {
+        chat_with_repair_parsed(
+            runner,
+            &dialogue_id,
+            &kickoff_system_prompt(),
+            description.to_string(),
+            extract_and_parse_as::<KickoffSlice>,
+        )
+        .await
+    };
     if let Some(slice) = slice {
         apply_kickoff_slice(&mut draft, slice);
     }
@@ -296,13 +363,28 @@ pub async fn design_session_turn(
     user_message: &str,
 ) -> TurnResult {
     let dialogue_id = format!("{session_id}:{}", step.slug());
-    let (reply_text, slice) = chat_with_repair(
-        runner,
-        &dialogue_id,
-        &step_system_prompt(step),
-        turn_user_message(user_message, &draft),
-    )
-    .await;
+    // Structured path on the API runner: force the emit tool whose input_schema is
+    // the derived Slice schema; the returned args ARE the tagged slice — no
+    // extract_and_parse, no repair. Else the CLI prose+parse+repair path
+    // (unchanged). The seam is the ChatRunner trait — no anthropic idiom here.
+    let (reply_text, slice) = if runner.supports_structured() {
+        emit_structured::<Slice>(
+            runner,
+            &dialogue_id,
+            &step_system_prompt(step),
+            turn_user_message(user_message, &draft),
+            "Emit the pipeline slice (the structured mutation for this step).",
+        )
+        .await
+    } else {
+        chat_with_repair(
+            runner,
+            &dialogue_id,
+            &step_system_prompt(step),
+            turn_user_message(user_message, &draft),
+        )
+        .await
+    };
     if let Some(slice) = slice {
         apply_slice(&mut draft, slice);
     }
@@ -387,8 +469,8 @@ mod tests {
     }
 
     use crate::draft::{DraftPipeline, DraftTeam};
-    use llm_chat::chat::{ChatReply, ChatUsage};
-    use llm_chat::fake::FakeChatRunner;
+    use llm_chat::chat::{ChatReply, ChatUsage, StructuredReply};
+    use llm_chat::fake::{FakeChatRunner, FakeStructuredChatRunner};
 
     fn reply(text: &str) -> ChatReply {
         ChatReply { text: text.into(), usage: ChatUsage::default() }
@@ -679,5 +761,91 @@ mod tests {
         assert_eq!(t.role, crate::model::Role::Reviewer);
         assert_eq!(t.outputs.on_revise.as_deref(), Some("writers"));
         assert_eq!(d.escalations.len(), 1);
+    }
+
+    // ---- Structured (native tool-use) path on the API runner (T2 Task 3) ----
+
+    fn structured(args: serde_json::Value) -> StructuredReply {
+        StructuredReply { tool_name: "emit_slice".into(), args, usage: ChatUsage::default() }
+    }
+
+    #[tokio::test]
+    async fn design_session_turn_uses_structured_emit_on_a_structured_runner() {
+        // The structured runner returns the slice DIRECTLY (no prose, no repair).
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let args = serde_json::json!({
+            "kind": "prompt",
+            "team_id": "research",
+            "prompt_body": "You investigate the repo and write findings."
+        });
+        let runner = FakeStructuredChatRunner::new(vec![structured(args)]);
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "set research prompt").await;
+        assert_eq!(out.updated_draft.teams[0].prompt_body, "You investigate the repo and write findings.");
+        // exactly ONE call — no repair turn on the forced-schema path
+        assert_eq!(runner.received.lock().unwrap().len(), 1);
+        // the forced tool was the slice-emit tool with the derived schema
+        let calls = runner.structured_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, vec!["emit_slice".to_string()]);
+        assert_eq!(calls[0].1.as_deref(), Some("emit_slice"));
+    }
+
+    #[tokio::test]
+    async fn cli_runner_still_uses_prose_parse_repair_path() {
+        // A non-structured (CLI) fake: the existing prose+parse+repair path runs
+        // UNCHANGED — first reply has no fence (repair), second is the valid slice.
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let malformed = reply("I think research should investigate. (forgot the json)");
+        let good = reply("Here:\n```json\n{\"kind\":\"prompt\",\"team_id\":\"research\",\
+            \"prompt_body\":\"You investigate the repo and write findings.\"}\n```");
+        let runner = FakeChatRunner::new(vec![malformed, good]);
+        assert!(!runner.supports_structured());
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "set research prompt").await;
+        assert_eq!(out.updated_draft.teams[0].prompt_body, "You investigate the repo and write findings.");
+        // the prose path made 2 calls (initial + repair) — proof it took the CLI branch
+        assert_eq!(runner.received.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn kickoff_uses_structured_emit_on_a_structured_runner() {
+        let args = serde_json::json!({
+            "teams": [
+                {"id":"research","name":"Research","prompt_body":"You investigate.","role":"producer","on_approve":"writers"},
+                {"id":"writers","name":"Writers","prompt_body":"You write.","role":"producer","on_approve":"reviewers"},
+                {"id":"reviewers","name":"Reviewers","prompt_body":"You review.","role":"reviewer","on_approve":"gate-1","on_revise":"writers","on_reject":"needs-human"}
+            ],
+            "gates": [{"id":"gate-1","label":"Sign-off","downstream":"needs-human"}],
+            "escalations": [{"id":"needs-human","triggers":[]}]
+        });
+        let runner = FakeStructuredChatRunner::new(vec![structured(args)]);
+        let draft = kickoff_generate(&runner, "sess-1", "research+writing pipeline").await;
+        assert_eq!(draft.teams.len(), 3);
+        // ONE structured call, forced on the emit tool
+        let calls = runner.structured_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1.as_deref(), Some("emit_slice"));
+    }
+
+    #[tokio::test]
+    async fn structured_emit_with_unparseable_args_leaves_draft_unchanged() {
+        // A forced reply whose args don't match the slice shape => draft unchanged
+        // (the same outcome as the prose path's parse miss).
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let before = draft.clone();
+        let runner = FakeStructuredChatRunner::new(vec![structured(serde_json::json!({"nope": true}))]);
+        let out = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "go").await;
+        assert_eq!(out.updated_draft, before);
+    }
+
+    #[test]
+    fn slice_schema_value_matches_the_string_schema() {
+        // One source of truth: the Value schema equals the parsed String schema.
+        let s: serde_json::Value =
+            serde_json::from_str(&slice_schema::<crate::draft::TeamsSlice>()).unwrap();
+        let v = slice_schema_value::<crate::draft::TeamsSlice>();
+        assert_eq!(s, v);
     }
 }
