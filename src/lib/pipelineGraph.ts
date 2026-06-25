@@ -23,6 +23,11 @@ export interface GraphNode {
   role: NodeRole;
   col: number;
   row: number;
+  /// Fork-nesting depth of the node's owning lane span (0 = not inside any
+  /// nested fork; a top-level fork's lane members are depth 1; a fork reached
+  /// inside another fork's lane raises its members to depth 2; max 3). Mirrors
+  /// the backend validator's MAX_NESTING_DEPTH walk (validate.rs).
+  depth: number;
 }
 
 export interface GraphEdge {
@@ -58,10 +63,169 @@ export function inferTeamRole(team: { role?: "producer" | "reviewer"; id: string
   return teamRole(team.name || team.id) === "reviewer" ? "reviewer" : "producer";
 }
 
+/// Max fork nesting depth, mirroring the backend (validate.rs MAX_NESTING_DEPTH).
+/// A top-level fork is depth 1; a fork reached inside another fork's lane is 2; etc.
+export const MAX_NESTING_DEPTH = 3;
+
+/// The single shared lane-walk over a pipeline, replicating the backend validator
+/// (`validate.rs::check_lane_reachable`). Built once per call so both
+/// `forkNestingDepths` and `nestingGroups` derive the fragile join-pairing the
+/// SAME way — there is intentionally no second, simplified matcher. Hops: a team
+/// follows `outputs.on_approve`; a gate follows `downstream`; a fork follows its
+/// paired join's `downstream`. Bounded by node count so it terminates on any
+/// (even malformed) input.
+function laneWalk(pipeline: Pipeline) {
+  const teams = new Map(pipeline.teams.map((t) => [t.id, t]));
+  const gates = new Map(pipeline.gates.map((g) => [g.id, g]));
+  const forks = new Map(pipeline.forks.map((f) => [f.id, f]));
+  const joins = pipeline.joins;
+  const bound =
+    pipeline.teams.length + pipeline.gates.length + pipeline.forks.length + pipeline.joins.length + 1;
+
+  // Does walking forward from `entry` reach `target` before the lane ends?
+  function laneReaches(entry: string, target: string): boolean {
+    let cur = entry;
+    for (let i = 0; i <= bound; i++) {
+      if (cur === target) return true;
+      if (teams.has(cur)) {
+        const next = teams.get(cur)!.outputs?.on_approve;
+        if (!next) return false;
+        cur = next;
+      } else if (gates.has(cur)) {
+        cur = gates.get(cur)!.downstream;
+      } else if (forks.has(cur)) {
+        const ds = pairedJoinDownstream(cur);
+        if (ds === undefined) return false;
+        cur = ds;
+      } else {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  // The join all of a fork's lanes can reach (the derived pairing, validate.rs:101).
+  function pairedJoin(forkId: string) {
+    const f = forks.get(forkId);
+    if (!f) return undefined;
+    return joins.find((jn) => f.lanes.every((lane) => laneReaches(lane, jn.id)));
+  }
+
+  function pairedJoinDownstream(forkId: string): string | undefined {
+    return pairedJoin(forkId)?.downstream;
+  }
+
+  return { teams, gates, forks, joins, bound, laneReaches, pairedJoin, pairedJoinDownstream };
+}
+
+/// fork id -> nesting depth (1-based). Derived purely from the lane-walk the
+/// backend validator performs: a fork's depth is 1 plus the depth of the
+/// deepest fork whose lane reaches it. We compute this by walking every fork's
+/// lanes (depth d) and recording any fork hop encountered at depth d+1, taking
+/// the max. Bounded by node count so it terminates on any (even malformed) input.
+export function forkNestingDepths(pipeline: Pipeline): Map<string, number> {
+  const { teams, gates, forks, bound, pairedJoinDownstream } = laneWalk(pipeline);
+
+  const depth = new Map<string, number>();
+  for (const f of pipeline.forks) depth.set(f.id, 0);
+
+  // Walk a lane at depth d, raising the depth of any fork hop to d+1 (capped).
+  function walkLane(entry: string, d: number, seen: Set<string>): void {
+    let cur = entry;
+    for (let i = 0; i <= bound; i++) {
+      if (teams.has(cur)) {
+        const next = teams.get(cur)!.outputs?.on_approve;
+        if (!next) return;
+        cur = next;
+      } else if (gates.has(cur)) {
+        cur = gates.get(cur)!.downstream;
+      } else if (forks.has(cur)) {
+        const childDepth = Math.min(d + 1, MAX_NESTING_DEPTH);
+        if ((depth.get(cur) ?? 0) < childDepth) depth.set(cur, childDepth);
+        if (!seen.has(cur)) {
+          seen.add(cur);
+          for (const lane of forks.get(cur)!.lanes) walkLane(lane, childDepth, seen);
+        }
+        const ds = pairedJoinDownstream(cur);
+        if (ds === undefined) return;
+        cur = ds;
+      } else {
+        return; // join (the target), escalation, or unknown — lane ends here.
+      }
+    }
+  }
+
+  // Seed: every fork not reachable inside another fork's lane is top-level (depth 1).
+  // We discover nesting by walking each top-level fork; a fork only raised by a
+  // walk keeps that. Run a settle loop bounded by fork count for transitive depth.
+  for (let pass = 0; pass < pipeline.forks.length + 1; pass++) {
+    for (const f of pipeline.forks) {
+      const d = depth.get(f.id) === 0 ? 1 : depth.get(f.id)!;
+      if (depth.get(f.id) === 0) depth.set(f.id, 1);
+      for (const lane of f.lanes) walkLane(lane, d, new Set([f.id]));
+    }
+  }
+
+  return depth;
+}
+
+/// A nested fork (depth >= 2) and the set of node ids that belong to its lane
+/// span (the fork node, every node reachable in its lanes up to and including
+/// its paired join). The renderer draws a labelled containment box around these.
+export interface NestingGroup {
+  forkId: string;
+  depth: number;
+  memberIds: string[];
+}
+
+export function nestingGroups(pipeline: Pipeline): NestingGroup[] {
+  const depths = forkNestingDepths(pipeline);
+  const { teams, gates, forks, bound, pairedJoin, pairedJoinDownstream } = laneWalk(pipeline);
+
+  // Collect every node id reachable inside `forkId`'s lanes, up to its join.
+  // Uses the SAME shared pairing as the depth walk (no simplified matcher).
+  const collect = (forkId: string): string[] => {
+    const f = forks.get(forkId);
+    if (!f) return [forkId];
+    const paired = pairedJoin(forkId);
+    const members = new Set<string>([forkId]);
+    if (paired) members.add(paired.id);
+    for (const lane of f.lanes) {
+      let cur = lane;
+      for (let i = 0; i <= bound; i++) {
+        members.add(cur);
+        if (paired && cur === paired.id) break;
+        if (teams.has(cur)) {
+          const n = teams.get(cur)!.outputs?.on_approve;
+          if (!n) break;
+          cur = n;
+        } else if (gates.has(cur)) {
+          cur = gates.get(cur)!.downstream;
+        } else if (forks.has(cur)) {
+          for (const id of collect(cur)) members.add(id);
+          const ds = pairedJoinDownstream(cur);
+          if (ds === undefined) break;
+          cur = ds;
+        } else {
+          break;
+        }
+      }
+    }
+    return [...members];
+  };
+
+  const groups: NestingGroup[] = [];
+  for (const f of pipeline.forks) {
+    const d = depths.get(f.id) ?? 0;
+    if (d >= 2) groups.push({ forkId: f.id, depth: d, memberIds: collect(f.id) });
+  }
+  return groups;
+}
+
 export function buildPipelineGraph(pipeline: Pipeline): PipelineGraph {
   const nodes = new Map<string, GraphNode>();
   const addNode = (id: string, label: string, role: NodeRole) => {
-    if (!nodes.has(id)) nodes.set(id, { id, label, role, col: 0, row: 0 });
+    if (!nodes.has(id)) nodes.set(id, { id, label, role, col: 0, row: 0, depth: 0 });
   };
 
   for (const t of pipeline.teams) addNode(t.id, t.name || t.id, teamRole(t.name || t.id));
@@ -140,6 +304,21 @@ export function buildPipelineGraph(pipeline: Pipeline): PipelineGraph {
 
   let maxRow = 0;
   for (const r of rowCounter.values()) if (r > maxRow) maxRow = r;
+
+  // Hierarchical depth (AU2): a fork node carries its own nesting depth (1+);
+  // a node inside a nested fork's lane span inherits that fork's depth. A node
+  // in several groups takes the deepest (max), capped at MAX_NESTING_DEPTH.
+  const forkDepth = forkNestingDepths(pipeline);
+  for (const node of nodes.values()) {
+    const fd = forkDepth.get(node.id);
+    if (fd !== undefined) node.depth = Math.max(node.depth, fd); // fork node carries its own depth (1+)
+  }
+  for (const grp of nestingGroups(pipeline)) {
+    for (const id of grp.memberIds) {
+      const n = nodes.get(id);
+      if (n) n.depth = Math.max(n.depth, grp.depth);
+    }
+  }
 
   return { nodes: [...nodes.values()], edges, cols: maxCol + 1, rows: maxRow };
 }
