@@ -153,6 +153,75 @@ pub struct WiringSlice {
     pub gates: Vec<Gate>,
 }
 
+/// A team as the kickoff one-shot emits it (G5/G3): id + name + the full
+/// responsibility `prompt_body` (so the canvas is PREFILLED — no separate Prompts
+/// step), the explicit `role` (G3 — producer vs reviewer; do NOT rely on the name
+/// regex), and the three route edges (G3 — a reviewer arrives with
+/// approve + revise→writer + decline→needs-human wired by construction). Richer
+/// than `SliceTeam` (which is the per-step team-set rename slice).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct KickoffTeam {
+    pub id: String,
+    pub name: String,
+    /// The team's full responsibility prompt (prefill). Non-empty by instruction.
+    #[serde(default)]
+    pub prompt_body: String,
+    /// producer (hand-off) or reviewer (judges approve/revise/reject). G3 sets
+    /// this EXPLICITLY so layout/route inference never falls back to the name regex.
+    #[serde(default)]
+    pub role: Role,
+    #[serde(default)]
+    pub on_approve: Option<String>,
+    #[serde(default)]
+    pub on_revise: Option<String>,
+    #[serde(default)]
+    pub on_reject: Option<String>,
+}
+
+/// The kickoff one-shot slice (G5/G3): a complete recommended graph in ONE
+/// Generate — teams (with prompt bodies + roles + routes), the human-review gates,
+/// and the terminal escalations (e.g. `needs-human`). Distinct from the per-step
+/// `Slice` enum (which the refinement turns reuse); the kickoff replaces the draft
+/// wholesale via `apply_kickoff_slice`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct KickoffSlice {
+    pub teams: Vec<KickoffTeam>,
+    #[serde(default)]
+    pub gates: Vec<Gate>,
+    #[serde(default)]
+    pub escalations: Vec<Escalation>,
+}
+
+/// Apply a kickoff slice to a draft, REPLACING its teams/gates/escalations (the
+/// kickoff is a wholesale generate, not a merge). Each emitted team becomes a
+/// `DraftTeam` carrying the prompt body, role, and routes; technical config keeps
+/// `DraftTeam::new` defaults (runner/scope/store/workers). Pure + tolerant — an
+/// empty slice just yields an empty draft (the wizard can retry). The `id`,
+/// `name`, and `description` already on the draft are preserved.
+pub fn apply_kickoff_slice(draft: &mut DraftPipeline, slice: KickoffSlice) {
+    draft.teams = slice
+        .teams
+        .into_iter()
+        .map(|kt| {
+            let mut t = DraftTeam::new(&kt.id, &kt.name);
+            t.prompt_body = kt.prompt_body;
+            t.role = kt.role;
+            t.outputs = Routes {
+                on_approve: kt.on_approve,
+                on_revise: kt.on_revise,
+                on_reject: kt.on_reject,
+            };
+            t
+        })
+        .collect();
+    draft.gates = slice.gates;
+    draft.escalations = slice.escalations;
+    // The kickoff does not emit fork/join lanes (a linear/reviewed graph); leave
+    // any pre-existing ones cleared so the generated draft is self-consistent.
+    draft.forks = Vec::new();
+    draft.joins = Vec::new();
+}
+
 /// A structured slice the model emits (one per wizard step). Internally tagged on
 /// `kind` so a single fenced ```json block round-trips. The backend is the trust
 /// boundary: only this typed slice mutates the draft, never the model's prose.
