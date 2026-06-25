@@ -174,12 +174,16 @@ export function CardDrawer({
         {/* paddingRight clears the Drawer's absolute close ✕ (top:10/right:12) so
             the stage·attempts text never sits under it (LF30). */}
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, paddingRight: "var(--sp-7)" }}>
-          <span style={{ color: "var(--accent)", fontSize: 12 }}>{task.id}</span>
+          <code style={{ color: "var(--text-3)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+            {task.item_key ?? ""}
+          </code>
           <span style={{ color: "var(--text-3)", fontSize: 11 }}>
             {task.current_stage} · a{task.attempts}
           </span>
         </div>
-        <div style={{ fontSize: 14.5, color: "var(--text)" }}>{task.topic}</div>
+        <div style={{ fontSize: 14.5, color: "var(--text)" }}>
+          {task.topic?.trim() || task.item_key?.trim() || ""}
+        </div>
         {needsHuman && (
           <div
             data-testid="reason-line"

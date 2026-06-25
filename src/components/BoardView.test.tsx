@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { BoardView } from "./BoardView";
+import { BoardView, cardLabel } from "./BoardView";
 import type { Pipeline } from "../ipc/pipeline";
 import type { Task } from "../ipc/runtime";
 
@@ -30,6 +30,14 @@ function task(id: string, stage: string, state: Task["state"], extra: Partial<Ta
   };
 }
 
+describe("cardLabel", () => {
+  it("labels a card by its description (topic), falling back to the slug then id", () => {
+    expect(cardLabel({ topic: "A clear title", item_key: "the-slug", id: "T-1" } as Task)).toBe("A clear title");
+    expect(cardLabel({ topic: "", item_key: "the-slug", id: "T-1" } as Task)).toBe("the-slug");
+    expect(cardLabel({ topic: "", item_key: "", id: "T-1" } as Task)).toBe("T-1");
+  });
+});
+
 describe("BoardView", () => {
   it("renders a lane per node with its label", () => {
     render(<BoardView pipeline={pipeline()} tasks={[]} hasRun onOpenCard={() => {}} />);
@@ -47,7 +55,8 @@ describe("BoardView", () => {
         onOpenCard={() => {}}
       />,
     );
-    expect(screen.getByText("T-1")).toBeInTheDocument();
+    // the card leads with its description (topic), not the raw id
+    expect(screen.getByText("T T-1")).toBeInTheDocument();
   });
 
   it("calls onOpenCard when a card is clicked", () => {
@@ -60,7 +69,7 @@ describe("BoardView", () => {
         onOpenCard={onOpen}
       />,
     );
-    fireEvent.click(screen.getByText("T-1"));
+    fireEvent.click(screen.getByText("T T-1"));
     expect(onOpen).toHaveBeenCalledWith("T-1");
   });
 

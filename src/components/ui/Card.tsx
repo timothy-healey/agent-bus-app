@@ -49,7 +49,6 @@ export function Card({ task, tokens, onClick, label }: CardProps) {
     alignItems: "center",
     gap: 8,
   };
-  const id: CSSProperties = { color: "var(--accent)", fontSize: 11 };
   const title: CSSProperties = {
     color: "var(--text)",
     fontSize: 13,
@@ -72,9 +71,9 @@ export function Card({ task, tokens, onClick, label }: CardProps) {
   return (
     <div className="abp-card" style={root} onClick={() => onClick?.(task.id)}>
       <div style={topRow}>
-        <code style={id}>
+        <code style={{ color: "var(--text-3)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
           {task.state === "revising" ? "↩ " : ""}
-          {task.id}
+          {task.item_key ?? ""}
         </code>
         <StatePill state={task.state} />
       </div>
