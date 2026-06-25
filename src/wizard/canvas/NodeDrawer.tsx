@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import type { DraftPipeline, DraftTeam, EffortMode } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
 import { Drawer } from "../../components/ui/Drawer";
+import { Button } from "../../components/ui/Button";
 import { SkillAutocomplete } from "./SkillAutocomplete";
 import {
   renameTeam,
@@ -37,6 +38,9 @@ interface NodeDrawerProps {
   onClose: () => void;
   /// A4 — discovered skills for the Team prompt's `/`-autocomplete. Default empty.
   skills?: SkillEntry[];
+  /// G9 — delete the selected node (routes through `removeNode` at the host). When
+  /// absent the header delete button is hidden.
+  onDelete?: (id: string) => void;
 }
 
 type Kind = "team" | "gate" | "fork" | "join" | "escalation" | "unknown";
@@ -50,7 +54,7 @@ function kindOf(draft: DraftPipeline, id: string): Kind {
   return "unknown";
 }
 
-export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [] }: NodeDrawerProps) {
+export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [], onDelete }: NodeDrawerProps) {
   const open = selectedId != null;
   const kind = selectedId ? kindOf(draft, selectedId) : "unknown";
 
@@ -58,10 +62,15 @@ export function NodeDrawer({ draft, selectedId, onChange, onClose, skills = [] }
     <Drawer open={open} onClose={onClose} label={selectedId ? `${kind} · ${selectedId}` : "node"}>
       {selectedId && (
         <div style={body}>
-          <header style={{ marginBottom: "var(--sp-5)" }}>
+          <header style={{ marginBottom: "var(--sp-5)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)" }}>
             <div style={{ fontSize: "var(--ts-sm)", color: "var(--text-3)", textTransform: "capitalize", letterSpacing: "0.04em" }}>
               {kind} · <span style={{ color: "var(--text-2)" }}>{selectedId}</span>
             </div>
+            {onDelete && (
+              <Button variant="danger" size="sm" onClick={() => onDelete(selectedId)} aria-label={`delete ${selectedId}`}>
+                Delete
+              </Button>
+            )}
           </header>
           {kind === "team" && <TeamEditor draft={draft} id={selectedId} onChange={onChange} skills={skills} />}
           {kind === "gate" && <GateEditor draft={draft} id={selectedId} onChange={onChange} />}

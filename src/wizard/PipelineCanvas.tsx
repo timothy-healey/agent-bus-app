@@ -1,6 +1,6 @@
 import type React from "react";
 import type { CSSProperties } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -21,6 +21,7 @@ import type { XY } from "./canvas/layout";
 import { addNode, connect, removeNode, removeEdge, NODE_KINDS, type NodeKind } from "./canvas/mutations";
 import { nodeTypes } from "./canvas/nodes/CanvasNodes";
 import { NodeDrawer } from "./canvas/NodeDrawer";
+import { NodeContextMenu } from "./canvas/NodeContextMenu";
 import { Button } from "../components/ui/Button";
 import type { SkillEntry } from "../ipc/skills";
 
@@ -39,6 +40,13 @@ interface PipelineCanvasProps {
   skills?: SkillEntry[];
   /// A4 — re-scan the catalog ("refresh skills" affordance). Hidden when absent.
   onRefreshSkills?: () => void;
+  /// G11 — show the PROMINENT validation banner. The subtle live inline node
+  /// badges always render; the loud banner appears only when the host raises this
+  /// (i.e. on a blocked Continue/Create attempt). Defaults to false.
+  showBanner?: boolean;
+  /// G11 — report current best-effort validity to the host so it can gate the
+  /// nav-tree steps + Continue + Create at attempt time. `issues` is the raw list.
+  onValidityChange?: (valid: boolean, issues: string[]) => void;
 }
 
 /// Edge stroke per route kind (DESIGN.md §Pipeline-editor edges): hand-off /
@@ -59,16 +67,28 @@ const PALETTE_LABEL: Record<NodeKind, string> = {
   escalation: "Escalation",
 };
 
-function CanvasInner({ draft, onChange, skills = [], onRefreshSkills }: PipelineCanvasProps) {
+function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner = false, onValidityChange }: PipelineCanvasProps) {
   // LOCAL, ephemeral position map (spec §Positions) — never persisted.
   const [positions, setPositions] = useState<Record<string, XY>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [issues, setIssues] = useState<string[]>([]);
+  // G9 — the open right-click context menu (null when closed).
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
 
-  // Live best-effort validation (backend stays the authority).
+  // Live best-effort validation (backend stays the authority). The result feeds
+  // both the subtle inline badges (always) and — via onValidityChange — the host's
+  // attempt-time gating (G11). The loud banner is gated separately by showBanner.
+  const onValidityChangeRef = useRef(onValidityChange);
+  onValidityChangeRef.current = onValidityChange;
   useEffect(() => {
     let active = true;
-    bestEffortValidate(draft).then((i) => { if (active) setIssues(i); }).catch(() => {});
+    bestEffortValidate(draft)
+      .then((i) => {
+        if (!active) return;
+        setIssues(i);
+        onValidityChangeRef.current?.(i.length === 0, i);
+      })
+      .catch(() => {});
     return () => { active = false; };
   }, [draft]);
 
@@ -125,6 +145,35 @@ function CanvasInner({ draft, onChange, skills = [], onRefreshSkills }: Pipeline
     setSelectedId(null);
   }, [draft, onChange]);
 
+  // G9 — delete one node by id through the shared removeNode (clears dangling
+  // routes). Used by the context menu, the Delete/Backspace key, and the drawer.
+  const deleteNode = useCallback((id: string) => {
+    onChange(removeNode(draft, id));
+    setSelectedId((cur) => (cur === id ? null : cur));
+    setMenu(null);
+  }, [draft, onChange]);
+
+  // G9 — right-click a node → open the context menu at the cursor.
+  const onNodeContextMenu = useCallback((e: React.MouseEvent, n: RFNode) => {
+    e.preventDefault();
+    setSelectedId(n.id);
+    setMenu({ id: n.id, x: e.clientX, y: e.clientY });
+  }, []);
+
+  // G9 — Delete/Backspace removes the selected node, but NOT while the caret is in
+  // a text field (so editing a node's name/prompt isn't hijacked). React Flow's own
+  // onNodesDelete only fires for its internal key handling; this covers the
+  // selected-via-drawer case and keeps the guard explicit.
+  const onCanvasKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    const el = document.activeElement as HTMLElement | null;
+    const tag = el?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+    if (!selectedId) return;
+    e.preventDefault();
+    deleteNode(selectedId);
+  }, [selectedId, deleteNode]);
+
   // Draw an edge → role-aware Route (producer hand-off vs reviewer approve).
   const onConnect = useCallback((c: Connection) => {
     if (!c.source || !c.target) return;
@@ -156,13 +205,20 @@ function CanvasInner({ draft, onChange, skills = [], onRefreshSkills }: Pipeline
         )}
       </div>
 
-      {issues.length > 0 && (
-        <ul role="status" aria-label="validation issues" style={banner}>
+      {/* G11 — the PROMINENT banner only appears on a blocked attempt (showBanner);
+          the subtle live inline node badges carry validity the rest of the time. */}
+      {showBanner && issues.length > 0 && (
+        <ul role="alert" aria-label="validation issues" style={banner}>
           {issues.map((iss, i) => (<li key={i}>• {iss}</li>))}
         </ul>
       )}
 
-      <div style={canvasWrap} data-testid="pipeline-canvas">
+      <div
+        style={canvasWrap}
+        data-testid="pipeline-canvas"
+        tabIndex={-1}
+        onKeyDown={onCanvasKeyDown}
+      >
         {flow.nodes.length === 0 && (
           <div style={emptyState} aria-hidden>
             Empty pipeline. Add a Team from the palette, or generate a recommended graph from Basics.
@@ -175,6 +231,7 @@ function CanvasInner({ draft, onChange, skills = [], onRefreshSkills }: Pipeline
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodesDelete={onNodesDelete}
+          onNodeContextMenu={onNodeContextMenu}
           onConnect={onConnect}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
@@ -186,7 +243,17 @@ function CanvasInner({ draft, onChange, skills = [], onRefreshSkills }: Pipeline
         </ReactFlow>
       </div>
 
-      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} skills={skills} />
+      {menu && (
+        <NodeContextMenu
+          x={menu.x}
+          y={menu.y}
+          nodeId={menu.id}
+          actions={[{ id: "delete", label: "Delete node", destructive: true, onSelect: () => deleteNode(menu.id) }]}
+          onClose={() => setMenu(null)}
+        />
+      )}
+
+      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} skills={skills} onDelete={deleteNode} />
     </div>
   );
 }

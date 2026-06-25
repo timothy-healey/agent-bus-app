@@ -95,6 +95,10 @@ code, .mono {
 .abp-navstep:hover:not(:disabled):not([aria-current="step"]) { background: var(--surface-2); color: var(--text); }
 .abp-navstep:disabled { opacity: 0.6; }
 
+/* Node context menu (G9): hover/focus highlight on each item */
+.abp-context-item { transition: background var(--dur-fast) var(--ease-out); }
+.abp-context-item:hover, .abp-context-item:focus-visible { background: var(--surface-2); }
+
 /* Loading skeleton (DESIGN.md §States: skeleton lines, never spinners in content) */
 .abp-skeleton {
   height: 0.7em;
