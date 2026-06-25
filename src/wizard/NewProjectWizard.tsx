@@ -261,6 +261,7 @@ export function NewProjectWizard({
             onChange={setDraft}
             skills={skills}
             onRefreshSkills={refreshSkills}
+            sessionId={sessionId}
             showBanner={showBanner}
             targetRepo={targetRepo.trim() || null}
             onValidityChange={(valid) => {

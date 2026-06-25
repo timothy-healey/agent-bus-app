@@ -51,6 +51,10 @@ interface PipelineCanvasProps {
   /// so Scope reads/writes can offer the in-app FileTreePicker rooted here.
   /// Absent (mid-create before a repo is bound) = the comma-text fallback only.
   targetRepo?: string | null;
+  /// G5 — the Design Session dialogue session id, threaded to the NodeDrawer so a
+  /// Team's "regenerate prompt" action runs the Step::Prompts logic over this
+  /// session. Absent → the regenerate action is hidden.
+  sessionId?: string;
 }
 
 /// Edge stroke per route kind (DESIGN.md §Pipeline-editor edges): hand-off /
@@ -82,7 +86,7 @@ const PALETTE_LABEL: Record<NodeKind, string> = {
   escalation: "Escalation",
 };
 
-function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner = false, onValidityChange, targetRepo }: PipelineCanvasProps) {
+function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner = false, onValidityChange, targetRepo, sessionId }: PipelineCanvasProps) {
   // LOCAL, ephemeral position map (spec §Positions) — never persisted.
   const [positions, setPositions] = useState<Record<string, XY>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -285,7 +289,7 @@ function CanvasInner({ draft, onChange, skills = [], onRefreshSkills, showBanner
         />
       )}
 
-      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} skills={skills} onDelete={deleteNode} targetRepo={targetRepo} />
+      <NodeDrawer draft={draft} selectedId={selectedId} onChange={onChange} onClose={() => setSelectedId(null)} skills={skills} onDelete={deleteNode} targetRepo={targetRepo} sessionId={sessionId} />
     </div>
   );
 }

@@ -6,6 +6,13 @@ const testModelMock = vi.fn();
 vi.mock("../../ipc/runner", () => ({ testModel: (m: string) => testModelMock(m) }));
 const listDirMock = vi.fn();
 vi.mock("../../ipc/workspace", () => ({ listDir: (p: string) => listDirMock(p) }));
+// G5 — mock only regenerateTeamPrompt (the chat seam); keep the rest of the
+// pipeline IPC module intact (setPromptBody etc. live in ../draft, not here).
+const regenerateTeamPromptMock = vi.fn();
+vi.mock("../../ipc/pipeline", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../ipc/pipeline")>()),
+  regenerateTeamPrompt: (...a: unknown[]) => regenerateTeamPromptMock(...a),
+}));
 
 import { NodeDrawer } from "./NodeDrawer";
 import { emptyDraft, addTeam } from "../draft";
@@ -216,5 +223,39 @@ describe("NodeDrawer — join editor (Lanes / Quorum / Early-cancel)", () => {
     render(<NodeDrawer draft={joinDraft()} selectedId="join-1" onChange={onChange} onClose={() => {}} />);
     fireEvent.click(screen.getByLabelText("early cancel for join-1"));
     expect(onChange.mock.calls.at(-1)?.[0].joins[0].cancel_on_reject).toBe(true);
+  });
+});
+
+describe("NodeDrawer — G5 regenerate prompt", () => {
+  it("hides the regenerate action when no sessionId is provided", () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    expect(screen.queryByLabelText("regenerate prompt for research")).not.toBeInTheDocument();
+  });
+
+  it("shows the regenerate action when a sessionId is provided", () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} sessionId="sess-1" />);
+    expect(screen.getByLabelText("regenerate prompt for research")).toBeInTheDocument();
+  });
+
+  it("regenerate calls the chat seam and writes the new prompt body", async () => {
+    regenerateTeamPromptMock.mockReset();
+    regenerateTeamPromptMock.mockResolvedValueOnce("You investigate the repo and write findings.");
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} sessionId="sess-1" />);
+    fireEvent.click(screen.getByLabelText("regenerate prompt for research"));
+    await waitFor(() =>
+      expect(onChange.mock.calls.at(-1)?.[0].teams[0].prompt_body).toBe("You investigate the repo and write findings."),
+    );
+    expect(regenerateTeamPromptMock).toHaveBeenCalledWith("sess-1", expect.anything(), "research");
+  });
+
+  it("surfaces an error when no prompt comes back (null)", async () => {
+    regenerateTeamPromptMock.mockReset();
+    regenerateTeamPromptMock.mockResolvedValueOnce(null);
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} sessionId="sess-1" />);
+    fireEvent.click(screen.getByLabelText("regenerate prompt for research"));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/no prompt/i));
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
