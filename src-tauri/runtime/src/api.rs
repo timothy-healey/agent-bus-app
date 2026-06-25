@@ -185,6 +185,9 @@ impl RuntimeState {
             runner: Arc::new(NoopRunner),
             project_root: std::path::PathBuf::from(&active.project_root),
             target_repo,
+            // The gate-verdict context never invokes the runner / composes
+            // artifacts; a project-root-derived base keeps the field consistent.
+            artifact_base: std::path::PathBuf::from(&active.project_root).join("artifacts"),
             read_prompt: Arc::new(|_t: &Team| String::new()),
             revision_reader: self.revision_reader.clone(),
             // The gate-verdict context never invokes the runner, so the
