@@ -51,18 +51,23 @@ const handleStyle: CSSProperties = {
 };
 
 /// G1 store node — a compact, visually distinct synthetic node showing the
-/// bounded-buffer capacity (`▢▢▢ /cap`). Render-only; its drawer edits the owning
-/// team's `store.capacity`.
+/// bounded-buffer capacity (`▢▢▢ /cap`). Deliberately quieter than a team: dashed
+/// neutral border + recessed surface so it reads as plumbing, not a place where
+/// work is authored. Render-only; its drawer edits the owning team's
+/// `store.capacity`.
 const STORE_CELLS_MAX = 5;
 
 function StoreShell({ data, selected }: { data: FlowNodeData; selected: boolean }) {
   const cap = data.capacity ?? 0;
-  const cells = "▢".repeat(Math.min(cap, STORE_CELLS_MAX));
-  const accent = nodeBorderColor("join"); // neutral structural colour (not a role)
+  // Show up to STORE_CELLS_MAX queue cells; the "/cap" readout carries the exact
+  // number when capacity exceeds what we draw (an ellipsis hints at the overflow).
+  const drawn = Math.min(cap, STORE_CELLS_MAX);
+  const cells = "▢".repeat(Math.max(drawn, 1));
+  const overflow = cap > STORE_CELLS_MAX;
   return (
     <div
       style={{
-        minWidth: 96,
+        minWidth: 92,
         maxWidth: 140,
         background: selected ? "var(--accent-2)" : "var(--surface-2)",
         border: `1px dashed ${selected ? "var(--accent-bd)" : "var(--border-2)"}`,
@@ -73,14 +78,16 @@ function StoreShell({ data, selected }: { data: FlowNodeData; selected: boolean 
         textAlign: "center",
       }}
       data-node-kind="store"
-      aria-label={`store for ${data.storeTeamId ?? data.label} capacity ${cap}`}
+      aria-label={`input store for ${data.storeTeamId ?? data.label}, capacity ${cap}`}
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--sp-1)" }}>
-        <span aria-hidden style={{ color: accent, fontSize: "var(--ts-base)", letterSpacing: "0.05em" }}>{cells || "▢"}</span>
-        <span style={{ color: "var(--text-2)", fontSize: "var(--ts-sm)", fontWeight: 500 }}>/{cap}</span>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: "var(--sp-1)" }}>
+        <span aria-hidden style={{ color: "var(--text-3)", fontSize: "var(--ts-base)", letterSpacing: "0.08em" }}>
+          {cells}{overflow ? "…" : ""}
+        </span>
+        <span style={{ color: "var(--text-2)", fontSize: "var(--ts-sm)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>/{cap}</span>
       </div>
-      <div style={{ color: "var(--text-3)", fontSize: "var(--ts-xs)", marginTop: 2 }}>store</div>
+      <div style={{ color: "var(--text-3)", fontSize: "var(--ts-xs)", marginTop: 2, letterSpacing: "0.04em" }}>store</div>
       <Handle type="source" position={Position.Right} style={handleStyle} />
     </div>
   );
