@@ -387,6 +387,9 @@ export default function App() {
           activeRun={activeRun}
           onSelect={selectRun}
           onStartRun={handleStartRun}
+          braked={brake.on}
+          onStop={() => toggleBrake(true)}
+          onResume={() => toggleBrake(false)}
           starting={starting}
           loading={runsLoading}
         />
