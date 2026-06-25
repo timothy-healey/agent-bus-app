@@ -148,6 +148,12 @@ pub struct EngineContext {
     pub project_root: PathBuf,
     /// Project-level `${target_repo}` default (A5); a work-item carries none in v1.
     pub target_repo: Option<PathBuf>,
+    /// Absolute, app-owned artifact base for this run's project:
+    /// `<app_data>/projects/<project_id>/artifacts` (LF26). Artifacts compose
+    /// under `<base>/<stage>/<key>-v<attempt>.md`. Resolved at the composition
+    /// root from the Tauri app-data dir and handed in alongside `project_root`,
+    /// so workers write app-owned files regardless of their cwd.
+    pub artifact_base: PathBuf,
     /// Reads a team's prompt file content (injected so tests don't touch disk).
     pub read_prompt: Arc<dyn Fn(&Team) -> String + Send + Sync>,
     /// Reads a task's persisted revise bundle (revise-once feedback; ④c gate
@@ -314,7 +320,7 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
 
     // 4. BUILD invocation: system prompt = team prompt + output contract; scope
     //    grants write access to this stage's artifact dir (the L1 fix); invoke.
-    let dir = artifact_dir(&team.id);
+    let dir = ctx.artifact_dir(&team.id);
     let already_found: Vec<String> = Vec::new(); // transformers don't dedup
     let system_prompt = format!(
         "{}\n\n{}",
@@ -367,7 +373,7 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     let artifact = first
         .artifact_path
         .clone()
-        .or_else(|| Some(artifact_path(&team.id, &produced_key, task.attempts)));
+        .or_else(|| Some(ctx.artifact_path(&team.id, &produced_key, task.attempts)));
 
     if let Some(ds) = &downstream {
         // The slot is already reserved (step 2); committing = inserting the child
@@ -884,7 +890,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     let found = ctx.ledger.found_keys(&ctx.run_id, &source_team.id).await?;
     let mut found_vec: Vec<String> = found.iter().cloned().collect();
     found_vec.sort();
-    let dir = artifact_dir(&source_team.id);
+    let dir = ctx.artifact_dir(&source_team.id);
     let system_prompt = format!(
         "{}\n\n{}",
         (ctx.read_prompt)(source_team),
@@ -940,7 +946,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
             .iter()
             .find(|i| &i.key == key)
             .and_then(|i| i.artifact_path.clone())
-            .or_else(|| Some(artifact_path(&source_team.id, key, 1)));
+            .or_else(|| Some(ctx.artifact_path(&source_team.id, key, 1)));
         let child = Task::work_item(
             run.project_id.clone(),
             ctx.pipeline.id.clone(),
@@ -1209,10 +1215,14 @@ async fn invoke(
     if let Some(repo) = effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref()) {
         vars = vars.with_target_repo(repo);
     }
-    // Grant write access to this stage's artifact dir (the L1 write-access fix):
-    // inject it into the team scope's writes for this invocation.
+    // Grant write access to this stage's ABSOLUTE artifact dir (the L1 + LF26
+    // fix): the dir is outside the worker's cwd, so it must be in scope.writes
+    // (settings allow) AND surfaced as an --add-dir (the build_settings pass
+    // turns scope.writes into both). Create it so the agent can write there.
+    let artifact_dir = ctx.artifact_dir(&team.id);
+    let _ = std::fs::create_dir_all(&artifact_dir);
     let mut scope = team.scope.clone();
-    scope.writes.push(artifact_dir(&team.id));
+    scope.writes.push(artifact_dir);
     let scope_settings = prepare(&ctx.project_root, &team.id, &task.id.0, now, &scope, &vars)?;
 
     // Compose the user message: the topic on a fresh pass, the topic + the
@@ -1375,20 +1385,37 @@ async fn operational_failure(ctx: &EngineContext, task: &mut Task) -> Result<(),
 }
 
 /// The artifact path for a work-item's output, under `${project}/artifacts/...`.
-/// The engine grants the agent write access to this location (the L1 fix). The
-/// `${project}` token is resolved by the Scope layer at invocation time; here we
-/// compose the stable relative shape `${project}/artifacts/<stage>/<key>-v<attempt>.md`.
-/// `key` is sanitised so a path-like candidate key (e.g. `src/foo.rs`) is a single
-/// safe path segment. PURE.
-pub fn artifact_path(stage: &str, key: &str, attempt: u32) -> String {
+/// Compose the absolute artifact path for a work-item's output under `base`:
+/// `<base>/<stage>/<key>-v<attempt>.md`. `key` is sanitised to one safe path
+/// segment. PURE.
+pub fn compose_artifact_path(
+    base: &std::path::Path,
+    stage: &str,
+    key: &str,
+    attempt: u32,
+) -> String {
     let safe_key = sanitize_key(key);
-    format!("${{project}}/artifacts/{stage}/{safe_key}-v{attempt}.md")
+    base.join(stage)
+        .join(format!("{safe_key}-v{attempt}.md"))
+        .to_string_lossy()
+        .into_owned()
 }
 
-/// The directory artifacts for `stage` live under (handed to `output_contract`
-/// and granted write access). PURE.
-pub fn artifact_dir(stage: &str) -> String {
-    format!("${{project}}/artifacts/{stage}")
+/// Compose the absolute artifact directory for `stage` under `base`:
+/// `<base>/<stage>` (granted write access + handed to `output_contract`). PURE.
+pub fn compose_artifact_dir(base: &std::path::Path, stage: &str) -> String {
+    base.join(stage).to_string_lossy().into_owned()
+}
+
+impl EngineContext {
+    /// This run's absolute artifact path for `stage`/`key`/`attempt`.
+    pub fn artifact_path(&self, stage: &str, key: &str, attempt: u32) -> String {
+        compose_artifact_path(&self.artifact_base, stage, key, attempt)
+    }
+    /// This run's absolute artifact directory for `stage`.
+    pub fn artifact_dir(&self, stage: &str) -> String {
+        compose_artifact_dir(&self.artifact_base, stage)
+    }
 }
 
 /// Turn a candidate key into one safe path segment: non-alphanumeric runs become
@@ -1504,6 +1531,7 @@ pub(crate) mod test_support {
             runner,
             project_root: temp_root(),
             target_repo: None,
+            artifact_base: temp_root().join("artifacts"),
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
             revision_reader: None,
             usage_sink: None,
@@ -2410,20 +2438,39 @@ mod tests {
     }
 
     #[test]
-    fn artifact_path_is_under_project_artifacts_with_stage_and_key() {
-        let p = artifact_path("spec", "alpha", 1);
-        assert_eq!(p, "${project}/artifacts/spec/alpha-v1.md");
+    fn artifact_path_is_absolute_under_the_app_data_base() {
+        let base = std::path::PathBuf::from("/data/projects/p1/artifacts");
+        assert_eq!(
+            super::compose_artifact_path(&base, "spec", "my key/ish", 2),
+            "/data/projects/p1/artifacts/spec/my-key-ish-v2.md"
+        );
+        assert_eq!(
+            super::compose_artifact_dir(&base, "spec"),
+            "/data/projects/p1/artifacts/spec"
+        );
+    }
+
+    #[test]
+    fn artifact_path_is_under_base_artifacts_with_stage_and_key() {
+        let base = std::path::PathBuf::from("/data/projects/p1/artifacts");
+        let p = super::compose_artifact_path(&base, "spec", "alpha", 1);
+        assert_eq!(p, "/data/projects/p1/artifacts/spec/alpha-v1.md");
     }
 
     #[test]
     fn artifact_path_sanitizes_path_like_keys_to_one_segment() {
-        let p = artifact_path("research", "src/foo/bar.rs", 2);
-        assert_eq!(p, "${project}/artifacts/research/src-foo-bar-rs-v2.md");
+        let base = std::path::PathBuf::from("/data/projects/p1/artifacts");
+        let p = super::compose_artifact_path(&base, "research", "src/foo/bar.rs", 2);
+        assert_eq!(p, "/data/projects/p1/artifacts/research/src-foo-bar-rs-v2.md");
     }
 
     #[test]
     fn artifact_dir_matches_the_path_prefix() {
-        assert_eq!(artifact_dir("spec"), "${project}/artifacts/spec");
+        let base = std::path::PathBuf::from("/data/projects/p1/artifacts");
+        assert_eq!(
+            super::compose_artifact_dir(&base, "spec"),
+            "/data/projects/p1/artifacts/spec"
+        );
     }
 
     #[test]
