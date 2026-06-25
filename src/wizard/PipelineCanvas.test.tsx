@@ -56,6 +56,18 @@ describe("PipelineCanvas", () => {
     await waitFor(() => expect(screen.getByRole("alert", { name: /validation issues/i })).toHaveTextContent(/no prompt yet/));
   });
 
+  it("surfaces a backend out-of-range quorum issue in the banner — AU1", async () => {
+    // The quorum-range rule is enforced by the backend best_effort_validate
+    // (single source of truth); the canvas only needs to surface what it returns.
+    const { bestEffortValidate } = await import("../ipc/pipeline");
+    const msg = "join 'join-1' quorum 3 out of range (must be 1..=2)";
+    (bestEffortValidate as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([msg]);
+    const onValidityChange = vi.fn();
+    render(<PipelineCanvas draft={addTeam(emptyDraft(), "a", "A")} onChange={() => {}} showBanner onValidityChange={onValidityChange} />);
+    await waitFor(() => expect(screen.getByRole("alert", { name: /validation issues/i })).toHaveTextContent(/out of range/));
+    expect(onValidityChange).toHaveBeenCalledWith(false, [msg]);
+  });
+
   it("reports validity to the host via onValidityChange — G11", async () => {
     const { bestEffortValidate } = await import("../ipc/pipeline");
     (bestEffortValidate as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(["team 'a' has no prompt yet"]);
