@@ -3,6 +3,7 @@
 pub mod project;
 pub mod store;
 pub mod api;
+pub mod dir_listing;
 pub mod git_config;
 pub mod paths;
 pub mod worktree;

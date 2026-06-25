@@ -1301,6 +1301,7 @@ pub fn run() {
             list_skills,
             workspace::worktree::list_worktrees,
             workspace::worktree::remove_worktree,
+            workspace::dir_listing::list_dir,
             workspace::api::read_artifact,
             workspace::git_config::git_config_get,
             workspace::git_config::git_config_set,

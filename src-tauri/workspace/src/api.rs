@@ -370,6 +370,16 @@ pub fn tools() -> Vec<ToolSpec> {
             }),
             supplier_context: "workspace".into(),
         },
+        ToolSpec {
+            name: "list_dir".into(),
+            description: "List a directory's immediate children (dirs-first) for the in-app file/folder picker.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+            supplier_context: "workspace".into(),
+        },
     ]
 }
 
@@ -504,6 +514,12 @@ mod tests {
         let t = tools();
         assert!(t.iter().any(|s| s.name == "list_worktrees" && s.supplier_context == "workspace"));
         assert!(t.iter().any(|s| s.name == "remove_worktree" && s.supplier_context == "workspace"));
+    }
+
+    #[test]
+    fn tools_publishes_list_dir_under_workspace() {
+        let t = tools();
+        assert!(t.iter().any(|s| s.name == "list_dir" && s.supplier_context == "workspace"));
     }
 
     #[test]
