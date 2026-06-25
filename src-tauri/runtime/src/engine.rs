@@ -260,6 +260,15 @@ pub fn generator_task_id(run_id: &str, source_stage: &str) -> String {
     format!("gen:{run_id}:{source_stage}")
 }
 
+/// Whether a generator step's outcome means the pass is no longer in flight (the
+/// loop emits `active:false`). Every generator-step outcome is terminal for the
+/// pass — the loop sets `active:true` before the step and clears it after, so this
+/// is always true today; it exists as the single named predicate the loop reads
+/// (keeps `runtime` Tauri-free — the loop does the emitting). Pure.
+pub fn generator_pass_settled(_outcome: &StepOutcome) -> bool {
+    true
+}
+
 /// The human-readable topic for a produced work-item (LF32): the agent's
 /// `DESCRIPTION:` when present, else a de-kebabbed title derived from the slug
 /// (`item_key`) — hyphens/underscores to spaces, first letter capitalised. Pure.
@@ -1603,6 +1612,18 @@ mod tests {
     #[test]
     fn generator_task_id_is_stable_per_run_and_source_stage() {
         assert_eq!(generator_task_id("R-7", "research"), "gen:R-7:research");
+    }
+
+    #[test]
+    fn generator_pass_is_active_only_while_a_pass_is_in_flight() {
+        // A pass that committed keys is no longer "in flight" once we observe the
+        // outcome; activity is signalled by the loop BEFORE invoke and cleared
+        // AFTER. The engine exposes the terminal (settled/dry) predicate so the
+        // loop knows when to emit active:false.
+        assert!(generator_pass_settled(&StepOutcome::Generated { keys: vec!["k".into()] }));
+        assert!(generator_pass_settled(&StepOutcome::Retired));
+        assert!(generator_pass_settled(&StepOutcome::Backpressure));
+        assert!(generator_pass_settled(&StepOutcome::Braked));
     }
 
     #[test]
