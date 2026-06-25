@@ -155,6 +155,25 @@ impl RunStore {
             .collect())
     }
 
+    /// Re-open a run for an operator retry (L2): clear `completed` AND
+    /// `generator_dry` so the worker loops drive it again (the loop polls
+    /// `latest_active_for_project`, which only returns not-completed runs; and
+    /// `generate_once` retires immediately on a dry run). Idempotent: re-opening
+    /// an already-open run is a harmless no-op. A re-queued work-item lands at a
+    /// transformer stage, not the generator, so clearing `generator_dry` does not
+    /// re-run the source — it only lets `try_finish_run`'s precondition be
+    /// re-evaluated rather than the run staying wedged completed.
+    pub async fn reopen(&self, run_id: &str) -> Result<(), RunStoreError> {
+        let res = sqlx::query("UPDATE runs SET completed = 0, generator_dry = 0 WHERE id = ?")
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(RunStoreError::NotFound(run_id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Attempt to complete the run exactly once. The conditional UPDATE is the
     /// guard: `rows_affected == 1` ⇒ this caller is the sole completer; `0` ⇒ the
     /// run was already completed (another caller won, or a re-call). The
@@ -213,6 +232,30 @@ mod tests {
         // idempotent
         store.set_generator_dry("R1").await.unwrap();
         assert!(store.get("R1").await.unwrap().generator_dry);
+    }
+
+    #[tokio::test]
+    async fn reopen_clears_completed_and_generator_dry() {
+        let store = RunStore::new(fresh_pool().await);
+        store.create(&run()).await.unwrap();
+        store.set_generator_dry("R1").await.unwrap();
+        store.try_complete("R1").await.unwrap();
+        let r = store.get("R1").await.unwrap();
+        assert!(r.completed && r.generator_dry);
+        store.reopen("R1").await.unwrap();
+        let r = store.get("R1").await.unwrap();
+        assert!(!r.completed, "reopen clears completed");
+        assert!(!r.generator_dry, "reopen clears generator_dry");
+        // idempotent on an already-open run
+        store.reopen("R1").await.unwrap();
+        // can be completed again afterwards
+        assert!(store.try_complete("R1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reopen_missing_is_not_found() {
+        let store = RunStore::new(fresh_pool().await);
+        assert!(matches!(store.reopen("nope").await, Err(RunStoreError::NotFound(_))));
     }
 
     #[tokio::test]
