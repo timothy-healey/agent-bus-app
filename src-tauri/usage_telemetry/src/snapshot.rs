@@ -32,7 +32,9 @@ pub struct UsageConfig {
 impl Default for UsageConfig {
     fn default() -> Self {
         Self {
-            window_budget: 2_600_000,
+            // all-tokens basis incl. cache (LF34): ~67.2M live throughput ≈ 35%
+            // ⟹ ~192M; rounded. Tunable estimate, not an exact claude.ai mirror (G6).
+            window_budget: 190_000_000,
             window_secs: 18_000,
             brake_on_pct: 0.95,
             brake_off_pct: 0.85,
