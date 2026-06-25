@@ -65,6 +65,16 @@ describe("useComments", () => {
     await waitFor(() => expect(result.current.comments).toHaveLength(0));
   });
 
+  it("is a no-op for a synthetic gen: id (no list/add/persist)", async () => {
+    const { result } = renderHook(() => useComments("gen:R-1:research", "artifacts/gen:R-1:research.md"));
+    await waitFor(() => expect(result.current.comments).toHaveLength(0));
+    expect(listMock).not.toHaveBeenCalled();
+    await act(async () => {
+      await result.current.add({ note: "n", kind: "inline" });
+    });
+    expect(addMock).not.toHaveBeenCalled();
+  });
+
   it("reanchored falls back to status open at stored offset with no version markdown", async () => {
     listMock.mockResolvedValueOnce([
       { id: "c1", anchor_offset: 5, note: "n", kind: "inline" },
