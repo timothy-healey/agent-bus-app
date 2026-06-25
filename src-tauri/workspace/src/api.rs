@@ -155,6 +155,7 @@ pub async fn workspace_set_skill_sources(
 /// of an already-deleted project).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_remove_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, WorkspaceState>,
     worktrees: tauri::State<'_, crate::worktree::WorktreeState>,
     id: String,
@@ -190,6 +191,14 @@ pub async fn workspace_remove_project(
         );
     }
 
+    // 4. App-owned artifact data dir cleanup (LF26): remove
+    // <app_data>/projects/<id> (artifacts live there). Best-effort; never
+    // touches target_repo.
+    use tauri::Manager;
+    if let Ok(app_data) = app.path().app_data_dir() {
+        remove_app_data_project_dir(&app_data, &project_id.0);
+    }
+
     Ok(())
 }
 
@@ -212,6 +221,23 @@ pub fn resolve_under_root(root: &str, rel_path: &str) -> Result<PathBuf, String>
         }
     }
     Ok(out)
+}
+
+/// The app-owned data dir for a project: `<app_data>/projects/<project_id>`
+/// (parent of the artifacts dir). Removed on project delete. PURE.
+pub fn app_data_project_dir(app_data: &Path, project_id: &str) -> PathBuf {
+    app_data.join("projects").join(project_id)
+}
+
+/// Best-effort removal of the app-owned project data dir (artifacts live here).
+/// Never touches `target_repo`. A missing dir is fine.
+pub fn remove_app_data_project_dir(app_data: &Path, project_id: &str) {
+    let dir = app_data_project_dir(app_data, project_id);
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("workspace_remove_project: app-data cleanup for {project_id} failed: {e}");
+        }
+    }
 }
 
 /// The absolute, app-owned artifact base for `project_id` under the Tauri
@@ -487,6 +513,24 @@ mod tests {
         // a relative path is still accepted, resolved under the base
         let rel = super::resolve_under_base(&base, "spec/k-v1.md").unwrap();
         assert_eq!(rel, std::path::PathBuf::from("/data/projects/p/artifacts/spec/k-v1.md"));
+    }
+
+    #[test]
+    fn app_data_project_dir_is_under_projects_id() {
+        let d = super::app_data_project_dir(std::path::Path::new("/data"), "p9");
+        assert_eq!(d, std::path::PathBuf::from("/data/projects/p9"));
+    }
+
+    #[test]
+    fn remove_app_data_project_dir_is_best_effort_and_removes_the_tree() {
+        let tmp = std::env::temp_dir().join(format!("abtest-{}", uuid::Uuid::new_v4()));
+        let proj = super::app_data_project_dir(&tmp, "p1");
+        std::fs::create_dir_all(proj.join("artifacts/spec")).unwrap();
+        std::fs::write(proj.join("artifacts/spec/k-v1.md"), b"x").unwrap();
+        super::remove_app_data_project_dir(&tmp, "p1");
+        assert!(!proj.exists());
+        // calling again on a missing dir does not panic
+        super::remove_app_data_project_dir(&tmp, "p1");
     }
 
     async fn state_with_project(root: &std::path::Path) -> (WorkspaceState, String) {
