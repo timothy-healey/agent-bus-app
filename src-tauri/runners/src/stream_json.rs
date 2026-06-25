@@ -178,6 +178,9 @@ pub struct OutputItem {
     /// The reviewer verdict for this item, if the agent emitted one. `None` for
     /// producer/generator items (which imply forward).
     pub verdict: Option<Verdict>,
+    /// A short (<=~80 char) plain-language summary the agent wrote alongside the
+    /// item (the `DESCRIPTION:` line). `None` when absent (legacy/transform items).
+    pub description: Option<String>,
 }
 
 /// Parse the agent's emitted item list (Runtime redesign ④b / L1 output contract).
@@ -215,13 +218,26 @@ pub fn parse_items(text: &str) -> Vec<OutputItem> {
                 key: rest.trim().to_string(),
                 artifact_path: None,
                 verdict: None,
+                description: None,
             });
+        } else if let Some(rest) = line.strip_prefix("DESCRIPTION:") {
+            let d = rest.trim();
+            let item = current.get_or_insert_with(|| OutputItem {
+                key: String::new(),
+                artifact_path: None,
+                verdict: None,
+                description: None,
+            });
+            if !d.is_empty() {
+                item.description = Some(d.to_string());
+            }
         } else if let Some(rest) = line.strip_prefix("ARTIFACT:") {
             let p = rest.trim();
             let item = current.get_or_insert_with(|| OutputItem {
                 key: String::new(),
                 artifact_path: None,
                 verdict: None,
+                description: None,
             });
             if !p.is_empty() {
                 item.artifact_path = Some(p.to_string());
@@ -231,6 +247,7 @@ pub fn parse_items(text: &str) -> Vec<OutputItem> {
                 key: String::new(),
                 artifact_path: None,
                 verdict: None,
+                description: None,
             });
             item.verdict = Some(verdict_of(rest));
         }
@@ -440,6 +457,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_items_captures_description_per_item() {
+        let text = "\
+KEY: lwv-a1-logdelta-seam
+DESCRIPTION: Tag stream deltas as output or thinking
+ARTIFACT: artifacts/specs/a1.md
+KEY: lwv-a2-no-desc
+ARTIFACT: artifacts/specs/a2.md";
+        let items = parse_items(text);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].description.as_deref(), Some("Tag stream deltas as output or thinking"));
+        assert_eq!(items[1].description, None);
+    }
+
+    #[test]
     fn parse_items_reads_a_list_of_n_items() {
         let text = "\
 KEY: alpha
@@ -452,9 +483,9 @@ KEY: gamma
 ARTIFACT: artifacts/specs/gamma.md";
         let items = parse_items(text);
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0], OutputItem { key: "alpha".into(), artifact_path: Some("artifacts/specs/alpha.md".into()), verdict: Some(Verdict::Approve) });
-        assert_eq!(items[1], OutputItem { key: "beta".into(), artifact_path: Some("artifacts/specs/beta.md".into()), verdict: Some(Verdict::Revise) });
-        assert_eq!(items[2], OutputItem { key: "gamma".into(), artifact_path: Some("artifacts/specs/gamma.md".into()), verdict: None });
+        assert_eq!(items[0], OutputItem { key: "alpha".into(), artifact_path: Some("artifacts/specs/alpha.md".into()), verdict: Some(Verdict::Approve), description: None });
+        assert_eq!(items[1], OutputItem { key: "beta".into(), artifact_path: Some("artifacts/specs/beta.md".into()), verdict: Some(Verdict::Revise), description: None });
+        assert_eq!(items[2], OutputItem { key: "gamma".into(), artifact_path: Some("artifacts/specs/gamma.md".into()), verdict: None, description: None });
     }
 
     #[test]
@@ -478,7 +509,7 @@ ARTIFACT: artifacts/specs/gamma.md";
         assert_eq!(items[0].verdict, Some(Verdict::Revise));
         // a KEY with no artifact/verdict is still an item
         let items = parse_items("KEY: only");
-        assert_eq!(items, vec![OutputItem { key: "only".into(), artifact_path: None, verdict: None }]);
+        assert_eq!(items, vec![OutputItem { key: "only".into(), artifact_path: None, verdict: None, description: None }]);
     }
 
     #[test]
