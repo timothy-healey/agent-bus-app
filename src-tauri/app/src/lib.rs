@@ -783,16 +783,18 @@ async fn create_project_from_draft(
 /// know about) gets its `kill_all` on Stop. Replaces `runtime::api::brake_on` in
 /// the invoke handler; sets the brake then kills every in-flight `claude` group.
 #[tauri::command(rename_all = "snake_case")]
-fn brake_on(
+async fn brake_on(
     runtime: tauri::State<'_, Arc<RuntimeState>>,
     registry: tauri::State<'_, Arc<process_registry::ProcessRegistry>>,
     reason: Option<String>,
-) -> runtime::brake::BrakeState {
+) -> Result<runtime::brake::BrakeState, String> {
     runtime.brake.set_on(reason.unwrap_or_else(|| "manual".into()));
     // LH5: Stop kills WORKERS only — the user's in-flight chat survives. Exit
-    // (the RunEvent handler) still kill_all()s both.
-    registry.kill_workers();
-    runtime.brake.state()
+    // (the RunEvent handler) still kill_all()s both. LH3: the bounded grace runs
+    // on the blocking pool so it never stalls a Tokio worker; the user-facing
+    // Stop awaits the kill so the UI is truthful.
+    registry.kill_workers_blocking().await;
+    Ok(runtime.brake.state())
 }
 
 /// OHS command: activate a project's runtime (swap the active pipeline + respawn
@@ -1102,7 +1104,8 @@ impl ToolDispatcher for RootDispatcher {
                 let s = self.runtime.brake.clone();
                 s.set_on(args.reason.unwrap_or_else(|| "manual".into()));
                 // LH5: Stop kills WORKERS only; the in-flight chat survives.
-                self.process_registry.kill_workers();
+                // LH3: offload the bounded grace off the Tokio worker thread.
+                self.process_registry.kill_workers_blocking().await;
                 let _ = self.app.emit(crate::events::USAGE_CHANGED, ());
                 ok(serde_json::to_value(s.state()).unwrap())
             }
