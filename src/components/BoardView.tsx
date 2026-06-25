@@ -22,7 +22,8 @@ export interface BoardViewProps {
 /// identity — ④e); legacy/topic tasks fall back to their topic, then their id so
 /// a card is never blank.
 export function cardLabel(task: Task): string {
-  return task.item_key?.trim() || task.topic?.trim() || task.id;
+  // LF32: lead with the human description (topic); fall back to the slug, then id.
+  return task.topic?.trim() || task.item_key?.trim() || task.id;
 }
 
 function laneHeaderStyle(lane: Lane): CSSProperties {

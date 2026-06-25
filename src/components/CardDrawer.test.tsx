@@ -56,7 +56,9 @@ describe("CardDrawer", () => {
         onReject={() => {}}
       />,
     );
-    expect(screen.getByText("T-40")).toBeInTheDocument();
+    // the head leads with the topic (description); the raw task id is gone (LF32)
+    expect(screen.getByText("Scheduling bulk-write")).toBeInTheDocument();
+    expect(screen.queryByText("T-40")).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /artifact/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /live log/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /review/i })).toBeInTheDocument();
@@ -116,6 +118,24 @@ describe("CardDrawer", () => {
     const log = screen.getByTestId("live-log");
     expect(log.getAttribute("data-log-state")).toBe("streaming");
     expect(log.textContent).toContain("working on it");
+  });
+
+  it("leads the head with the description and shows the slug, not the raw task id", () => {
+    render(
+      <CardDrawer
+        task={task({ id: "T-abc-123", topic: "Investigate the seam", item_key: "lwv-a1-seam", current_stage: "spec", attempts: 2 })}
+        artifactMarkdown="# Plan"
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    expect(screen.getByText("Investigate the seam")).toBeInTheDocument();
+    expect(screen.getByText("lwv-a1-seam")).toBeInTheDocument();
+    // the raw id is gone from the headline
+    expect(screen.queryByText("T-abc-123")).not.toBeInTheDocument();
+    // the stage · attempts line stays
+    expect(screen.getByText(/spec · a2/)).toBeInTheDocument();
   });
 
   it("renders output as prose and thinking dimmed with a marker", () => {

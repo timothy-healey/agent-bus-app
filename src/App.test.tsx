@@ -108,11 +108,12 @@ describe("App board integration", () => {
 
   it("renders the board with the gated card and opens the drawer on click", async () => {
     render(<App />);
-    await waitFor(() => expect(screen.getByText("T-40")).toBeInTheDocument());
+    // LF32: the card leads with its description (topic), not the raw id.
+    await waitFor(() => expect(screen.getByText("Scheduling bulk-write")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Scheduling bulk-write"));
-    // drawer head shows the id (appears again inside the drawer)
+    // the drawer head also leads with the topic (it appears again inside the drawer)
     await waitFor(() =>
-      expect(screen.getAllByText("T-40").length).toBeGreaterThan(1),
+      expect(screen.getAllByText("Scheduling bulk-write").length).toBeGreaterThan(1),
     );
   });
 

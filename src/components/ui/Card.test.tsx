@@ -18,14 +18,18 @@ function task(over: Partial<Task> = {}): Task {
     review_artifact: null,
     created_at: 0,
     updated_at: 0,
+    run_id: null,
+    item_key: "patient-records",
     ...over,
   };
 }
 
 describe("Card", () => {
-  it("shows id, topic, attempts and state label", () => {
+  it("shows the slug, topic, attempts and state label (not the raw id)", () => {
     render(<Card task={task()} tokens={47_000} />);
-    expect(screen.getByText("T-42")).toBeInTheDocument();
+    // LF32: the slug is the secondary mono metadata; the raw task id is gone.
+    expect(screen.getByText("patient-records")).toBeInTheDocument();
+    expect(screen.queryByText("T-42")).not.toBeInTheDocument();
     expect(screen.getByText("Patient Records bulk-write")).toBeInTheDocument();
     expect(screen.getByText("running")).toBeInTheDocument();
     expect(screen.getByText("a1")).toBeInTheDocument();
