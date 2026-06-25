@@ -17,18 +17,52 @@ pub enum RegisterDecision {
     KillImmediately,
 }
 
+/// Per-entry scope (LH5): a manual Stop kills only `Worker` entries (the user's
+/// in-flight chat survives); app-exit kills `All`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scope {
+    Worker,
+    Chat,
+}
+
+/// Latch granularity (LH5): `None` = open; `Some(Workers)` = workers self-kill on
+/// register but chat may still spawn (a Stop is in progress); `Some(All)` =
+/// nothing spawns (app-exit). A scope-aware latch is what preserves
+/// chat-exemption from a Stop — a boolean latch would regress it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KillScope {
+    Workers,
+    All,
+}
+
+/// One live process-group entry: its scope + the owned child handle (`None` once
+/// the reaper took it out to `.wait()`, or when registered without an owned
+/// `Child` via the bare back-compat helpers).
+type Entry = (Scope, Arc<Mutex<Option<std::process::Child>>>);
+
 /// The lock-guarded interior of the registry: the live process-group map plus
 /// the kill latch. One critical section orders the latch read/write with the
 /// map so a register cannot race past an in-progress kill (LH1).
 #[derive(Default)]
 struct Inner {
-    /// pgid -> owned child handle (LH2: held until reaped, so kill_all never
-    /// signals a recycled pgid). `None` once the reaper took it out to `.wait()`,
-    /// or when registered via the bare `register`/`register_pgid` helpers (tests
-    /// / back-compat) where no `Child` is owned.
-    groups: HashMap<i32, Arc<Mutex<Option<std::process::Child>>>>,
-    /// Latch: while set, no new child may register (it self-kills instead).
-    killing: bool,
+    /// pgid -> (scope, owned child handle). The owned `Child` is held until
+    /// reaped, so kill never signals a recycled pgid (LH2).
+    groups: HashMap<i32, Entry>,
+    /// Scoped kill latch: while set, a new child whose scope the latch COVERS
+    /// self-kills on register instead of being tracked (LH1/LH5).
+    killing: Option<KillScope>,
+}
+
+impl KillScope {
+    /// Does a latch at this scope cover (force self-kill of) a registering entry
+    /// of `scope`? An `All` latch covers everything; a `Workers` latch covers
+    /// only workers (chat is exempt from a Stop).
+    fn covers(self, scope: Scope) -> bool {
+        match self {
+            KillScope::All => true,
+            KillScope::Workers => scope == Scope::Worker,
+        }
+    }
 }
 
 /// Shared registry of live child process-group ids (pgid == leader pid because
@@ -46,58 +80,71 @@ impl ProcessRegistry {
         }
     }
 
-    /// Set the killing latch (called at the start of kill_all / kill_workers).
+    /// Set the killing latch to ALL scope (app-exit: nothing spawns). Called at
+    /// the start of kill_all.
     pub fn begin_killing(&self) {
-        self.inner.lock().unwrap().killing = true;
+        self.inner.lock().unwrap().killing = Some(KillScope::All);
+    }
+
+    /// Set the killing latch to WORKERS scope (a Stop: workers self-kill on
+    /// register, chat is exempt). Called at the start of kill_workers.
+    pub fn begin_kill_workers(&self) {
+        self.inner.lock().unwrap().killing = Some(KillScope::Workers);
     }
 
     /// Clear the latch — re-enable normal spawning (wire on brake-off / resume).
     pub fn end_killing(&self) {
-        self.inner.lock().unwrap().killing = false;
+        self.inner.lock().unwrap().killing = None;
     }
 
-    /// Register a freshly-spawned pgid under the lock. If the latch is set the
-    /// spawner is told to self-kill its child instead of tracking it.
+    /// Register a freshly-spawned pgid under the lock (Worker scope, no owned
+    /// Child). If the latch covers this scope the spawner self-kills instead.
     pub fn register_pgid(&self, pgid: i32) -> RegisterDecision {
         let mut g = self.inner.lock().unwrap();
-        if g.killing {
+        if g.killing.is_some_and(|k| k.covers(Scope::Worker)) {
             return RegisterDecision::KillImmediately;
         }
-        g.groups.insert(pgid, Arc::new(Mutex::new(None)));
+        g.groups
+            .insert(pgid, (Scope::Worker, Arc::new(Mutex::new(None))));
         RegisterDecision::Registered
     }
 
-    /// Register the owned Child under the lock (LH2). Returns the decision; on
-    /// `Registered` the entry holds the Child so kill_all signals only live pids.
-    pub(crate) fn register_child(
+    /// Register the owned Child under the lock with an explicit scope (LH2/LH5).
+    /// On `Registered` the entry holds the Child so a kill signals only live pids;
+    /// the spawner self-kills only when the latch covers this entry's scope.
+    pub(crate) fn register_child_scoped(
         &self,
         pgid: i32,
         child: std::process::Child,
+        scope: Scope,
     ) -> RegisterDecision {
         let mut g = self.inner.lock().unwrap();
-        if g.killing {
+        if g.killing.is_some_and(|k| k.covers(scope)) {
             return RegisterDecision::KillImmediately;
         }
-        g.groups.insert(pgid, Arc::new(Mutex::new(Some(child))));
+        g.groups
+            .insert(pgid, (scope, Arc::new(Mutex::new(Some(child)))));
         RegisterDecision::Registered
     }
 
     /// Take the owned Child out of the registry under the lock (the reaper calls
-    /// this immediately before `.wait()`), so kill_all can never observe a pgid
+    /// this immediately before `.wait()`), so a kill can never observe a pgid
     /// whose process was already reaped+recycled.
     pub(crate) fn take_child(&self, pgid: i32) -> Option<std::process::Child> {
         let mut g = self.inner.lock().unwrap();
-        g.groups.remove(&pgid).and_then(|c| c.lock().unwrap().take())
+        g.groups
+            .remove(&pgid)
+            .and_then(|(_, c)| c.lock().unwrap().take())
     }
 
-    /// Record a live child process-group id (the spawner calls this right after
-    /// spawn). Idempotent — re-registering the same pgid is a no-op.
+    /// Record a live child process-group id (Worker scope, no owned Child).
+    /// Idempotent — re-registering the same pgid is a no-op.
     pub fn register(&self, pgid: i32) {
         self.inner
             .lock()
             .unwrap()
             .groups
-            .insert(pgid, Arc::new(Mutex::new(None)));
+            .insert(pgid, (Scope::Worker, Arc::new(Mutex::new(None))));
     }
 
     /// Drop a process-group id once its child has been waited on. A pgid that is
@@ -127,16 +174,37 @@ impl ProcessRegistry {
     /// so pgid == the child's pid), so `claude`'s own tool/subagent children die
     /// too. On non-unix this is a logged no-op (the documented Windows gap).
     pub fn kill_all(&self) {
-        // Set the latch FIRST so any child racing past the brake gate self-kills
-        // on register instead of escaping the snapshot. The latch stays set until
-        // end_killing() (brake-off / resume) — kill_all never clears it.
+        // Set the latch FIRST (ALL scope: nothing spawns) so any child racing past
+        // the brake gate self-kills on register instead of escaping the snapshot.
+        // The latch stays set until end_killing() — kill_all never clears it.
         self.begin_killing();
         // Take every entry OUT under the lock: we now own each `Child`, so the
         // leader pid stays un-reaped (un-recyclable) until after we SIGKILL it —
         // closing the PID-reuse window (LH2). Drains the registry.
         let taken: Vec<(i32, Arc<Mutex<Option<std::process::Child>>>)> = {
             let mut g = self.inner.lock().unwrap();
-            g.groups.drain().collect()
+            g.groups.drain().map(|(p, (_, c))| (p, c)).collect()
+        };
+        self.signal_and_reap(taken);
+    }
+
+    /// LH5: kill only WORKER-scoped groups (a manual Stop). The user's in-flight
+    /// chat (`Scope::Chat`) survives. Sets a workers-only latch so a racing worker
+    /// spawn self-kills but a racing chat spawn is exempt.
+    pub fn kill_workers(&self) {
+        self.begin_kill_workers();
+        let taken: Vec<(i32, Arc<Mutex<Option<std::process::Child>>>)> = {
+            let mut g = self.inner.lock().unwrap();
+            let worker_pgids: Vec<i32> = g
+                .groups
+                .iter()
+                .filter(|(_, (scope, _))| *scope == Scope::Worker)
+                .map(|(p, _)| *p)
+                .collect();
+            worker_pgids
+                .into_iter()
+                .filter_map(|p| g.groups.remove(&p).map(|(_, c)| (p, c)))
+                .collect()
         };
         self.signal_and_reap(taken);
     }
@@ -234,9 +302,10 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
             })
         });
         let mut stdout_pipe = child.stdout.take();
-        // Register the owned child under the lock. On a latched register the
-        // child was moved in here, so reclaim it via take_child to self-kill.
-        match registry.register_child(pgid, child) {
+        // Register the owned child under the lock (Worker scope: a Stop kills it).
+        // On a latched register the child was moved in here, so reclaim it via
+        // take_child to self-kill.
+        match registry.register_child_scoped(pgid, child, Scope::Worker) {
             RegisterDecision::Registered => {}
             RegisterDecision::KillImmediately => {
                 // A Stop/exit kill is in progress; this claim raced past the
@@ -314,10 +383,9 @@ pub(crate) fn killable_chat_spawn(registry: &Arc<ProcessRegistry>) -> llm_chat::
             })
         });
         let mut stdout_pipe = child.stdout.take();
-        // Register the owned child under the lock. On a latched register reclaim
-        // it via take_child to self-kill (chat is exempt from a workers-only
-        // latch — see LH5; for now an All-scope latch self-kills it).
-        match registry.register_child(pgid, child) {
+        // Register the owned child under the lock. Chat scoping is wired in LH5b;
+        // for now it registers Worker-scoped (back-compat with the pre-LH5 kill).
+        match registry.register_child_scoped(pgid, child, Scope::Worker) {
             RegisterDecision::Registered => {}
             RegisterDecision::KillImmediately => {
                 #[cfg(unix)]
@@ -427,7 +495,7 @@ mod tests {
             .spawn()
             .expect("spawn");
         let pgid = child.id() as i32;
-        let dec = reg.register_child(pgid, child);
+        let dec = reg.register_child_scoped(pgid, child, Scope::Worker);
         assert!(matches!(dec, RegisterDecision::Registered));
         reg.kill_all();
         assert!(reg.is_empty(), "registry drained");
@@ -437,6 +505,47 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!alive(pgid), "the registered child must be dead after kill_all");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::zombie_processes)] // kill_workers / kill_all reap the owned Child
+    fn kill_workers_spares_chat_kill_all_takes_both() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        let alive = |p: i32| unsafe { libc::kill(-p, 0) == 0 };
+        let spawn = || {
+            let c = Command::new("sh")
+                .arg("-c")
+                .arg("sleep 30 & wait")
+                .process_group(0)
+                .spawn()
+                .expect("spawn");
+            (c.id() as i32, c)
+        };
+        let reg = Arc::new(ProcessRegistry::new());
+        let (wpgid, wchild) = spawn();
+        let (cpgid, cchild) = spawn();
+        reg.register_child_scoped(wpgid, wchild, Scope::Worker);
+        reg.register_child_scoped(cpgid, cchild, Scope::Chat);
+
+        reg.kill_workers();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while alive(wpgid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(wpgid), "worker child dead after kill_workers");
+        assert!(alive(cpgid), "chat child SURVIVES kill_workers");
+        assert_eq!(reg.len(), 1, "only the chat entry remains");
+
+        reg.kill_all();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while alive(cpgid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(cpgid), "chat child dead after kill_all (exit)");
+        assert!(reg.is_empty());
     }
 
     #[test]
