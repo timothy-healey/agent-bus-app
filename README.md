@@ -4,6 +4,30 @@ A local Tauri + React app for orchestrating multi-team Claude Code agent pipelin
 
 The predecessor system was a tmux + bash-supervised file-queue (see `~/agent-bus/` if you cloned that). This is the UI-first rewrite from a clean DDD model.
 
+![The board: a DDD pipeline mid-run, one lane per team, with store and worker-pool occupancy](docs/assets/screenshots/board.png)
+
+*The board — one lane per team, each showing its bounded store (`store n/cap`) and worker pool (`pool busy/max`), with the human gate and the hand-off-to-human node on the right.*
+
+## What it looks like
+
+**The pipeline** is a graph you author: forward hand-offs, dashed revise loops back to the upstream team, dashed rejects to a terminal hand-off-to-human node, and human gates in between. This is the bundled DDD default.
+
+![The pipeline graph: research through code review, with revise and reject back-edges](docs/assets/screenshots/pipeline.png)
+
+**Review happens in the app.** Open a card to read the artifact the team produced, comment on a selection, and approve, revise, or reject the gate without leaving the board.
+
+![A card open on the review drawer, with two inline comments anchored to the artifact](docs/assets/screenshots/review.png)
+
+**You talk to the run.** The terminal at the bottom takes plain instructions — scale a team, inject a topic, pull the brake, ask what is blocked — and executes them as tool calls against the live run.
+
+![The terminal: a plain-language instruction scaling a team, executed as a tool call](docs/assets/screenshots/terminal.png)
+
+Warm light and warm dark, both first-class:
+
+![The same board in dark mode](docs/assets/screenshots/board-dark.png)
+
+<sub>These are the real frontend driven by Playwright over the mocked IPC backend (`playwright/`), seeded with a representative mid-run — no live `claude` calls. Regenerate them with `cd playwright && SHOTS=1 npx playwright test specs/screenshots.e2e.ts`.</sub>
+
 ## Status
 
 **Plan 3 complete** — Runtime + Runners. Task lifecycle state machine,
@@ -31,6 +55,7 @@ remain. Review UI/board, Telemetry, and Conversational Control are Plans 4–6.
 - [`docs/context-map.md`](docs/context-map.md) — strategic + tactical DDD model
 - [`docs/vet-agent-bus-app-spec-2026-06-22.md`](docs/vet-agent-bus-app-spec-2026-06-22.md) — vet artifact with all findings resolved
 - [`docs/plans/2026-06-22-plan-1-foundation.md`](docs/plans/2026-06-22-plan-1-foundation.md) — Plan 1 implementation, 17 tasks
+- [`docs/assets/screenshots/`](docs/assets/screenshots/) — the README screenshots, generated from the app
 - [`docs/assets/designs/`](docs/assets/designs/) — 8 design screenshots
 - [`docs/assets/html/`](docs/assets/html/) — 12 HTML mockups from the design session
 
