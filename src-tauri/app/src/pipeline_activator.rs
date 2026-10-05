@@ -65,10 +65,11 @@ pub struct WorkerDeps {
     /// The Tauri app-data dir (LF26): the root of the app-owned artifact base
     /// `<app_data>/projects/<id>/artifacts`, threaded into each `EngineContext`.
     pub app_data: std::path::PathBuf,
-    /// The injected, git-unaware worktree seam (worktree isolation). Threaded
-    /// into each run's `EngineContext` so an Implementer stage resolves its
-    /// working dir to a per-work-item worktree. `None` ⇒ target-repo fallback.
-    pub worktree_provider: Option<Arc<dyn runtime::engine::WorktreeProvider>>,
+    /// The git seam behind worktree isolation. Each activation builds its own
+    /// `WorktreeProvider` from the active project's root, so a project created
+    /// or switched to after boot roots its worktrees in its own home.
+    /// `None` ⇒ target-repo fallback.
+    pub worktree_git: Option<Arc<dyn workspace::worktree::WorktreeGit>>,
 }
 
 /// Owns the runtime-activation lifecycle: swap the active pipeline + (re)spawn
@@ -377,8 +378,9 @@ impl PipelineActivator {
         let usage_sink = self.deps.usage_sink.clone();
         let log_sink = self.deps.log_sink.clone();
         let audit = self.deps.audit.clone();
-        let worktree_provider = self.deps.worktree_provider.clone();
         let project_root = active.project_root.clone();
+        let worktree_provider =
+            crate::worktree_provider_for(self.deps.worktree_git.as_ref(), &project_root);
         let app_data = self.deps.app_data.clone();
         let project_id_for_base = active.project_id.clone();
         let pipeline = active.pipeline.clone();

@@ -46,6 +46,10 @@ export function NewProjectWizard({
   const [name, setName] = useState("");
   const [root, setRoot] = useState("");
   const [targetRepo, setTargetRepo] = useState("");
+  const [customLocation, setCustomLocation] = useState(false);
+  // App-managed projects need a target repo; a custom root makes it optional.
+  const effectiveRoot = customLocation && root.trim() ? root.trim() : null;
+  const locationReady = customLocation ? effectiveRoot !== null : targetRepo.trim() !== "";
   const [description, setDescription] = useState("");
   const [draft, setDraft] = useState<DraftPipeline>(emptyDraft());
   const [busy, setBusy] = useState(false);
@@ -94,7 +98,7 @@ export function NewProjectWizard({
   // confirm when the draft is dirty (audit A3). Dirty = past the first step, or
   // any basics typed.
   const dirty =
-    step !== "basics" || name.trim() !== "" || root.trim() !== "" || description.trim() !== "";
+    step !== "basics" || name.trim() !== "" || root.trim() !== "" || targetRepo.trim() !== "" || description.trim() !== "";
   const confirmLeave = useCallback(
     () => !dirty || window.confirm("Discard this draft project? Your changes will be lost."),
     [dirty],
@@ -158,7 +162,7 @@ export function NewProjectWizard({
     setBusy(true);
     setError(null);
     try {
-      const project = await createProjectFromDraft(name, root, { ...draft, name, description }, targetRepo.trim() || null);
+      const project = await createProjectFromDraft(name, effectiveRoot, { ...draft, name, description }, targetRepo.trim() || null);
       onCreated(project as Project);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -219,8 +223,27 @@ export function NewProjectWizard({
       {step === "basics" && (
         <div style={{ overflowY: "auto", minHeight: 0 }}>
           <label style={lbl}>Project name<input aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} style={inp} /></label>
-          <div style={lbl}><FolderPickerField label="Root path" value={root} onChange={setRoot} placeholder="~/projects/example" /></div>
-          <div style={lbl}><FolderPickerField label="Target repo (optional)" value={targetRepo} onChange={setTargetRepo} placeholder="~/projects/your-repo" /></div>
+          <div style={lbl}>
+            <FolderPickerField
+              label={customLocation ? "Target repo (optional)" : "Target repo"}
+              value={targetRepo}
+              onChange={setTargetRepo}
+              placeholder="~/projects/your-repo"
+            />
+          </div>
+          <div style={lbl}>
+            <Button aria-expanded={customLocation} onClick={() => setCustomLocation((v) => !v)}>
+              {customLocation ? "▾" : "▸"} Custom location
+            </Button>
+            {!customLocation && (
+              <div style={{ fontSize: "var(--ts-sm)", color: "var(--text-3)", marginTop: "var(--sp-1)" }}>
+                The project lives in app data; the repo only gains agent-bus/… branches.
+              </div>
+            )}
+            {customLocation && (
+              <FolderPickerField label="Root path" value={root} onChange={setRoot} placeholder="~/projects/example" />
+            )}
+          </div>
           <label style={lbl}>Describe what you're building<textarea aria-label="Describe what you're building" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} style={inp} /></label>
           <div style={{ display: "flex", gap: "var(--sp-2)", flexWrap: "wrap" }}>
             {/* G12 — when a draft exists, Continue is the draft-preserving path and
@@ -230,7 +253,7 @@ export function NewProjectWizard({
                 Continue →
               </Button>
             )}
-            <Button variant={hasDraft ? "default" : "primary"} onClick={generate} disabled={busy || !name.trim() || !root.trim() || !description.trim()}>
+            <Button variant={hasDraft ? "default" : "primary"} onClick={generate} disabled={busy || !name.trim() || !locationReady || !description.trim()}>
               {busy ? "Generating…" : hasDraft ? "Regenerate" : "Generate"}
             </Button>
           </div>
@@ -243,7 +266,7 @@ export function NewProjectWizard({
                     key={t.id}
                     title={t.description}
                     onClick={() => startFromTemplate(t.id)}
-                    disabled={busy || !name.trim() || !root.trim()}
+                    disabled={busy || !name.trim() || !locationReady}
                   >
                     {t.name}
                   </Button>
@@ -276,7 +299,7 @@ export function NewProjectWizard({
 
       {step === "review" && (
         <div style={{ overflowY: "auto", minHeight: 0 }}>
-          <ReviewStep basics={{ name, root, description }} draft={draft} error={error} />
+          <ReviewStep basics={{ name, root: effectiveRoot ?? "", description, targetRepo }} draft={draft} error={error} />
         </div>
       )}
     </AuthoringLayout>

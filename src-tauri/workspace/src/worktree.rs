@@ -112,6 +112,10 @@ fn normalize(p: &Path) -> PathBuf {
 /// (a different project, a sibling dir like `artifacts/`, or a `..` traversal).
 /// `remove_worktree` MUST call this and run NO git command on Err. Pure: no IO.
 pub fn worktree_under_root(project_root: &str, path: &str) -> Result<PathBuf, String> {
+    // A relative root or path would resolve against whatever cwd git runs in.
+    if !Path::new(project_root).is_absolute() || !Path::new(path).is_absolute() {
+        return Err("worktree root and path must be absolute".into());
+    }
     let base = normalize(&Path::new(project_root).join("worktrees"));
     let candidate = normalize(Path::new(path));
     if candidate == base {
@@ -138,6 +142,8 @@ pub trait WorktreeGit: Send + Sync {
     /// `git -C <worktree_path> reset --hard` then `git -C <worktree_path> clean -fd`
     /// (no remote, so no `@{upstream}`).
     fn reset(&self, worktree_path: &str) -> Result<(), String>;
+    /// True when `path` is inside a git work tree (`git -C <path> rev-parse --git-dir`).
+    fn is_repo(&self, path: &str) -> bool;
 }
 
 /// Production git runner: shells out to the system `git`. Constructed at the
@@ -210,43 +216,53 @@ impl WorktreeGit for GitCli {
         }
         Ok(())
     }
+
+    fn is_repo(&self, path: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["-C", path, "rev-parse", "--git-dir"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 }
 
-/// List the project's cleanup-candidate worktrees. Pure orchestration over the
-/// seam: ask git, parse + filter to the `worktrees/` subtree. Testable with a
-/// fake git.
+/// List the project's cleanup-candidate worktrees. Git runs in `repo` (the repo
+/// the worktrees belong to); entries are filtered to `<project_root>/worktrees/`.
+/// Testable with a fake git.
 pub fn list_worktrees_inner(
     git: &dyn WorktreeGit,
+    repo: &str,
     project_root: &str,
 ) -> Result<Vec<WorktreeEntry>, String> {
-    let porcelain = git.list_porcelain(project_root)?;
+    let porcelain = git.list_porcelain(repo)?;
     Ok(parse_porcelain(&porcelain, Path::new(project_root)))
 }
 
-/// Remove one worktree after the path-scoping guard passes. Runs NO git command
-/// on a rejected path (the guard returns Err first). Testable with a fake git.
+/// Remove one worktree after the path-scoping guard passes. The guard checks
+/// `project_root`; git runs in `repo`. Runs NO git command on a rejected path.
 pub fn remove_worktree_inner(
     git: &dyn WorktreeGit,
+    repo: &str,
     project_root: &str,
     path: &str,
 ) -> Result<(), String> {
     let resolved = worktree_under_root(project_root, path)?;
-    git.remove(project_root, &resolved.to_string_lossy())
+    git.remove(repo, &resolved.to_string_lossy())
 }
 
-/// Create one worktree after the path-scoping guard passes (same guard as
-/// `remove_worktree_inner`). Runs NO git command on a rejected path. The branch
-/// is created at `base_ref` (the target repo's current HEAD, passed by the
-/// caller). Testable with a fake git.
+/// Create one worktree after the path-scoping guard passes. The guard checks
+/// `project_root`; git runs in `repo` and the branch is created at `base_ref`
+/// of that repo. Runs NO git command on a rejected path.
 pub fn add_worktree_inner(
     git: &dyn WorktreeGit,
+    repo: &str,
     project_root: &str,
     path: &str,
     branch: &str,
     base_ref: &str,
 ) -> Result<(), String> {
     let resolved = worktree_under_root(project_root, path)?;
-    git.add(project_root, &resolved.to_string_lossy(), branch, base_ref)
+    git.add(repo, &resolved.to_string_lossy(), branch, base_ref)
 }
 
 /// Reset one worktree to its branch baseline after the path-scoping guard
@@ -344,13 +360,16 @@ pub fn cleanup_project_files_inner(
         return out;
     }
 
+    // Worktrees are registered in the target repo when there is one.
+    let repo = target_repo.filter(|s| !s.trim().is_empty()).unwrap_or(root_path);
+
     let root = normalize(Path::new(root_path));
 
     // 1. Tear down git worktrees via the seam (path-scoped, tolerant).
-    match list_worktrees_inner(git, root_path) {
+    match list_worktrees_inner(git, repo, root_path) {
         Ok(entries) => {
             for entry in entries {
-                match remove_worktree_inner(git, root_path, &entry.path) {
+                match remove_worktree_inner(git, repo, root_path, &entry.path) {
                     Ok(()) => out.worktrees_removed.push(entry.path),
                     Err(e) => {
                         out.note
@@ -395,12 +414,19 @@ pub struct WorktreeState {
     pub git: Arc<dyn WorktreeGit>,
 }
 
-async fn project_root(store: &ProjectStore, project_id: &str) -> Result<String, String> {
+/// A project's `(repo, root)`: git runs in `repo` (the target repo, else the
+/// root); paths are guarded against `root`.
+async fn project_repo_and_root(store: &ProjectStore, project_id: &str) -> Result<(String, String), String> {
     let project = store
         .get(&ProjectId(project_id.to_string()))
         .await
         .map_err(|e| e.to_string())?;
-    Ok(project.root_path.to_string_lossy().into_owned())
+    let root = project.root_path.to_string_lossy().into_owned();
+    let repo = project
+        .target_repo
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| root.clone());
+    Ok((repo, root))
 }
 
 /// OHS: list a project's cleanup-candidate git worktrees (those under
@@ -410,8 +436,8 @@ pub async fn list_worktrees(
     state: tauri::State<'_, WorktreeState>,
     project_id: String,
 ) -> Result<Vec<WorktreeEntry>, String> {
-    let root = project_root(&state.store, &project_id).await?;
-    list_worktrees_inner(state.git.as_ref(), &root)
+    let (repo, root) = project_repo_and_root(&state.store, &project_id).await?;
+    list_worktrees_inner(state.git.as_ref(), &repo, &root)
 }
 
 /// OHS: remove one git worktree. The path MUST resolve under the project's
@@ -422,8 +448,8 @@ pub async fn remove_worktree(
     project_id: String,
     path: String,
 ) -> Result<(), String> {
-    let root = project_root(&state.store, &project_id).await?;
-    remove_worktree_inner(state.git.as_ref(), &root, &path)
+    let (repo, root) = project_repo_and_root(&state.store, &project_id).await?;
+    remove_worktree_inner(state.git.as_ref(), &repo, &root, &path)
 }
 
 #[cfg(test)]
@@ -499,12 +525,20 @@ detached
     }
 
     #[test]
+    fn under_root_rejects_a_relative_root_or_path() {
+        assert!(worktree_under_root("", "worktrees/R-1/alpha").is_err());
+        assert!(worktree_under_root("proj", "proj/worktrees/R-1/alpha").is_err());
+        assert!(worktree_under_root("/home/u/proj", "worktrees/R-1/alpha").is_err());
+    }
+
+    #[test]
     fn under_root_rejects_the_worktrees_root_itself() {
         assert!(worktree_under_root("/home/u/proj", "/home/u/proj/worktrees").is_err());
     }
 
     struct FakeGit {
         porcelain: String,
+        listed: Mutex<Vec<String>>, // repo
         removed: Mutex<Vec<(String, String)>>, // (repo, path)
         added: Mutex<Vec<(String, String, String, String)>>, // (repo, path, branch, base)
         reset_paths: Mutex<Vec<String>>,
@@ -514,6 +548,7 @@ detached
         fn new(porcelain: &str) -> Self {
             Self {
                 porcelain: porcelain.into(),
+                listed: Mutex::new(vec![]),
                 removed: Mutex::new(vec![]),
                 added: Mutex::new(vec![]),
                 reset_paths: Mutex::new(vec![]),
@@ -522,7 +557,8 @@ detached
         }
     }
     impl WorktreeGit for FakeGit {
-        fn list_porcelain(&self, _repo: &str) -> Result<String, String> {
+        fn list_porcelain(&self, repo: &str) -> Result<String, String> {
+            self.listed.lock().unwrap().push(repo.into());
             Ok(self.porcelain.clone())
         }
         fn remove(&self, repo: &str, path: &str) -> Result<(), String> {
@@ -540,6 +576,7 @@ detached
             self.reset_paths.lock().unwrap().push(worktree_path.into());
             Ok(())
         }
+        fn is_repo(&self, _p: &str) -> bool { true }
     }
 
     #[test]
@@ -547,6 +584,7 @@ detached
         let git = FakeGit::new("");
         add_worktree_inner(
             &git,
+            "/home/u/proj",
             "/home/u/proj",
             "/home/u/proj/worktrees/R-1/alpha",
             "agent-bus/R-1/alpha",
@@ -571,6 +609,7 @@ detached
         let git = FakeGit::new("");
         let err = add_worktree_inner(
             &git,
+            "/home/u/proj",
             "/home/u/proj",
             "/home/u/proj/artifacts/x",
             "agent-bus/x",
@@ -607,7 +646,7 @@ worktree /home/u/proj/worktrees/T-1
 HEAD b
 branch refs/heads/t1
 ");
-        let got = list_worktrees_inner(&git, "/home/u/proj").unwrap();
+        let got = list_worktrees_inner(&git, "/home/u/proj", "/home/u/proj").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].path, "/home/u/proj/worktrees/T-1");
     }
@@ -615,7 +654,7 @@ branch refs/heads/t1
     #[test]
     fn remove_worktree_inner_runs_git_for_an_in_subtree_path() {
         let git = FakeGit::new("");
-        remove_worktree_inner(&git, "/home/u/proj", "/home/u/proj/worktrees/T-1").unwrap();
+        remove_worktree_inner(&git, "/home/u/proj", "/home/u/proj", "/home/u/proj/worktrees/T-1").unwrap();
         let calls = git.removed.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(
@@ -627,7 +666,7 @@ branch refs/heads/t1
     #[test]
     fn remove_worktree_inner_rejects_an_escape_and_runs_no_git() {
         let git = FakeGit::new("");
-        let err = remove_worktree_inner(&git, "/home/u/proj", "/home/u/proj/artifacts/x");
+        let err = remove_worktree_inner(&git, "/home/u/proj", "/home/u/proj", "/home/u/proj/artifacts/x");
         assert!(err.is_err());
         assert!(
             git.removed.lock().unwrap().is_empty(),
@@ -754,6 +793,92 @@ branch refs/heads/t1
         assert_eq!(out.worktrees_removed, vec![wt]);
         drop(calls);
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn add_worktree_inner_runs_git_in_the_repo_not_the_root() {
+        let git = FakeGit::new("");
+        add_worktree_inner(
+            &git,
+            "/home/u/code",
+            "/home/u/proj",
+            "/home/u/proj/worktrees/R-1/alpha",
+            "agent-bus/R-1/alpha",
+            "HEAD",
+        )
+        .unwrap();
+        let calls = git.added.lock().unwrap();
+        assert_eq!(calls[0].0, "/home/u/code");
+        assert_eq!(calls[0].1, "/home/u/proj/worktrees/R-1/alpha");
+    }
+
+    #[test]
+    fn add_worktree_inner_guards_on_the_root_even_when_the_path_is_inside_the_repo() {
+        let git = FakeGit::new("");
+        let err = add_worktree_inner(
+            &git,
+            "/home/u/code",
+            "/home/u/proj",
+            "/home/u/code/worktrees/R-1/alpha",
+            "agent-bus/R-1/alpha",
+            "HEAD",
+        );
+        assert!(err.is_err());
+        assert!(git.added.lock().unwrap().is_empty(), "no git on a rejected path");
+    }
+
+    #[test]
+    fn list_worktrees_inner_queries_the_repo_and_filters_to_the_root() {
+        let git = FakeGit::new("\
+worktree /home/u/code
+HEAD a
+
+worktree /home/u/proj/worktrees/T-1
+HEAD b
+branch refs/heads/t1
+");
+        let got = list_worktrees_inner(&git, "/home/u/code", "/home/u/proj").unwrap();
+        assert_eq!(*git.listed.lock().unwrap(), vec!["/home/u/code".to_string()]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "/home/u/proj/worktrees/T-1");
+    }
+
+    #[test]
+    fn remove_worktree_inner_runs_git_in_the_repo() {
+        let git = FakeGit::new("");
+        remove_worktree_inner(&git, "/home/u/code", "/home/u/proj", "/home/u/proj/worktrees/T-1").unwrap();
+        let calls = git.removed.lock().unwrap();
+        assert_eq!(calls[0], ("/home/u/code".into(), "/home/u/proj/worktrees/T-1".into()));
+    }
+
+    #[test]
+    fn cleanup_tears_down_worktrees_in_the_target_repo() {
+        let (root, repo) = scaffolded_project();
+        let wt = format!("{}/worktrees/T-1", root.to_string_lossy());
+        let porcelain = format!("worktree {wt}\nHEAD aaaa\nbranch refs/heads/t1\n");
+        let git = FakeGit::new(&porcelain);
+        let out = cleanup_project_files_inner(&git, root.to_str().unwrap(), Some(repo.to_str().unwrap()));
+        assert_eq!(*git.listed.lock().unwrap(), vec![repo.to_string_lossy().into_owned()]);
+        let calls = git.removed.lock().unwrap();
+        assert_eq!(calls[0].0, repo.to_string_lossy());
+        assert_eq!(out.worktrees_removed, vec![wt]);
+        drop(calls);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn git_cli_is_repo_is_true_for_an_initialised_repo_and_false_for_a_plain_dir() {
+        let base = std::env::temp_dir().join(format!("abp-isrepo-{}", uuid::Uuid::new_v4()));
+        let repo = base.join("repo");
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        let init = std::process::Command::new("git").args(["-C", repo.to_str().unwrap(), "init", "-q"]).status().unwrap();
+        assert!(init.success());
+        assert!(GitCli.is_repo(repo.to_str().unwrap()));
+        assert!(!GitCli.is_repo(plain.to_str().unwrap()));
+        assert!(!GitCli.is_repo(base.join("missing").to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

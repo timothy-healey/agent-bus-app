@@ -135,7 +135,15 @@ export function PipelineEditor({
 
       {step === "review" && (
         <div style={{ overflowY: "auto", minHeight: 0 }}>
-          <ReviewStep basics={{ name: draft.name, root: "", description: draft.description }} draft={draft} />
+          <ReviewStep
+            basics={{
+              name: draft.name,
+              root: projects.find((p) => p.id === projectId)?.root_path ?? "",
+              description: draft.description,
+              targetRepo: projects.find((p) => p.id === projectId)?.target_repo ?? "",
+            }}
+            draft={draft}
+          />
         </div>
       )}
 

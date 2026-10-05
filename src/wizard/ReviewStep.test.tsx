@@ -11,7 +11,7 @@ describe("ReviewStep", () => {
   }
 
   it("renders the assembled pipeline + the prompt files", () => {
-    render(<ReviewStep basics={{ name: "Demo", root: "/p", description: "" }} draft={draft()} />);
+    render(<ReviewStep basics={{ name: "Demo", root: "/p", description: "", targetRepo: "" }} draft={draft()} />);
     expect(screen.getByText("investigate")).toBeInTheDocument();
     expect(screen.getByText(/prompts\/research\.md/)).toBeInTheDocument();
   });
@@ -19,7 +19,7 @@ describe("ReviewStep", () => {
   it("renders the backend error alert when given an error", () => {
     render(
       <ReviewStep
-        basics={{ name: "Demo", root: "/p", description: "" }}
+        basics={{ name: "Demo", root: "/p", description: "", targetRepo: "" }}
         draft={draft()}
         error="team 'research' is unreachable"
       />,
@@ -28,7 +28,12 @@ describe("ReviewStep", () => {
   });
 
   it("is presentational — renders no Create button", () => {
-    render(<ReviewStep basics={{ name: "Demo", root: "/p", description: "" }} draft={draft()} />);
+    render(<ReviewStep basics={{ name: "Demo", root: "/p", description: "", targetRepo: "" }} draft={draft()} />);
     expect(screen.queryByRole("button", { name: /create/i })).not.toBeInTheDocument();
+  });
+  it("shows the app-managed location and the target repo", () => {
+    render(<ReviewStep basics={{ name: "Demo", root: "", description: "", targetRepo: "/repo" }} draft={draft()} />);
+    expect(screen.getByText(/location: app-managed/i)).toBeInTheDocument();
+    expect(screen.getByText(/target repo: \/repo/i)).toBeInTheDocument();
   });
 });

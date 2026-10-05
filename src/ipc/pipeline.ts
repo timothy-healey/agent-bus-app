@@ -231,7 +231,7 @@ export async function bestEffortValidate(draft: DraftPipeline): Promise<string[]
 
 export async function createProjectFromDraft(
   name: string,
-  root: string,
+  root: string | null,
   draft: DraftPipeline,
   targetRepo?: string | null,
 ): Promise<{ id: string; name: string; root_path: string; target_repo: string | null; active_pipeline_id: string | null; created_at: number; updated_at: number }> {
