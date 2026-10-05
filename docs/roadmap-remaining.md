@@ -43,4 +43,4 @@ All build on chunk 1's `ProcessRegistry` / killable spawner / brake wiring.
 - **E2E-live · Prove the live worker→`claude` run path end-to-end** — `backlog` — still structural-only; being exercised manually via live testing.
 
 ## Standing
-- **Push to remote** — `backlog` (by standing instruction) — everything v1→today is committed + tagged locally only, never pushed.
+- **Push to remote** — `done` — `main` and all tags are on `origin` (github.com/timothy-healey/agent-bus-app).
