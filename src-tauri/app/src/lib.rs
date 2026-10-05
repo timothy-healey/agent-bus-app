@@ -1741,7 +1741,7 @@ pub fn run() {
                         "You are the god terminal for the Agent Bus app. Help the operator run \
                          and inspect the pipeline (tasks, gates, usage, the brake). Be concise."
                             .into(),
-                        "claude-opus-4-8".into(),
+                        agent_bus_core::DEFAULT_MODEL.into(),
                         8192,
                     ).with_delta_sink(Some(make_conversation_delta_sink(handle.clone()))));
                 let engine: Arc<dyn conversational_control::engine::ConversationEngine> =

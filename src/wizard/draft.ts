@@ -1,4 +1,5 @@
 import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join, Workers } from "../ipc/pipeline";
+import { DEFAULT_MODEL } from "../ipc/models";
 
 /** Default WIP capacity for a new team's input store (mirrors the backend
  *  default). */
@@ -31,7 +32,7 @@ function defaultTeam(id: string, name: string): DraftTeam {
     id,
     name,
     prompt_body: "",
-    runner: { kind: "claude-cli", model: "claude-opus-4-8", effort: { mode: "standard" }, api_key_env: null },
+    runner: { kind: "claude-cli", model: DEFAULT_MODEL, effort: { mode: "standard" }, api_key_env: null },
     scope: { reads: [], writes: [], tools: [] },
     outputs: {},
     workers: { min: 1, max: 1 },

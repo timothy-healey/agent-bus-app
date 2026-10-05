@@ -47,7 +47,7 @@ impl DraftTeam {
             prompt_body: String::new(),
             runner: RunnerConfig {
                 kind: RunnerKind::ClaudeCli,
-                model: "claude-opus-4-8".into(),
+                model: agent_bus_core::DEFAULT_MODEL.into(),
                 effort: EffortMode::Standard,
                 api_key_env: None,
             },
@@ -461,6 +461,12 @@ pub fn prepare_pipeline_write(draft: &DraftPipeline) -> Result<PipelineWrite, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_team_defaults_to_the_shared_default_model() {
+        let t = DraftTeam::new("research", "Research");
+        assert_eq!(t.runner.model, agent_bus_core::DEFAULT_MODEL);
+    }
 
     #[test]
     fn slice_types_derive_json_schema_with_kind_discriminator() {

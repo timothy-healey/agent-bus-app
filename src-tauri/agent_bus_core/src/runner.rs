@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// The model a new team, design session, or god-terminal turn uses when none is
+/// chosen. Saved pipelines keep whatever model they stored.
+pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunnerKind {
@@ -54,5 +58,10 @@ mod tests {
         let e = EffortMode::Standard;
         let s = serde_json::to_string(&e).unwrap();
         assert!(s.contains("\"mode\":\"standard\""), "got: {s}");
+    }
+
+    #[test]
+    fn default_model_is_opus_5_5() {
+        assert_eq!(DEFAULT_MODEL, "claude-opus-5-5");
     }
 }
