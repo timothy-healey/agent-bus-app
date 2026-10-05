@@ -3,7 +3,7 @@ import { PipelineView } from "../components/PipelineView";
 import { draftToPipeline } from "./draftToPipeline";
 
 interface ReviewStepProps {
-  basics: { name: string; root: string; description: string };
+  basics: { name: string; root: string; description: string; targetRepo: string };
   draft: DraftPipeline;
   error?: string | null;
 }
@@ -17,6 +17,9 @@ export function ReviewStep({ basics, draft, error }: ReviewStepProps) {
 
   return (
     <div>
+      <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: "var(--sp-2)" }}>
+        Location: {basics.root.trim() || "app-managed"} · Target repo: {basics.targetRepo.trim() || "none"}
+      </div>
       <PipelineView pipeline={draftToPipeline(named)} />
       <h3 style={{ fontSize: 12, color: "var(--text-2)" }}>Prompt files</h3>
       {named.teams.map((t) => (
