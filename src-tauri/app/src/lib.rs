@@ -145,6 +145,20 @@ impl GitCliWorktreeProvider {
     }
 }
 
+/// The worktree provider for one project. `None` when there is no git seam or the
+/// project root is not absolute: worktrees must never be rooted relative to a
+/// cwd, because git would then resolve them inside the target repo.
+pub(crate) fn worktree_provider_for(
+    git: Option<&std::sync::Arc<dyn workspace::worktree::WorktreeGit>>,
+    project_root: &str,
+) -> Option<std::sync::Arc<dyn runtime::engine::WorktreeProvider>> {
+    let git = git?;
+    if !std::path::Path::new(project_root).is_absolute() {
+        return None;
+    }
+    Some(std::sync::Arc::new(GitCliWorktreeProvider::new(git.clone(), project_root.to_string())))
+}
+
 impl runtime::engine::WorktreeProvider for GitCliWorktreeProvider {
     fn ensure(&self, run_id: &str, item_key: &str, target_repo: &str) -> Result<String, String> {
         let path = self.worktree_path_for(run_id, item_key);
@@ -199,6 +213,31 @@ mod worktree_provider_tests {
         assert_eq!(calls[0].1, "/proj/worktrees/R-1/alpha");
         assert_eq!(calls[0].2, "agent-bus/R-1/alpha");
         assert_eq!(calls[0].3, "HEAD");
+    }
+
+    struct NoopGit;
+    impl workspace::worktree::WorktreeGit for NoopGit {
+        fn list_porcelain(&self, _r: &str) -> Result<String, String> { Ok(String::new()) }
+        fn remove(&self, _r: &str, _p: &str) -> Result<(), String> { Ok(()) }
+        fn add(&self, _r: &str, _p: &str, _b: &str, _base: &str) -> Result<(), String> { Ok(()) }
+        fn reset(&self, _p: &str) -> Result<(), String> { Ok(()) }
+        fn is_repo(&self, _p: &str) -> bool { true }
+    }
+
+    #[test]
+    fn worktree_provider_for_roots_worktrees_in_the_given_project() {
+        let git: std::sync::Arc<dyn workspace::worktree::WorktreeGit> = std::sync::Arc::new(NoopGit);
+        let wp = worktree_provider_for(Some(&git), "/data/projects/b").expect("a provider");
+        let path = wp.ensure("R-1", "alpha", "/repo").unwrap();
+        assert_eq!(path, "/data/projects/b/worktrees/R-1/alpha");
+    }
+
+    #[test]
+    fn worktree_provider_for_is_none_without_an_absolute_root() {
+        let git: std::sync::Arc<dyn workspace::worktree::WorktreeGit> = std::sync::Arc::new(NoopGit);
+        assert!(worktree_provider_for(Some(&git), "").is_none());
+        assert!(worktree_provider_for(Some(&git), "relative/root").is_none());
+        assert!(worktree_provider_for(None, "/data/projects/b").is_none());
     }
 
     #[test]
@@ -1619,11 +1658,9 @@ pub fn run() {
                 // below. Reuses the same GitCli managed for the cleanup commands.
                 let worktree_git: std::sync::Arc<dyn workspace::worktree::WorktreeGit> =
                     std::sync::Arc::new(workspace::worktree::GitCli);
-                let worktree_provider: Option<std::sync::Arc<dyn runtime::engine::WorktreeProvider>> =
-                    Some(std::sync::Arc::new(GitCliWorktreeProvider::new(
-                        worktree_git.clone(),
-                        project_root.clone(),
-                    )));
+                // Boot recovery resets the boot project's worktrees; each activation
+                // builds its own provider from that project's root.
+                let worktree_provider = worktree_provider_for(Some(&worktree_git), &project_root);
                 // LH6: restore a persisted MANUAL brake (come up braked); an
                 // auto-meter brake stays OFF so the sweep re-derives it.
                 let brake = restore_brake_from(&brake_store).await;
@@ -1836,7 +1873,7 @@ pub fn run() {
                         fanout: fanout.clone(),
                         process_registry: process_registry.clone(),
                         app_data: data_dir.clone(),
-                        worktree_provider: worktree_provider.clone(),
+                        worktree_git: Some(worktree_git.clone()),
                     },
                 ));
                 handle.manage(activator.clone());

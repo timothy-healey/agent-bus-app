@@ -112,6 +112,10 @@ fn normalize(p: &Path) -> PathBuf {
 /// (a different project, a sibling dir like `artifacts/`, or a `..` traversal).
 /// `remove_worktree` MUST call this and run NO git command on Err. Pure: no IO.
 pub fn worktree_under_root(project_root: &str, path: &str) -> Result<PathBuf, String> {
+    // A relative root or path would resolve against whatever cwd git runs in.
+    if !Path::new(project_root).is_absolute() || !Path::new(path).is_absolute() {
+        return Err("worktree root and path must be absolute".into());
+    }
     let base = normalize(&Path::new(project_root).join("worktrees"));
     let candidate = normalize(Path::new(path));
     if candidate == base {
@@ -518,6 +522,13 @@ detached
     #[test]
     fn under_root_rejects_a_path_in_a_different_project() {
         assert!(worktree_under_root("/home/u/proj", "/home/u/other/worktrees/T-1").is_err());
+    }
+
+    #[test]
+    fn under_root_rejects_a_relative_root_or_path() {
+        assert!(worktree_under_root("", "worktrees/R-1/alpha").is_err());
+        assert!(worktree_under_root("proj", "proj/worktrees/R-1/alpha").is_err());
+        assert!(worktree_under_root("/home/u/proj", "worktrees/R-1/alpha").is_err());
     }
 
     #[test]
