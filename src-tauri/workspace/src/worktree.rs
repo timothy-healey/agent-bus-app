@@ -138,6 +138,8 @@ pub trait WorktreeGit: Send + Sync {
     /// `git -C <worktree_path> reset --hard` then `git -C <worktree_path> clean -fd`
     /// (no remote, so no `@{upstream}`).
     fn reset(&self, worktree_path: &str) -> Result<(), String>;
+    /// True when `path` is inside a git work tree (`git -C <path> rev-parse --git-dir`).
+    fn is_repo(&self, path: &str) -> bool;
 }
 
 /// Production git runner: shells out to the system `git`. Constructed at the
@@ -209,6 +211,14 @@ impl WorktreeGit for GitCli {
             ));
         }
         Ok(())
+    }
+
+    fn is_repo(&self, path: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["-C", path, "rev-parse", "--git-dir"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -555,6 +565,7 @@ detached
             self.reset_paths.lock().unwrap().push(worktree_path.into());
             Ok(())
         }
+        fn is_repo(&self, _p: &str) -> bool { true }
     }
 
     #[test]
@@ -842,6 +853,21 @@ branch refs/heads/t1
         assert_eq!(out.worktrees_removed, vec![wt]);
         drop(calls);
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn git_cli_is_repo_is_true_for_an_initialised_repo_and_false_for_a_plain_dir() {
+        let base = std::env::temp_dir().join(format!("abp-isrepo-{}", uuid::Uuid::new_v4()));
+        let repo = base.join("repo");
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        let init = std::process::Command::new("git").args(["-C", repo.to_str().unwrap(), "init", "-q"]).status().unwrap();
+        assert!(init.success());
+        assert!(GitCli.is_repo(repo.to_str().unwrap()));
+        assert!(!GitCli.is_repo(plain.to_str().unwrap()));
+        assert!(!GitCli.is_repo(base.join("missing").to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -229,6 +229,16 @@ pub fn app_data_project_dir(app_data: &Path, project_id: &str) -> PathBuf {
     app_data.join("projects").join(project_id)
 }
 
+/// Where a project's root lives: a non-blank `root` (tilde-expanded) when the
+/// operator chose a custom location, otherwise the app-owned
+/// `<app_data>/projects/<project_id>` dir. PURE.
+pub fn resolve_project_root(app_data: &Path, project_id: &str, root: Option<&str>, home: &str) -> PathBuf {
+    match root.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(r) => PathBuf::from(expand_tilde(r, home)),
+        None => app_data_project_dir(app_data, project_id),
+    }
+}
+
 /// Best-effort removal of the app-owned project data dir (artifacts live here).
 /// Never touches `target_repo`. A missing dir is fine.
 pub fn remove_app_data_project_dir(app_data: &Path, project_id: &str) {
@@ -502,6 +512,30 @@ pub fn tools() -> Vec<ToolSpec> {
 mod tests {
     use super::*;
     use crate::project::Project;
+
+    #[test]
+    fn resolve_project_root_defaults_to_the_app_data_project_dir() {
+        let got = resolve_project_root(Path::new("/data"), "proj-1", None, "/home/u");
+        assert_eq!(got, PathBuf::from("/data/projects/proj-1"));
+    }
+
+    #[test]
+    fn resolve_project_root_treats_a_blank_root_as_none() {
+        let got = resolve_project_root(Path::new("/data"), "proj-1", Some("   "), "/home/u");
+        assert_eq!(got, PathBuf::from("/data/projects/proj-1"));
+    }
+
+    #[test]
+    fn resolve_project_root_expands_a_tilde_root() {
+        let got = resolve_project_root(Path::new("/data"), "proj-1", Some("~/work/x"), "/home/u");
+        assert_eq!(got, PathBuf::from("/home/u/work/x"));
+    }
+
+    #[test]
+    fn resolve_project_root_keeps_an_absolute_root() {
+        let got = resolve_project_root(Path::new("/data"), "proj-1", Some("/srv/p"), "/home/u");
+        assert_eq!(got, PathBuf::from("/srv/p"));
+    }
     use crate::store::ProjectStore;
     use std::sync::Arc as StdArc;
 

@@ -188,6 +188,7 @@ mod worktree_provider_tests {
                 Ok(())
             }
             fn reset(&self, _p: &str) -> Result<(), String> { Ok(()) }
+            fn is_repo(&self, _p: &str) -> bool { true }
         }
         let git = std::sync::Arc::new(FakeGit { added: Mutex::new(vec![]) });
         let provider = GitCliWorktreeProvider::new(git.clone(), "/proj".into());
