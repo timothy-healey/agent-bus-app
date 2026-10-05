@@ -474,7 +474,7 @@ Slide-over from the right, 60% of viewport width (clamped 600–960px). Four tab
 
 ### Revise flow
 
-See `assets/designs/05-revise-flow-final.png` and `assets/html/revise-flow-v2.html` for the six-step UX. Summary:
+See `assets/html/revise-flow-v2.html` for the six-step UX. Summary:
 
 1. Plan lands at gate; banner pulses; card pulses in its lane.
 2. Click card; drawer opens with artifact tab.
@@ -687,6 +687,5 @@ The Rust crate structure should mirror these context boundaries: one top-level m
 - **DESIGN.md** — full token vocabulary, components, anti-patterns
 - **DOMAIN.md** — DDD canon (bounded contexts, experts, ubiquitous language)
 - **docs/context-map.md** — DDD model (relationships, aggregates, invariants)
-- **assets/designs/** — 8 screenshots of every iteration explored
 - **assets/html/** — every HTML mockup, preserved for future reference
 - **Predecessor system spec** — `~/agent-bus/agent-bus-design.md` (file-queue + tmux era; the data-model insights transfer; the runtime model does not)

@@ -1,6 +1,6 @@
 # DESIGN.md — Agent Bus App
 
-Design tokens, components, and visual rules for the app. Derived from the impeccable-led design session (see `assets/designs/` for screenshots and `assets/html/` for the source mockups). The committed direction is **T1 — Full Mono, Warm Dark** with a **Warm Light** mode for daylight use.
+Design tokens, components, and visual rules for the app. Derived from the impeccable-led design session (see `assets/html/` for the source mockups). The committed direction is **T1 — Full Mono, Warm Dark** with a **Warm Light** mode for daylight use.
 
 ## Theme
 
@@ -455,7 +455,6 @@ Hard rules — match-and-refuse during implementation review.
 
 ## Asset references
 
-- **Screenshots:** `assets/designs/01-warm-light-kanban.png` through `08-topbar-usage-meter.png`
 - **HTML source mockups:** `assets/html/` (each iteration preserved)
 - **Original spec:** `~/agent-bus/agent-bus-design.md` (file-queue era — predecessor system, useful for understanding the data model)
 - **Brainstorm directory:** `~/assistant/.superpowers/brainstorm/...` (transient; copies in `assets/html/` are durable)

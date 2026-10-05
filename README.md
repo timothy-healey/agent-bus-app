@@ -56,7 +56,6 @@ remain. Review UI/board, Telemetry, and Conversational Control are Plans 4–6.
 - [`docs/vet-agent-bus-app-spec-2026-06-22.md`](docs/vet-agent-bus-app-spec-2026-06-22.md) — vet artifact with all findings resolved
 - [`docs/plans/2026-06-22-plan-1-foundation.md`](docs/plans/2026-06-22-plan-1-foundation.md) — Plan 1 implementation, 17 tasks
 - [`docs/assets/screenshots/`](docs/assets/screenshots/) — the README screenshots, generated from the app
-- [`docs/assets/designs/`](docs/assets/designs/) — 8 design screenshots
 - [`docs/assets/html/`](docs/assets/html/) — 12 HTML mockups from the design session
 
 ## The seven bounded contexts
