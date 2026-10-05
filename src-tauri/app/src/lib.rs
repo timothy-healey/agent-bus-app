@@ -123,7 +123,8 @@ fn err(e: impl ToString) -> ToolCallResult { ToolCallResult::Err { error: e.to_s
 /// The app's git-backed worktree provider (worktree isolation). Implements the
 /// git-unaware `runtime::engine::WorktreeProvider` over `workspace`'s
 /// `WorktreeGit` seam. Lives at the composition root so `runtime` never learns
-/// `git`. The project root scopes every worktree under `<root>/worktrees/`.
+/// `git`. Worktree directories live under `<project_root>/worktrees/`; git runs
+/// in the item's target repo so the branch comes off that repo's HEAD.
 pub struct GitCliWorktreeProvider {
     git: std::sync::Arc<dyn workspace::worktree::WorktreeGit>,
     project_root: String,
@@ -145,20 +146,18 @@ impl GitCliWorktreeProvider {
 }
 
 impl runtime::engine::WorktreeProvider for GitCliWorktreeProvider {
-    fn ensure(&self, run_id: &str, item_key: &str, _target_repo: &str) -> Result<String, String> {
+    fn ensure(&self, run_id: &str, item_key: &str, target_repo: &str) -> Result<String, String> {
         let path = self.worktree_path_for(run_id, item_key);
         // Idempotent: a worktree dir already present (resume / re-claim) is reused.
         if std::path::Path::new(&path).is_dir() {
             return Ok(path);
         }
         let branch = format!("agent-bus/{run_id}/{item_key}");
-        // Create the branch off the project root repo's current HEAD; the
-        // path-scope guard runs no git on an out-of-subtree path. (The common
-        // case has project_root == target_repo; per the spec the worktree lives
-        // under <project_root>/worktrees/ and branches off HEAD.)
+        // Git runs in the target repo; a blank target means the root is the repo.
+        let repo = if target_repo.trim().is_empty() { self.project_root.as_str() } else { target_repo };
         workspace::worktree::add_worktree_inner(
             self.git.as_ref(),
-            &self.project_root,
+            repo,
             &self.project_root,
             &path,
             &branch,
@@ -196,10 +195,31 @@ mod worktree_provider_tests {
         assert_eq!(path, "/proj/worktrees/R-1/alpha");
         let calls = git.added.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "/proj");
+        assert_eq!(calls[0].0, "/repo");
         assert_eq!(calls[0].1, "/proj/worktrees/R-1/alpha");
         assert_eq!(calls[0].2, "agent-bus/R-1/alpha");
         assert_eq!(calls[0].3, "HEAD");
+    }
+
+    #[test]
+    fn git_cli_worktree_provider_falls_back_to_the_root_without_a_target() {
+        use std::sync::Mutex;
+        struct FakeGit { added: Mutex<Vec<(String, String, String, String)>> }
+        impl workspace::worktree::WorktreeGit for FakeGit {
+            fn list_porcelain(&self, _r: &str) -> Result<String, String> { Ok(String::new()) }
+            fn remove(&self, _r: &str, _p: &str) -> Result<(), String> { Ok(()) }
+            fn add(&self, repo: &str, path: &str, branch: &str, base: &str) -> Result<(), String> {
+                self.added.lock().unwrap().push((repo.into(), path.into(), branch.into(), base.into()));
+                Ok(())
+            }
+            fn reset(&self, _p: &str) -> Result<(), String> { Ok(()) }
+            fn is_repo(&self, _p: &str) -> bool { true }
+        }
+        let git = std::sync::Arc::new(FakeGit { added: Mutex::new(vec![]) });
+        let provider = GitCliWorktreeProvider::new(git.clone(), "/proj".into());
+        let path = runtime::engine::WorktreeProvider::ensure(&provider, "R-1", "alpha", "  ").unwrap();
+        assert_eq!(path, "/proj/worktrees/R-1/alpha");
+        assert_eq!(git.added.lock().unwrap()[0].0, "/proj");
     }
 }
 
