@@ -159,6 +159,7 @@ impl runtime::engine::WorktreeProvider for GitCliWorktreeProvider {
         workspace::worktree::add_worktree_inner(
             self.git.as_ref(),
             &self.project_root,
+            &self.project_root,
             &path,
             &branch,
             "HEAD",
