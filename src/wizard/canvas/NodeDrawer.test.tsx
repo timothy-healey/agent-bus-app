@@ -18,6 +18,7 @@ import { NodeDrawer } from "./NodeDrawer";
 import { emptyDraft, addTeam } from "../draft";
 import type { DraftPipeline } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
+import { DEFAULT_MODEL } from "../../ipc/models";
 
 function teamDraft(): DraftPipeline {
   return addTeam(emptyDraft(), "research", "Research");
@@ -146,7 +147,7 @@ describe("NodeDrawer — G6 model selector + Test probe", () => {
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
     fireEvent.click(screen.getByLabelText("test model for research"));
     await waitFor(() => expect(screen.getByText(/unavailable, pick another/i)).toBeInTheDocument());
-    expect(testModelMock).toHaveBeenCalledWith("claude-opus-4-8");
+    expect(testModelMock).toHaveBeenCalledWith(DEFAULT_MODEL);
   });
 });
 

@@ -13,10 +13,16 @@ export interface ClaudeModel {
 
 /// Known current model IDs, newest-first within each family. Use the exact ID
 /// strings as-is (no date suffixes).
+/// The model a new team uses when none is chosen. Mirrors `DEFAULT_MODEL` in
+/// `agent_bus_core`.
+export const DEFAULT_MODEL = "claude-opus-5-5";
+
 export const CLAUDE_MODELS: ClaudeModel[] = [
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5", family: "opus" },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", family: "opus" },
   { id: "claude-opus-4-7", label: "Claude Opus 4.7", family: "opus" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6", family: "opus" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", family: "sonnet" },
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", family: "sonnet" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", family: "haiku" },
 ];

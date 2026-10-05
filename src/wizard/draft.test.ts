@@ -6,12 +6,18 @@ import { addForkJoin, removeForkJoin } from "./draft";
 import { setJoinQuorum, setJoinCancelOnReject } from "./draft";
 import { setTeamRole, setTeamStoreCapacity, setTeamWorkers } from "./draft";
 import { draftToPipeline } from "./draftToPipeline";
+import { DEFAULT_MODEL } from "../ipc/models";
 
 describe("wizard draft helpers", () => {
   it("emptyDraft has no teams + current schema version", () => {
     const d = emptyDraft();
     expect(d.teams).toEqual([]);
     expect(d.schema_version).toBeGreaterThanOrEqual(2);
+  });
+
+  it("addTeam defaults the new team to DEFAULT_MODEL", () => {
+    const d = addTeam(emptyDraft(), "research", "Research");
+    expect(d.teams[0].runner.model).toBe(DEFAULT_MODEL);
   });
 
   it("emptyDraft seeds an empty gates array", () => {

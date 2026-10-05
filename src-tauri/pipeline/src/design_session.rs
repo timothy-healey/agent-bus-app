@@ -55,7 +55,7 @@ async fn emit_structured<T: serde::de::DeserializeOwned + schemars::JsonSchema>(
         dialogue_id: dialogue_id.to_string(),
         system_prompt: system_prompt.to_string(),
         user_message,
-        model: "claude-opus-4-8".to_string(),
+        model: agent_bus_core::DEFAULT_MODEL.to_string(),
         thinking_budget: 8192,
         working_dir: None,
     };
@@ -246,7 +246,7 @@ async fn chat_with_repair_parsed<T>(
             dialogue_id: dialogue_id.to_string(),
             system_prompt: system_prompt.to_string(),
             user_message,
-            model: "claude-opus-4-8".to_string(),
+            model: agent_bus_core::DEFAULT_MODEL.to_string(),
             thinking_budget: 8192,
             working_dir: None,
         };
@@ -588,6 +588,16 @@ mod tests {
         let _ = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "go").await;
         // only ONE call — no wasted repair turn on a good first reply
         assert_eq!(runner.received.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn turn_requests_the_shared_default_model() {
+        let mut draft = DraftPipeline::empty();
+        draft.teams.push(DraftTeam::new("research", "Research"));
+        let good = reply("ok\n```json\n{\"kind\":\"prompt\",\"team_id\":\"research\",\"prompt_body\":\"x\"}\n```");
+        let runner = FakeChatRunner::new(vec![good]);
+        let _ = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "go").await;
+        assert_eq!(runner.received.lock().unwrap()[0].model, agent_bus_core::DEFAULT_MODEL);
     }
 
     #[tokio::test]
