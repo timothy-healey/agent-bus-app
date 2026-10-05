@@ -832,10 +832,13 @@ fn best_effort_validate_cmd(draft: pipeline::draft::DraftPipeline) -> Vec<String
 /// Pipeline; only on Ok create the project + write files (Workspace) + activate.
 /// Nothing is written when invalid. Inner fn so it is unit-testable without a
 /// Tauri State wrapper.
+/// A blank `root` puts the project in app data and requires a git-repo target.
 pub async fn create_project_from_draft_inner(
     ws: &workspace::api::WorkspaceState,
+    git: &dyn workspace::worktree::WorktreeGit,
+    app_data: &std::path::Path,
     name: String,
-    root: String,
+    root: Option<String>,
     draft: DraftPipeline,
     target_repo: Option<String>,
 ) -> Result<Project, String> {
@@ -843,23 +846,38 @@ pub async fn create_project_from_draft_inner(
     let (yaml_rel, yaml, prompts) = pipeline::draft::prepare_pipeline_write(&draft)?;
     let pipeline = draft.to_pipeline();
 
-    // 2. Create the project row (Workspace; ~ already expanded inside).
+    // 2. Location: a custom root, or app data with a git-repo target.
     let home = std::env::var("HOME").unwrap_or_default();
-    let expanded = workspace::api::expand_tilde(&root, &home);
-    let mut project = Project::new(name, std::path::PathBuf::from(expanded), now_unix());
-    // A5: target_repo carried through create, tilde-expanded like root.
-    project.target_repo = target_repo
+    let custom_root = root.filter(|s| !s.trim().is_empty());
+    let target = target_repo
         .filter(|s| !s.trim().is_empty())
-        .map(|s| workspace::api::expand_tilde(&s, &home));
+        .map(|s| workspace::api::expand_tilde(s.trim(), &home));
+    if custom_root.is_none() && target.is_none() {
+        return Err("a target repo is required when the project lives in app data".into());
+    }
+    if let Some(t) = &target {
+        if !std::path::Path::new(t).is_absolute() {
+            return Err(format!("target repo must be an absolute path: {t}"));
+        }
+        if !git.is_repo(t) {
+            return Err(format!("target repo is not a git repository: {t}"));
+        }
+    }
+
+    // 3. Create the project row; the id exists before the root is resolved.
+    let mut project = Project::new(name, std::path::PathBuf::new(), now_unix());
+    project.root_path =
+        workspace::api::resolve_project_root(app_data, &project.id.0, custom_root.as_deref(), &home);
+    project.target_repo = target;
     ws.store.insert(&project).await.map_err(|e| e.to_string())?;
 
-    // 3. Write the YAML + prompt files (Workspace owns the bytes-to-disk).
+    // 4. Write the YAML + prompt files (Workspace owns the bytes-to-disk).
     workspace::api::write_project_pipeline_inner(
         ws, project.id.0.clone(), yaml_rel, yaml, prompts,
     )
     .await?;
 
-    // 4. Activate.
+    // 5. Activate.
     ws.store
         .set_active_pipeline(&project.id, Some(&agent_bus_core::PipelineId(pipeline.id.clone())), now_unix())
         .await
@@ -876,14 +894,19 @@ pub async fn create_project_from_draft_inner(
 /// addresses (runtime activation was previously boot-only).
 #[tauri::command(rename_all = "snake_case")]
 async fn create_project_from_draft(
+    app: tauri::AppHandle,
     state: tauri::State<'_, WorkspaceState>,
     activator: tauri::State<'_, Arc<pipeline_activator::PipelineActivator>>,
     name: String,
-    root: String,
+    root: Option<String>,
     draft: DraftPipeline,
     target_repo: Option<String>,
 ) -> Result<Project, String> {
-    let project = create_project_from_draft_inner(&state, name, root, draft, target_repo).await?;
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let project = create_project_from_draft_inner(
+        &state, &workspace::worktree::GitCli, &app_data, name, root, draft, target_repo,
+    )
+    .await?;
     activator.activate(&project.id.0).await?;
     Ok(project)
 }
@@ -2417,6 +2440,95 @@ mod design_session_tests {
         d
     }
 
+    /// A git seam whose only job here is answering `is_repo`.
+    struct RepoCheck(bool);
+    impl workspace::worktree::WorktreeGit for RepoCheck {
+        fn list_porcelain(&self, _r: &str) -> Result<String, String> { Ok(String::new()) }
+        fn remove(&self, _r: &str, _p: &str) -> Result<(), String> { Ok(()) }
+        fn add(&self, _r: &str, _p: &str, _b: &str, _base: &str) -> Result<(), String> { Ok(()) }
+        fn reset(&self, _p: &str) -> Result<(), String> { Ok(()) }
+        fn is_repo(&self, _p: &str) -> bool { self.0 }
+    }
+
+    fn temp_app_data() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("abp-appdata-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn create_without_a_root_lives_in_app_data() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let app_data = temp_app_data();
+        let target = std::env::temp_dir().join("abp-target-repo").to_string_lossy().into_owned();
+        let project = create_project_from_draft_inner(
+            &ws, &RepoCheck(true), &app_data, "Demo".into(), None, complete_draft("demo"), Some(target.clone()),
+        ).await.unwrap();
+        let expected_root = app_data.join("projects").join(&project.id.0);
+        assert_eq!(project.root_path, expected_root);
+        assert!(expected_root.join("pipelines/demo.yaml").exists());
+        assert_eq!(project.target_repo.as_deref(), Some(target.as_str()));
+        let _ = std::fs::remove_dir_all(&app_data);
+    }
+
+    #[tokio::test]
+    async fn create_without_a_root_or_target_errors_and_writes_nothing() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let app_data = temp_app_data();
+        let err = create_project_from_draft_inner(
+            &ws, &RepoCheck(true), &app_data, "Demo".into(), None, complete_draft("demo"), None,
+        ).await.unwrap_err();
+        assert_eq!(err, "a target repo is required when the project lives in app data");
+        assert!(ws.store.list().await.unwrap().is_empty());
+        assert!(!app_data.exists());
+    }
+
+    #[tokio::test]
+    async fn create_treats_a_whitespace_target_as_missing() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let err = create_project_from_draft_inner(
+            &ws, &RepoCheck(true), &temp_app_data(), "Demo".into(), None, complete_draft("demo"), Some("   ".into()),
+        ).await.unwrap_err();
+        assert_eq!(err, "a target repo is required when the project lives in app data");
+        assert!(ws.store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_target_that_is_not_a_git_repo() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let err = create_project_from_draft_inner(
+            &ws, &RepoCheck(false), &temp_app_data(), "Demo".into(), None, complete_draft("demo"), Some("/srv/not-a-repo".into()),
+        ).await.unwrap_err();
+        assert_eq!(err, "target repo is not a git repository: /srv/not-a-repo");
+        assert!(ws.store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_relative_target() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let err = create_project_from_draft_inner(
+            &ws, &RepoCheck(true), &temp_app_data(), "Demo".into(), None, complete_draft("demo"), Some("./app".into()),
+        ).await.unwrap_err();
+        assert_eq!(err, "target repo must be an absolute path: ./app");
+        assert!(ws.store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_expands_a_tilde_target_before_checking_it() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        let ws = workspace_state(pool).await;
+        let app_data = temp_app_data();
+        let home = std::env::var("HOME").unwrap();
+        let project = create_project_from_draft_inner(
+            &ws, &RepoCheck(true), &app_data, "Demo".into(), None, complete_draft("demo"), Some("~/code/app".into()),
+        ).await.unwrap();
+        assert_eq!(project.target_repo, Some(format!("{home}/code/app")));
+        let _ = std::fs::remove_dir_all(&app_data);
+    }
+
     #[tokio::test]
     async fn create_from_an_invalid_draft_writes_nothing_and_errors() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
@@ -2425,7 +2537,7 @@ mod design_session_tests {
         // an invalid draft: a team routes to a non-existent node -> hard validate fails
         let mut d = complete_draft("bad");
         d.teams[0].outputs.on_approve = Some("ghost".into());
-        let err = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), d, None)
+        let err = create_project_from_draft_inner(&ws, &RepoCheck(true), &temp_app_data(), "Demo".into(), Some(root.to_string_lossy().into()), d, None)
             .await
             .unwrap_err();
         assert!(!err.is_empty());
@@ -2439,7 +2551,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-cpfd-ok-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
+        let project = create_project_from_draft_inner(&ws, &RepoCheck(true), &temp_app_data(), "Demo".into(), Some(root.to_string_lossy().into()), complete_draft("demo"), None)
             .await
             .unwrap();
         // files written
@@ -2456,7 +2568,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-save-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
+        let project = create_project_from_draft_inner(&ws, &RepoCheck(true), &temp_app_data(), "Demo".into(), Some(root.to_string_lossy().into()), complete_draft("demo"), None)
             .await.unwrap();
 
         // edit: change a team prompt body, then save
@@ -2476,7 +2588,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-save-bad-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
+        let project = create_project_from_draft_inner(&ws, &RepoCheck(true), &temp_app_data(), "Demo".into(), Some(root.to_string_lossy().into()), complete_draft("demo"), None)
             .await.unwrap();
         let before = std::fs::read_to_string(root.join("prompts/research.md")).unwrap();
 
@@ -2494,7 +2606,7 @@ mod design_session_tests {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         let ws = workspace_state(pool).await;
         let root = std::env::temp_dir().join(format!("abp-todraft-{}", uuid::Uuid::new_v4()));
-        let project = create_project_from_draft_inner(&ws, "Demo".into(), root.to_string_lossy().into(), complete_draft("demo"), None)
+        let project = create_project_from_draft_inner(&ws, &RepoCheck(true), &temp_app_data(), "Demo".into(), Some(root.to_string_lossy().into()), complete_draft("demo"), None)
             .await.unwrap();
         let loaded = pipeline::store::PipelineStore::new(root.to_string_lossy().into_owned()).load("demo").unwrap();
 
