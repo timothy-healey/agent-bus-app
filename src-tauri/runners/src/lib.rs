@@ -22,5 +22,6 @@ pub mod output;
 pub mod probe;
 pub mod scope;
 pub mod stream_json;
+pub mod usage_query;
 
 pub use output::*;
