@@ -27,6 +27,8 @@ export interface UsageSnapshot {
   auto_meter_enabled: boolean;
   by_team: TeamSlice[];
   tokens_by_task: Record<string, number>;
+  /// Why the last poll failed; null after a successful poll.
+  last_error: string | null;
 }
 
 export async function usageSnapshot(): Promise<UsageSnapshot> {

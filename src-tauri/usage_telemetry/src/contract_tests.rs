@@ -30,6 +30,7 @@ fn full_snapshot() -> UsageSnapshot {
         auto_meter_enabled: false,
         by_team: vec![TeamSlice { team_id: "research".into(), tokens: 120, cost_usd: 0.25 }],
         tokens_by_task,
+        last_error: None,
     }
 }
 
@@ -38,7 +39,7 @@ fn usage_snapshot_key_set_matches_ts() {
     let v = serde_json::to_value(full_snapshot()).unwrap();
     assert_eq!(keys(&v), set(&[
         "available", "observed_at", "session", "weekly", "model_scoped", "band",
-        "braked", "auto_meter_enabled", "by_team", "tokens_by_task",
+        "braked", "auto_meter_enabled", "by_team", "tokens_by_task", "last_error",
     ]));
     assert_eq!(v["band"], Value::String("warn".into()));
     assert!(v["tokens_by_task"].is_object());
@@ -53,6 +54,8 @@ fn absent_limits_are_present_and_null() {
     assert!(v.as_object().unwrap().contains_key("session"));
     assert!(v["session"].is_null());
     assert!(v["observed_at"].is_null());
+    assert!(v.as_object().unwrap().contains_key("last_error"));
+    assert!(v["last_error"].is_null());
 }
 
 #[test]

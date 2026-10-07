@@ -66,6 +66,7 @@ export function UsageMeter({ snapshot, now = Math.floor(Date.now() / 1000) }: Us
               <Row key={l.label} label={l.label} value={`${Math.round(l.utilization_pct)}% · ${resetCountdown(l.resets_in_secs)}`} />
             ))}
           {observedAt != null && showAge && <Row label="reading" value={unavailable ? `${asOf(observedAt)} · unavailable` : asOf(observedAt)} />}
+          {unavailable && snapshot.last_error && <Row label="error" value={snapshot.last_error} />}
           <Row label="auto-brake" value={snapshot.auto_meter_enabled ? "on" : "off"} />
           <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
             <div style={{ color: "var(--text-3)", fontSize: 10.5, marginBottom: 6 }}>cost this 5h (list price)</div>

@@ -14,6 +14,7 @@ const snap = (over: Partial<UsageSnapshot> = {}): UsageSnapshot => ({
   auto_meter_enabled: false,
   by_team: [{ team_id: "research", tokens: 240, cost_usd: 0.25 }],
   tokens_by_task: {},
+  last_error: null,
   ...over,
 });
 

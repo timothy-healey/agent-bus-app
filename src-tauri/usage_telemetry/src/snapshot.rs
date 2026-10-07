@@ -64,6 +64,8 @@ pub struct UsageSnapshot {
     pub by_team: Vec<TeamSlice>,
     /// task_id -> lifetime tokens, for the board cards.
     pub tokens_by_task: HashMap<String, u64>,
+    /// Why the last poll failed; None after a successful poll.
+    pub last_error: Option<String>,
 }
 
 fn view(l: &LimitReading, now: i64) -> LimitView {
@@ -118,6 +120,7 @@ pub async fn compute_snapshot(
         auto_meter_enabled: cfg.auto_meter_enabled,
         by_team,
         tokens_by_task,
+        last_error: stored.last_error,
     })
 }
 
@@ -168,6 +171,7 @@ mod tests {
         util.record_ok(&reading(41.0, 88.0), 900).await;
         let snap = compute_snapshot(&WorkerUsageStore::new(p), &util, &UsageConfig::default(), false, 1_000).await.unwrap();
         assert!(snap.available);
+        assert_eq!(snap.last_error, None);
         assert_eq!(snap.observed_at, Some(900));
         assert_eq!(snap.session.as_ref().unwrap().utilization_pct, 41.0);
         assert_eq!(snap.session.as_ref().unwrap().resets_in_secs, 3_600);
@@ -185,6 +189,7 @@ mod tests {
         util.record_err("usage query timed out", 950).await;
         let snap = compute_snapshot(&WorkerUsageStore::new(p), &util, &UsageConfig::default(), false, 1_000).await.unwrap();
         assert!(!snap.available);
+        assert_eq!(snap.last_error.as_deref(), Some("usage query timed out"));
         assert_eq!(snap.session.unwrap().utilization_pct, 41.0);
     }
 

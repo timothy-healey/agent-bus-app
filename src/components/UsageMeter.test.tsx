@@ -14,6 +14,7 @@ const snap = (over: Partial<UsageSnapshot> = {}): UsageSnapshot => ({
   auto_meter_enabled: false,
   by_team: [{ team_id: "research", tokens: 240, cost_usd: 0.25 }],
   tokens_by_task: {},
+  last_error: null,
   ...over,
 });
 
@@ -46,6 +47,15 @@ describe("UsageMeter", () => {
     render(<UsageMeter snapshot={snap({ available: false })} now={1_010} />);
     expect(headline().getByText(/— usage unavailable/)).toBeInTheDocument();
     expect(headline().getByText(/as of/)).toBeInTheDocument();
+  });
+
+  it("shows why the last poll failed in the tooltip", () => {
+    const { container } = render(
+      <UsageMeter snapshot={snap({ available: false, last_error: "usage query timed out" })} now={1_010} />,
+    );
+    const tooltip = within(container.querySelector(".usage-tooltip") as HTMLElement);
+    expect(tooltip.getByText("error")).toBeInTheDocument();
+    expect(tooltip.getByText("usage query timed out")).toBeInTheDocument();
   });
 
   it("says usage unavailable even when the failed poll left no session reading", () => {
