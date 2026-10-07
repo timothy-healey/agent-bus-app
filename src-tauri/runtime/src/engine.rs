@@ -130,6 +130,10 @@ pub enum StepOutcome {
     /// A gate verdict could not be applied yet because the downstream store was
     /// full (approve backpressure) — the gated item stays put; retry later.
     GateBackpressure { task_id: String },
+    /// A reviewer's revise could not be sent back yet because the target store
+    /// is full: the reviewed item is parked `revising` at the reviewer stage
+    /// (keeping its slot) and is sent back by a later `transform_once`.
+    ReviseBackpressure { task_id: String },
     /// A join barrier completed but its continuation (downstream or
     /// revise-to-producer) store was full — the group is already marked
     /// completed; the continuation is retried by a later driver round.
@@ -314,10 +318,22 @@ pub fn topic_for_item(description: Option<&str>, item_key: &str) -> String {
 /// this team's own input slot is freed (the item left). On failure the reservation
 /// is released and the item follows the operational-failure path (a bounded
 /// synthetic revise → needs-human).
+///
+/// A reviewer's verdict is acted on for every edge kind: approve commits
+/// downstream as above; revise and reject route through `route_reviewer_verdict`
+/// (a join target keeps the barrier's own policy).
 pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutcome, EngineError> {
     // 1. BRAKE
     if ctx.brake.is_on() {
         return Ok(StepOutcome::Braked);
+    }
+
+    // 1b. A reviewer first retries a revise parked on a full target store; it
+    //     needs no new run.
+    if team.role == pipeline::model::Role::Reviewer {
+        if let Some(outcome) = retry_parked_revise(ctx, team).await? {
+            return Ok(outcome);
+        }
     }
 
     // 2. Determine the downstream store + RESERVE a slot there (block-before-claim).
@@ -427,6 +443,15 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
         // The lane item left this team's input store (the barrier parked it Done).
         ctx.stores.release(&ctx.run_id, &team.id).await?;
         return Ok(outcome);
+    }
+
+    // 5a-ter. A reviewer's revise or reject: the reserved approve slot goes
+    //     unused, and the item is sent back or escalated.
+    if let Some(v) = verdict.filter(|v| *v != agent_bus_core::Verdict::Approve) {
+        if let Some(ds) = &downstream {
+            ctx.stores.release(&ctx.run_id, ds).await?;
+        }
+        return route_reviewer_verdict(ctx, team, &mut task, v).await;
     }
 
     // 5b. SUCCESS. Commit the produced item into the reserved downstream slot as
@@ -561,51 +586,166 @@ pub async fn apply_gate_verdict(
             // Route BACK to the producing team (the upstream whose on_approve
             // targets this gate). Re-queue a child there with attempts bumped so
             // the revision-bundle reader composes the feedback at re-claim.
-            let producer = producer_of_gate(ctx, &gate_id).ok_or_else(|| EngineError::NoRoute(gate_id.clone()))?;
-            ctx.stores
-                .ensure(&ctx.run_id, &producer, stage_store_capacity(ctx, &producer))
-                .await?;
-            if !ctx.stores.reserve(&ctx.run_id, &producer).await? {
-                return Ok(StepOutcome::GateBackpressure { task_id: task.id.0 });
-            }
-            let key = task.item_key.clone().unwrap_or_default();
-            let mut child = Task::work_item(
-                task.project_id.clone(),
-                task.pipeline.clone(),
-                ctx.run_id.clone(),
-                key,
-                producer.clone(),
-                task.parent_artifact.clone(),
-                task.target_repo.clone(),
-                now_unix(),
-            );
+            let producer = producer_of_stage(ctx, &gate_id).ok_or_else(|| EngineError::NoRoute(gate_id.clone()))?;
             // A revise is a re-claim: bump attempts so compose_invocation_message
             // pulls the persisted feedback bundle (revise-once feedback path).
-            child.attempts = (task.attempts + 1).min(MAX_ATTEMPTS);
-            // Worktree isolation: a revise→implement loop reuses the same tree.
-            child.worktree_path = task.worktree_path.clone();
-            ctx.tasks.insert(&child).await?;
-            task.state = TaskState::Done;
-            task.updated_at = now_unix();
-            ctx.tasks.update(&task).await?;
-            ctx.stores.release(&ctx.run_id, &gate_id).await?;
+            let attempts = (task.attempts + 1).min(MAX_ATTEMPTS);
+            if !send_back(ctx, &task, &producer, attempts).await? {
+                return Ok(StepOutcome::GateBackpressure { task_id: task.id.0 });
+            }
+            leave_stage_done(ctx, &mut task, &gate_id).await?;
             Ok(StepOutcome::Revised { task_id: task.id.0, producer })
         }
         Verdict::Reject => {
             // Escalate to the needs-human terminal; free the gate slot.
-            task.state = TaskState::NeedsHuman;
-            task.current_stage = escalation_id(ctx);
-            task.updated_at = now_unix();
-            ctx.tasks.update(&task).await?;
+            escalate(ctx, &mut task, escalation_id(ctx)).await?;
             ctx.stores.release(&ctx.run_id, &gate_id).await?;
             Ok(StepOutcome::Escalated { task_id: task.id.0 })
         }
     }
 }
 
-/// The producing team that feeds a gate: the team whose `on_approve` targets the
-/// gate id. PURE-ish (reads the pipeline).
-fn producer_of_gate(ctx: &EngineContext, gate_id: &str) -> Option<String> {
+/// Send-back step shared by a gate revise and a reviewer revise: reserve a slot
+/// in `target`'s store and queue a child there carrying the item's key, input
+/// artifact, topic, repo and worktree, with `attempts`. Returns `false` (and
+/// queues nothing) when the target store is full.
+async fn send_back(ctx: &EngineContext, task: &Task, target: &str, attempts: u32) -> Result<bool, EngineError> {
+    ctx.stores
+        .ensure(&ctx.run_id, target, stage_store_capacity(ctx, target))
+        .await?;
+    if !ctx.stores.reserve(&ctx.run_id, target).await? {
+        return Ok(false);
+    }
+    let mut child = Task::work_item(
+        task.project_id.clone(),
+        task.pipeline.clone(),
+        ctx.run_id.clone(),
+        task.item_key.clone().unwrap_or_default(),
+        target.to_string(),
+        task.parent_artifact.clone(),
+        task.target_repo.clone(),
+        now_unix(),
+    );
+    child.attempts = attempts;
+    child.topic = task.topic.clone();
+    // Worktree isolation: a revise→implement loop reuses the same tree.
+    child.worktree_path = task.worktree_path.clone();
+    ctx.tasks.insert(&child).await?;
+    Ok(true)
+}
+
+/// Escalate step shared by a gate reject and a reviewer revise/reject: the item
+/// itself becomes needs-human at `target`.
+async fn escalate(ctx: &EngineContext, task: &mut Task, target: String) -> Result<(), EngineError> {
+    task.state = TaskState::NeedsHuman;
+    task.current_stage = target;
+    task.updated_at = now_unix();
+    ctx.tasks.update(task).await?;
+    Ok(())
+}
+
+/// The item has left `stage` (sent on or back): mark it done and free its slot.
+async fn leave_stage_done(ctx: &EngineContext, task: &mut Task, stage: &str) -> Result<(), EngineError> {
+    task.state = TaskState::Done;
+    task.updated_at = now_unix();
+    ctx.tasks.update(task).await?;
+    ctx.stores.release(&ctx.run_id, stage).await?;
+    Ok(())
+}
+
+/// Where a reviewer's revise takes an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReviseRoute {
+    /// Queue a child at this team with this attempt count.
+    SendBack { target: String, attempts: u32 },
+    /// Make the item needs-human at this stage.
+    Escalate(String),
+}
+
+/// Resolve a reviewer's revise: `on_revise` when set (a team, or an escalation
+/// to escalate to), else the team whose `on_approve` is the reviewer. With no
+/// such team, or when it is the pipeline's source (the generator consumes no
+/// store), the item escalates. Attempts count from the target's last attempt on
+/// this item, so the loop ends in needs-human once the target has worked it
+/// `MAX_ATTEMPTS` times.
+async fn revise_route(ctx: &EngineContext, team: &Team, task: &Task) -> Result<ReviseRoute, EngineError> {
+    let target = match team.outputs.on_revise.as_deref() {
+        Some(t) => match resolve_target(&ctx.pipeline, t) {
+            RouteTarget::Team(target) => Some(target.id),
+            RouteTarget::Escalation(e) => return Ok(ReviseRoute::Escalate(e.id)),
+            _ => None,
+        },
+        None => producer_of_stage(ctx, &team.id),
+    };
+    let source = crate::api::source_team(&ctx.pipeline).map(|t| t.id.clone());
+    let Some(target) = target.filter(|t| Some(t) != source.as_ref()) else {
+        return Ok(ReviseRoute::Escalate(escalation_id(ctx)));
+    };
+    let key = task.item_key.clone().unwrap_or_default();
+    let last = ctx.tasks.max_attempts_at_stage(&ctx.run_id, &key, &target).await?.unwrap_or(0);
+    if last >= MAX_ATTEMPTS {
+        return Ok(ReviseRoute::Escalate(escalation_id(ctx)));
+    }
+    // At least 2: a send-back is a re-claim, which composes the revision bundle.
+    Ok(ReviseRoute::SendBack { target, attempts: last.max(1) + 1 })
+}
+
+/// Act on a reviewer's revise or reject for an item claimed at `team` (any edge
+/// kind but a join). Reject escalates to `on_reject` (the pipeline's escalation
+/// when unset). Revise sends the item back per `revise_route`; when the target
+/// store is full the item is parked `revising` here, keeping its slot, and
+/// `retry_parked_revise` sends it on a later poll.
+async fn route_reviewer_verdict(
+    ctx: &EngineContext,
+    team: &Team,
+    task: &mut Task,
+    verdict: agent_bus_core::Verdict,
+) -> Result<StepOutcome, EngineError> {
+    let route = match verdict {
+        agent_bus_core::Verdict::Reject => {
+            ReviseRoute::Escalate(team.outputs.on_reject.clone().unwrap_or_else(|| escalation_id(ctx)))
+        }
+        _ => revise_route(ctx, team, task).await?,
+    };
+    match route {
+        ReviseRoute::Escalate(target) => {
+            escalate(ctx, task, target).await?;
+            ctx.stores.release(&ctx.run_id, &team.id).await?;
+            Ok(StepOutcome::Escalated { task_id: task.id.0.clone() })
+        }
+        ReviseRoute::SendBack { target, attempts } => {
+            if send_back(ctx, task, &target, attempts).await? {
+                leave_stage_done(ctx, task, &team.id).await?;
+                Ok(StepOutcome::Revised { task_id: task.id.0.clone(), producer: target })
+            } else {
+                task.state = TaskState::Revising;
+                task.updated_at = now_unix();
+                ctx.tasks.update(task).await?;
+                Ok(StepOutcome::ReviseBackpressure { task_id: task.id.0.clone() })
+            }
+        }
+    }
+}
+
+/// Retry one revise parked at `team` by `route_reviewer_verdict`. `None` when
+/// nothing is parked or its target store is still full.
+async fn retry_parked_revise(ctx: &EngineContext, team: &Team) -> Result<Option<StepOutcome>, EngineError> {
+    let parked = ctx.tasks.list_by_state(TaskState::Revising).await?;
+    let Some(mut task) = parked
+        .into_iter()
+        .find(|t| t.run_id.as_deref() == Some(ctx.run_id.as_str()) && t.current_stage == team.id)
+    else {
+        return Ok(None);
+    };
+    match route_reviewer_verdict(ctx, team, &mut task, agent_bus_core::Verdict::Revise).await? {
+        StepOutcome::ReviseBackpressure { .. } => Ok(None),
+        outcome => Ok(Some(outcome)),
+    }
+}
+
+/// The producing team that feeds a stage (a gate or a team): the team whose
+/// `on_approve` targets it. PURE-ish (reads the pipeline).
+fn producer_of_stage(ctx: &EngineContext, gate_id: &str) -> Option<String> {
     ctx.pipeline
         .teams
         .iter()
@@ -3303,6 +3443,166 @@ mod tests {
         assert!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().is_empty());
         assert!(!ctx.runs.get(&ctx.run_id).await.unwrap().generator_dry, "a failed pass is not dry");
         assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(0));
+    }
+
+    // ---- Reviewer verdicts on a plain edge ----
+
+    /// src (generator) -> prod -> rev (reviewer) -> done.
+    fn review_pipeline(rev_routes: pipeline::model::Routes) -> Pipeline {
+        let mut rev = team("rev", Some("done"), Role::Reviewer, 8);
+        rev.outputs = rev_routes;
+        pipeline(vec![
+            team("src", Some("prod"), Role::Producer, 8),
+            team("prod", Some("rev"), Role::Producer, 8),
+            rev,
+            team("done", None, Role::Producer, 8),
+        ])
+    }
+
+    fn routes(approve: Option<&str>, revise: Option<&str>, reject: Option<&str>) -> pipeline::model::Routes {
+        pipeline::model::Routes {
+            on_approve: approve.map(String::from),
+            on_revise: revise.map(String::from),
+            on_reject: reject.map(String::from),
+        }
+    }
+
+    /// A reviewer ctx with `prod` having run item `alpha` `prod_attempts` times
+    /// and the reviewed item queued at `rev`.
+    async fn reviewed(p: Pipeline, verdict: Verdict, prod_attempts: u32) -> (EngineContext, Task, Arc<FakeRunner>) {
+        let runner = Arc::new(FakeRunner::always(reviewer_out(verdict, "the error handling is thin")));
+        let ctx = ctx_with(fresh_pool().await, p, runner.clone()).await;
+        for s in ["prod", "rev", "done", "alt"] {
+            ctx.stores.ensure(&ctx.run_id, s, 8).await.unwrap();
+        }
+        let mut produced = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "prod".into(), None, None, 50);
+        produced.attempts = prod_attempts;
+        produced.state = TaskState::Done;
+        ctx.tasks.insert(&produced).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "rev").await.unwrap();
+        let mut item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "rev".into(), Some("artifacts/alpha.md".into()), None, 100);
+        item.topic = "Investigate alpha".into();
+        ctx.tasks.insert(&item).await.unwrap();
+        (ctx, item, runner)
+    }
+
+    fn rev_team(ctx: &EngineContext) -> Team {
+        ctx.pipeline.teams.iter().find(|t| t.id == "rev").unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_approve_on_a_plain_edge_forwards_the_reviewed_artifact() {
+        let (ctx, item, _) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Approve, 1).await;
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert!(matches!(o, StepOutcome::Advanced { ref downstream, .. } if downstream == "done"), "{o:?}");
+        let child = ctx.tasks.claim_next_for_stage("done", 200).await.unwrap().unwrap();
+        assert_eq!(child.parent_artifact.as_deref(), Some("artifacts/alpha.md"));
+        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_revise_on_a_plain_edge_sends_the_item_back_to_its_producer() {
+        let (ctx, item, _) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Revise, 1).await;
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::Revised { task_id: item.id.0.clone(), producer: "prod".into() });
+        let back = ctx.tasks.claim_next_for_stage("prod", 200).await.unwrap().expect("a child at the producer");
+        assert_eq!(back.attempts, 2, "the producer's last attempt + 1");
+        assert_eq!(back.item_key.as_deref(), Some("alpha"));
+        assert_eq!(back.parent_artifact.as_deref(), Some("artifacts/alpha.md"));
+        assert_eq!(back.topic, "Investigate alpha");
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "done").await.unwrap(), Some(0), "approve slot released");
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(0), "reviewer slot freed");
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "prod").await.unwrap(), Some(1));
+        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Done);
+        assert!(ctx.tasks.claim_next_for_stage("done", 200).await.unwrap().is_none(), "nothing went forward");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_revise_honours_on_revise() {
+        let mut p = review_pipeline(routes(Some("done"), Some("alt"), None));
+        p.teams.push(team("alt", Some("rev"), Role::Producer, 8));
+        let (ctx, item, _) = reviewed(p, Verdict::Revise, 1).await;
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::Revised { task_id: item.id.0.clone(), producer: "alt".into() });
+        let back = ctx.tasks.claim_next_for_stage("alt", 200).await.unwrap().unwrap();
+        assert_eq!(back.attempts, 2, "a re-claim, so the revision bundle is composed");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_revise_at_the_attempts_cap_escalates() {
+        let (ctx, item, _) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Revise, MAX_ATTEMPTS).await;
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::Escalated { task_id: item.id.0.clone() });
+        let t = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!((t.state, t.current_stage.as_str()), (TaskState::NeedsHuman, "needs-human"));
+        assert!(ctx.tasks.claim_next_for_stage("prod", 200).await.unwrap().is_none());
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "done").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_revise_with_only_the_generator_upstream_escalates() {
+        let mut rev = team("rev", None, Role::Reviewer, 8);
+        rev.outputs = routes(None, None, None);
+        let p = pipeline(vec![team("src", Some("rev"), Role::Producer, 8), rev]);
+        let (ctx, item, _) = reviewed(p, Verdict::Revise, 1).await;
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::Escalated { task_id: item.id.0.clone() });
+        assert!(ctx.tasks.claim_next_for_stage("src", 200).await.unwrap().is_none(), "the generator consumes no store");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_reject_escalates_to_on_reject() {
+        let (ctx, item, _) = reviewed(review_pipeline(routes(Some("done"), None, Some("human-desk"))), Verdict::Reject, 1).await;
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::Escalated { task_id: item.id.0.clone() });
+        let t = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!((t.state, t.current_stage.as_str()), (TaskState::NeedsHuman, "human-desk"));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "done").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_reject_without_on_reject_escalates_to_the_pipeline_escalation() {
+        let (ctx, item, _) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Reject, 1).await;
+        transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        let t = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!((t.state, t.current_stage.as_str()), (TaskState::NeedsHuman, "needs-human"));
+    }
+
+    #[tokio::test]
+    async fn a_revise_into_a_full_producer_store_parks_then_sends_back_without_rerunning() {
+        let (ctx, item, runner) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Revise, 1).await;
+        // prod is full
+        ctx.stores.ensure(&ctx.run_id, "prod", 1).await.unwrap();
+        while ctx.stores.reserve(&ctx.run_id, "prod").await.unwrap() {}
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::ReviseBackpressure { task_id: item.id.0.clone() });
+        let t = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!((t.state, t.current_stage.as_str()), (TaskState::Revising, "rev"));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(1), "keeps its slot");
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "done").await.unwrap(), Some(0));
+        // still full: the next poll leaves it parked and finds nothing else to do
+        assert_eq!(transform_once(&ctx, &rev_team(&ctx)).await.unwrap(), StepOutcome::Idle);
+        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Revising);
+        // room appears: the next poll sends it back without invoking the runner
+        ctx.stores.release(&ctx.run_id, "prod").await.unwrap();
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::Revised { task_id: item.id.0.clone(), producer: "prod".into() });
+        assert_eq!(runner.received.lock().unwrap().len(), 1, "the review ran once");
+        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Done);
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_before_a_gate_sends_a_revise_back_instead_of_gating() {
+        let mut p = review_pipeline(routes(Some("human-gate"), None, None));
+        p.gates.push(gate("human-gate", "done"));
+        let (ctx, item, _) = reviewed(p, Verdict::Revise, 1).await;
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        assert_eq!(o, StepOutcome::Revised { task_id: item.id.0.clone(), producer: "prod".into() });
+        assert!(ctx.tasks.list_by_state(TaskState::Gated).await.unwrap().is_empty());
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(0));
     }
 
     #[tokio::test]
