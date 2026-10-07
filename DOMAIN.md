@@ -127,7 +127,9 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 ### Runners (ACL)
 - **Invocation** — one Claude call: CLI subprocess or API request
 - **Runner kind** — `claude-cli` (subscription) or `anthropic-api` (key)
-- **Effort** — thinking-token budget: `off` (0), `standard` (1024), `extended-low` (8192), `extended-high` (32000), `custom`
+- **Model** — a `value` from the CLI's model list: an alias that tracks the current model (`default`, `opus`, `sonnet`) or a pinned id (`claude-opus-4-8`). Valid only if the list contains it.
+- **Effort** — how hard the model reasons: one of the model's supported effort levels (e.g. `low` … `max`), or **Default**, leaving the choice to the model. A model without effort support only takes Default.
+- **Model list** — the models the installed CLI offers, each with its supported effort levels; the one source of truth for which Model and Effort combinations are valid. Live, cached, or built-in.
 - **Scope** — the per-invocation **permission policy** derived from a team's reads/writes/tools. Projected to Claude's `settings.json` (permission allow/deny) and, EXPERIMENTALLY (S3, opt-in, macOS-only, Apple-deprecated `sandbox-exec`), to an SBPL `sandbox-exec` profile. Both projections live in `runners/src/scope.rs` (`build_settings` / `sandbox_profile`); the SBPL idiom is sealed inside the Runners ACL and never crosses the `Runner` trait. The live OS confinement is structural-only (unverified) — NOT a proven security boundary.
 - **Log delta** — a display-only assistant-prose fragment the *streaming* worker invocation (`invoke_stream`) forwards via a `LogSink` (`Box<dyn Fn(&str)>`) as it runs; carries no verdict/artifact and never crosses the ACL as stream-json. Mirrors LLM Chat's prose delta (`DeltaSink`), kept as a separate type because the two ACLs are distinct (R4).
 
@@ -152,7 +154,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 Two deliberate shared kernels (both small, both stable, both with explicit ownership rules):
 
 1. **Workspace path-resolution kernel** — the path variables (`${project}`, `${target_repo}`, `${task_id}`, `${agent_bus}`) every context consumes when locating files. Owned by the Workspace context; published as a small API.
-2. **`agent_bus_core` cross-context primitives** — a dedicated Rust crate holding ID newtypes (`TaskId`, `TeamId`, `PipelineId`, `ProjectId`, `ArtifactPath`), cross-context enums (`Verdict`, `RunnerKind`, `EffortMode`), and the OHS tool protocol (`ToolSpec`, `ToolCallRequest`, `ToolCallResult`). No owner-context; this kernel is owned by the architecture itself. Depends on nothing project-internal. Every context depends on it.
+2. **`agent_bus_core` cross-context primitives** — a dedicated Rust crate holding ID newtypes (`TaskId`, `TeamId`, `PipelineId`, `ProjectId`, `ArtifactPath`), cross-context enums (`Verdict`, `RunnerKind`, `Effort`), and the OHS tool protocol (`ToolSpec`, `ToolCallRequest`, `ToolCallResult`). No owner-context; this kernel is owned by the architecture itself. Depends on nothing project-internal. Every context depends on it.
 
 These are *deliberate* shared kernels — explicit, named, small, with documented invariants. They do not trip the accidental-shared-kernel detector because the detector config (below) marks both as kernels.
 
