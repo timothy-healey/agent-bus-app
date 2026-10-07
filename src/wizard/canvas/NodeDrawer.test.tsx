@@ -199,6 +199,29 @@ describe("NodeDrawer — model and effort pickers", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/xhigh.*claude-opus-4-6.*Default/);
   });
 
+  it("the snap note does not follow the drawer to another team", async () => {
+    function Host() {
+      const [d, setD] = useState(() => {
+        const two = addTeam(setTeamEffort(withModel("opus"), "research", "xhigh"), "review", "Review");
+        return two;
+      });
+      const [sel, setSel] = useState("research");
+      return (
+        <>
+          <button onClick={() => setSel("review")}>select review</button>
+          <NodeDrawer draft={d} selectedId={sel} onChange={setD} onClose={() => {}} />
+        </>
+      );
+    }
+    render(<Host />);
+    await screen.findByRole("option", { name: "claude-opus-4-6" });
+    fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "claude-opus-4-6" } });
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("select review"));
+    await screen.findByLabelText("model for review");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
   it("switching to a model that supports the level keeps it with no note", async () => {
     function Host() {
       const [d, setD] = useState(() => setTeamEffort(withModel("opus"), "research", "high"));

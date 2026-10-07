@@ -91,8 +91,8 @@ function parseCsv(raw: string): string[] {
   return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
-/// Set a team's effort level; `undefined` is Default and removes the key, so
-/// it is never sent as `null` (which the backend rejects).
+/// Set a team's effort level; `undefined` is Default and removes the key, the
+/// shape the backend writes for Default.
 export function setTeamEffort(d: DraftPipeline, id: string, effort: Effort | undefined): DraftPipeline {
   return mapTeams(d, (t) => {
     if (t.id !== id) return t;

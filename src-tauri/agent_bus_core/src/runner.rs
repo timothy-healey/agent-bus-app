@@ -20,7 +20,7 @@ pub const DEFAULT_TEAM_MODEL: &str = "default";
 /// level needs no app release; the model list decides which are valid.
 ///
 /// Serialised as a bare string; Default is never written (fields skip it). A
-/// map is the retired thinking-budget shape and reads as Default.
+/// map is the retired thinking-budget shape and reads as Default, as does null.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Effort {
     #[default]
@@ -67,6 +67,15 @@ impl<'de> Deserialize<'de> for Effort {
 
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Effort, E> {
                 Ok(Effort::Level(v.to_string()))
+            }
+
+            // Null (a blank `effort:`) is Default, the value Default serialises to.
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Effort, E> {
+                Ok(Effort::Default)
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Effort, E> {
+                Ok(Effort::Default)
             }
 
             // A map is the retired thinking-budget shape; it carries no level.
@@ -118,6 +127,14 @@ mod tests {
             let e: Effort = serde_json::from_str(legacy).unwrap();
             assert_eq!(e, Effort::Default, "{legacy}");
         }
+    }
+
+    #[test]
+    fn null_reads_as_default_so_serialize_and_deserialize_pair_up() {
+        let e: Effort = serde_json::from_str("null").unwrap();
+        assert_eq!(e, Effort::Default);
+        let back: Effort = serde_json::from_value(serde_json::to_value(Effort::Default).unwrap()).unwrap();
+        assert_eq!(back, Effort::Default);
     }
 
     #[test]

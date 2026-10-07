@@ -89,6 +89,18 @@ escalations:
     }
 
     #[test]
+    fn a_blank_effort_loads_as_default() {
+        let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: t.md\n    scope: {}\n    outputs: {}\n    runner:\n      kind: claude-cli\n      model: m\n      effort:\n";
+        let p = parse_pipeline(yaml).unwrap();
+        assert_eq!(p.teams[0].runner.as_ref().unwrap().effort, None);
+        let draft: crate::draft::DraftTeam = serde_json::from_str(
+            r#"{"id":"t","name":"T","prompt_body":"","runner":{"kind":"claude-cli","model":"m","effort":null},"scope":{"reads":[],"writes":[],"tools":[]},"outputs":{},"workers":{"min":1,"max":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(draft.runner.effort, Effort::Default);
+    }
+
+    #[test]
     fn a_numeric_effort_is_a_parse_error() {
         let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: t.md\n    scope: {}\n    outputs: {}\n    runner: { kind: claude-cli, model: m, effort: 8192 }\n";
         assert!(parse_pipeline(yaml).is_err());

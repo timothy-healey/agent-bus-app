@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type RunnerKind = "claude-cli" | "anthropic-api";
 
 /** A CLI effort level (e.g. "high"), passed as `--effort`. An absent effort is
- *  Default: no flag, the model's own default applies. Never send `null`. */
+ *  Default: no flag, the model's own default applies. */
 export type Effort = string;
 
 export interface RunnerConfig {

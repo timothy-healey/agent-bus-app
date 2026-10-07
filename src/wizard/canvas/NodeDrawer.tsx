@@ -375,7 +375,8 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { dr
       <fieldset style={group}>
         <TipLegend text={HELP.runner}>Runner</TipLegend>
         <div style={{ display: "grid", gap: "var(--sp-3)" }}>
-          <RunnerPickers draft={draft} team={t} onChange={onChange} />
+          {/* Keyed by team so the snap note belongs to the team it was about. */}
+          <RunnerPickers key={t.id} draft={draft} team={t} onChange={onChange} />
           <Field label="API-key env var (name only)">
             <input
               aria-label={`api key env for ${id}`}
