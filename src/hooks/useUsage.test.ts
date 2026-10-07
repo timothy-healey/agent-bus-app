@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useUsage } from "./useUsage";
+import type { UsageSnapshot } from "../ipc/usage";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
@@ -14,11 +15,21 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-const snap = (pct: number) => ({
-  window_total: 100, window_budget: 200, window_pct: pct, band: "safe",
-  burn_per_min: 0, window_secs: 18000, reset_in_secs: null, est_brake_at: null,
-  by_team: [], tokens_by_task: {}, braked: false,
+const base = (over: Partial<UsageSnapshot> = {}): UsageSnapshot => ({
+  available: true,
+  observed_at: 1_000,
+  session: { label: "session (5h)", utilization_pct: 41, resets_in_secs: 3_600 },
+  weekly: { label: "weekly (7d)", utilization_pct: 2, resets_in_secs: 86_400 },
+  model_scoped: [{ label: "Fable weekly", utilization_pct: 0, resets_in_secs: 86_400 }],
+  band: "safe",
+  braked: false,
+  auto_meter_enabled: false,
+  by_team: [{ team_id: "research", tokens: 240, cost_usd: 0.25 }],
+  tokens_by_task: {},
+  last_error: null,
+  ...over,
 });
+const snap = (pct: number) => base({ session: { label: "session (5h)", utilization_pct: pct * 100, resets_in_secs: 1 } });
 
 describe("useUsage", () => {
   beforeEach(() => {
@@ -29,16 +40,16 @@ describe("useUsage", () => {
   it("loads a snapshot on mount", async () => {
     invokeMock.mockResolvedValue(snap(0.5));
     const { result } = renderHook(() => useUsage());
-    await waitFor(() => expect(result.current.snapshot?.window_pct).toBe(0.5));
+    await waitFor(() => expect(result.current.snapshot?.session?.utilization_pct).toBe(50));
     expect(invokeMock).toHaveBeenCalledWith("usage_snapshot");
   });
 
   it("refetches when usage.changed fires", async () => {
     invokeMock.mockResolvedValueOnce(snap(0.2)).mockResolvedValueOnce(snap(0.8));
     const { result } = renderHook(() => useUsage());
-    await waitFor(() => expect(result.current.snapshot?.window_pct).toBe(0.2));
+    await waitFor(() => expect(result.current.snapshot?.session?.utilization_pct).toBe(20));
     await act(async () => { await Promise.resolve(); });
     act(() => listeners["usage-changed"]?.({ payload: null }));
-    await waitFor(() => expect(result.current.snapshot?.window_pct).toBe(0.8));
+    await waitFor(() => expect(result.current.snapshot?.session?.utilization_pct).toBe(80));
   });
 });

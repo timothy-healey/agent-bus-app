@@ -17,6 +17,7 @@ pub struct RunnerUsage {
     pub output_tokens: u64,
     pub cache_creation: u64,
     pub cache_read: u64,
+    pub cost_micros: Option<u64>,
 }
 
 /// The result of one completed invocation, translated out of Claude's idiom.
@@ -215,6 +216,7 @@ mod tests {
                 output_tokens: 20,
                 cache_creation: 0,
                 cache_read: 5,
+                cost_micros: None,
             },
         };
         let s = serde_json::to_string(&out).unwrap();

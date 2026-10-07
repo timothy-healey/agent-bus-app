@@ -21,6 +21,8 @@ pub struct UsageEvent {
     pub output_tokens: u64,
     pub cache_creation: u64,
     pub cache_read: u64,
+    /// List-price Cost of the invocation in micro-dollars, when Claude reported it.
+    pub cost_micros: Option<u64>,
 }
 
 /// The consumer seam. Usage Telemetry implements this over `worker_usage_log`.
@@ -59,6 +61,7 @@ mod tests {
             output_tokens: 20,
             cache_creation: 5,
             cache_read: 3,
+            cost_micros: None,
         };
         let s = serde_json::to_string(&e).unwrap();
         let back: UsageEvent = serde_json::from_str(&s).unwrap();
@@ -77,6 +80,7 @@ mod tests {
             output_tokens: 0,
             cache_creation: 0,
             cache_read: 0,
+            cost_micros: None,
         });
     }
 }

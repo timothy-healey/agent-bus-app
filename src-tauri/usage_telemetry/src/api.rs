@@ -1,10 +1,9 @@
 //! Usage Telemetry OHS — the context's Tauri commands + the `tools()` catalog
 //! consumed by Conversational Control (Plan 6). State holds the two stores + the
-//! config; `usage_snapshot` recomputes on demand, `usage_set_budget` writes the
-//! config row. The brake STATE is Runtime's — these commands never touch it.
+//! config; `usage_snapshot` recomputes on demand. The brake STATE is Runtime's — these commands never touch it.
 
-use crate::cc_log::CcUsageStore;
 use crate::snapshot::{compute_snapshot, UsageConfig, UsageSnapshot};
+use crate::utilization_store::UtilizationStore;
 use crate::worker_log::WorkerUsageStore;
 use agent_bus_core::ToolSpec;
 use schemars::JsonSchema;
@@ -25,12 +24,6 @@ pub mod args {
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema, Default)]
     pub struct UsageSnapshotArgs {}
 
-    /// `usage_set_budget` — the rolling-window token budget (the denominator).
-    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
-    pub struct SetBudgetArgs {
-        pub budget: i64,
-    }
-
     /// `usage_set_auto_meter` — enable/disable the reactive auto-meter brake.
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
     pub struct SetAutoMeterArgs {
@@ -41,8 +34,8 @@ pub mod args {
 /// Shared Telemetry state held by Tauri's state manager. `braked` is read from a
 /// callback the root installs (so Telemetry doesn't depend on Runtime's type).
 pub struct UsageState {
-    pub cc: Arc<CcUsageStore>,
     pub worker: Arc<WorkerUsageStore>,
+    pub util: Arc<UtilizationStore>,
     pub pool: SqlitePool,
     /// Returns Runtime's current brake on/off. Installed by the root (D9).
     pub is_braked: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -54,8 +47,8 @@ fn now_unix() -> i64 {
 
 /// Load the single config row (id=1). Falls back to defaults if absent.
 pub async fn load_config(pool: &SqlitePool) -> UsageConfig {
-    let row: Option<(i64, i64, f64, f64, i64)> = sqlx::query_as(
-        "SELECT window_budget, window_secs, brake_on_pct, brake_off_pct, auto_meter_enabled
+    let row: Option<(i64, f64, f64, i64)> = sqlx::query_as(
+        "SELECT window_secs, brake_on_pct, brake_off_pct, auto_meter_enabled
          FROM usage_config WHERE id = 1",
     )
     .fetch_optional(pool)
@@ -63,8 +56,7 @@ pub async fn load_config(pool: &SqlitePool) -> UsageConfig {
     .ok()
     .flatten();
     match row {
-        Some((budget, secs, on, off, auto)) => UsageConfig {
-            window_budget: budget as u64,
+        Some((secs, on, off, auto)) => UsageConfig {
             window_secs: secs,
             brake_on_pct: on,
             brake_off_pct: off,
@@ -78,25 +70,9 @@ pub async fn load_config(pool: &SqlitePool) -> UsageConfig {
 pub async fn usage_snapshot(state: tauri::State<'_, UsageState>) -> Result<UsageSnapshot, String> {
     let cfg = load_config(&state.pool).await;
     let braked = (state.is_braked)();
-    compute_snapshot(&state.cc, &state.worker, &cfg, braked, now_unix())
+    compute_snapshot(&state.worker, &state.util, &cfg, braked, now_unix())
         .await
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub async fn usage_set_budget(
-    state: tauri::State<'_, UsageState>,
-    budget: i64,
-) -> Result<UsageSnapshot, String> {
-    if budget <= 0 {
-        return Err("budget must be positive".into());
-    }
-    sqlx::query("UPDATE usage_config SET window_budget = ? WHERE id = 1")
-        .bind(budget)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    usage_snapshot(state).await
 }
 
 /// Write the auto-meter enable flag to the config row (R2). Pure DB write —
@@ -133,19 +109,13 @@ pub fn tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "usage_snapshot".into(),
-            description: "Return the current rolling-window usage meter (total, %, band, burn rate, per-team breakdown).".into(),
+            description: "Return the current plan usage meter: session and weekly Utilization with reset times, per-team tokens and list-price Cost.".into(),
             input_schema: arg_schema::<args::UsageSnapshotArgs>(),
             supplier_context: ctx.into(),
         },
         ToolSpec {
-            name: "usage_set_budget".into(),
-            description: "Set the rolling-window token budget (the meter's denominator).".into(),
-            input_schema: arg_schema::<args::SetBudgetArgs>(),
-            supplier_context: ctx.into(),
-        },
-        ToolSpec {
             name: "usage_set_auto_meter".into(),
-            description: "Enable or disable the reactive auto-meter brake (trips the system brake when the usage window crosses the threshold).".into(),
+            description: "Enable or disable the auto-brake (brakes new work at 95% of the session or weekly limit).".into(),
             input_schema: arg_schema::<args::SetAutoMeterArgs>(),
             supplier_context: ctx.into(),
         },
@@ -166,25 +136,11 @@ mod tests {
     #[tokio::test]
     async fn load_config_returns_seeded_defaults() {
         let cfg = load_config(&fresh_pool().await).await;
-        assert_eq!(cfg.window_budget, 190_000_000); // all-tokens basis (LF34); tunable estimate, not an exact claude.ai mirror (G6)
+        assert_eq!(cfg, UsageConfig::default());
         assert_eq!(cfg.window_secs, 18_000);
-        assert!(!cfg.auto_meter_enabled); // v1 default OFF (D8)
-    }
-
-    #[test]
-    fn default_window_budget_is_all_tokens_calibration() {
-        assert_eq!(UsageConfig::default().window_budget, 190_000_000);
-    }
-
-    #[tokio::test]
-    async fn updating_budget_changes_loaded_config() {
-        let pool = fresh_pool().await;
-        sqlx::query("UPDATE usage_config SET window_budget = ? WHERE id = 1")
-            .bind(5_000_000i64)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(load_config(&pool).await.window_budget, 5_000_000);
+        assert_eq!(cfg.brake_on_pct, 0.95);
+        assert_eq!(cfg.brake_off_pct, 0.85);
+        assert!(!cfg.auto_meter_enabled); // default OFF
     }
 
     #[tokio::test]
@@ -195,15 +151,6 @@ mod tests {
         assert!(load_config(&pool).await.auto_meter_enabled);
         set_auto_meter_inner(&pool, false).await.unwrap();
         assert!(!load_config(&pool).await.auto_meter_enabled);
-    }
-
-    #[test]
-    fn set_budget_args_round_trip_and_require_budget() {
-        let a: args::SetBudgetArgs = serde_json::from_value(json!({ "budget": 5_000_000 })).unwrap();
-        assert_eq!(a.budget, 5_000_000);
-        assert!(serde_json::from_value::<args::SetBudgetArgs>(json!({})).is_err());
-        // a non-integer budget is rejected by serde.
-        assert!(serde_json::from_value::<args::SetBudgetArgs>(json!({ "budget": "lots" })).is_err());
     }
 
     #[test]
@@ -218,15 +165,12 @@ mod tests {
     fn tools_include_set_auto_meter() {
         let t = tools();
         assert!(t.iter().any(|s| s.name == "usage_set_auto_meter"));
+        assert!(!t.iter().any(|s| s.name == "usage_set_budget"));
     }
 
     #[test]
     fn derived_schemas_carry_the_right_required_props() {
         let s = |n: &str| tools().into_iter().find(|t| t.name == n).unwrap().input_schema;
-        // usage_set_budget: budget required + integer-typed.
-        let b = s("usage_set_budget");
-        assert!(b["required"].as_array().unwrap().iter().any(|v| v == "budget"));
-        assert!(b["properties"]["budget"].is_object());
         // usage_set_auto_meter: enabled required + boolean.
         let m = s("usage_set_auto_meter");
         assert!(m["required"].as_array().unwrap().iter().any(|v| v == "enabled"));
@@ -234,14 +178,14 @@ mod tests {
         let snap = s("usage_snapshot");
         assert_eq!(snap["required"].as_array().map(|a| a.len()).unwrap_or(0), 0);
         // GENERATED, not literal.
-        assert_eq!(b, arg_schema::<args::SetBudgetArgs>());
+        assert_eq!(m, arg_schema::<args::SetAutoMeterArgs>());
     }
 
     #[test]
     fn tools_are_usage_telemetry_slug() {
         let t = tools();
         assert!(t.iter().all(|s| s.supplier_context == "usage-telemetry"));
-        for name in ["usage_snapshot", "usage_set_budget"] {
+        for name in ["usage_snapshot", "usage_set_auto_meter"] {
             assert!(t.iter().any(|s| s.name == name), "missing tool {name}");
         }
     }

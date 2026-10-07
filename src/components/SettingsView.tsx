@@ -3,12 +3,10 @@ import type { UsageSnapshot } from "../ipc/usage";
 import type { GitConfig, Project, WorktreeEntry } from "../ipc/workspace";
 import { Button } from "./ui/Button";
 import { FolderPickerField } from "./FolderPickerField";
-import { formatTokens } from "../lib/cost";
 import { useTheme } from "../hooks/useTheme";
 
 export interface SettingsViewProps {
   usage: UsageSnapshot | null;
-  onSetBudget: (budget: number) => Promise<UsageSnapshot>;
   onSetAutoMeter: (enabled: boolean) => Promise<UsageSnapshot>;
   // Runners (R1 API key via keychain)
   apiKeyPresent: boolean;
@@ -212,7 +210,7 @@ function ProjectWorktrees(props: {
 
 export function SettingsView(props: SettingsViewProps) {
   const {
-    usage, onSetBudget, onSetAutoMeter,
+    usage, onSetAutoMeter,
     apiKeyPresent, onSetApiKey, onClearApiKey,
     gitConfig, onSaveGitConfig,
     projects, activeProjectId, onRemoveProject, onSetTargetRepo, onSetSkillSources,
@@ -220,8 +218,6 @@ export function SettingsView(props: SettingsViewProps) {
   } = props;
 
   const [theme, setTheme] = useTheme();
-  const [budgetInput, setBudgetInput] = useState(String(usage?.window_budget ?? 190_000_000));
-  const [saving, setSaving] = useState(false);
   const [autoMeter, setAutoMeter] = useState<boolean>(usage?.auto_meter_enabled ?? false);
   const [autoSaving, setAutoSaving] = useState(false);
 
@@ -245,17 +241,6 @@ export function SettingsView(props: SettingsViewProps) {
       setAutoMeter(s.auto_meter_enabled);
     } finally {
       setAutoSaving(false);
-    }
-  }
-
-  async function saveBudget() {
-    const n = Number(budgetInput);
-    if (!Number.isFinite(n) || n <= 0) return;
-    setSaving(true);
-    try {
-      await onSetBudget(n);
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -310,28 +295,14 @@ export function SettingsView(props: SettingsViewProps) {
 
       <div style={section}>
         <div style={h}>usage</div>
-        <label style={label} htmlFor="budget">window budget (tokens / 5h)</label>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input id="budget" value={budgetInput} onChange={(e) => setBudgetInput(e.target.value)}
-            style={{ ...input, width: 160, fontVariantNumeric: "tabular-nums" }} />
-          <Button variant="primary" disabled={saving} onClick={saveBudget}>save budget</Button>
-        </div>
-        <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
-          counts all tokens incl. cache. tune this so the % matches claude.ai for your plan — it's an estimate, not an exact mirror.
-        </div>
-        {usage && (
-          <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
-            currently {formatTokens(usage.window_total)} of {formatTokens(usage.window_budget)} used this window.
-          </div>
-        )}
-        <label style={{ ...label, display: "flex", alignItems: "center", gap: 8, marginTop: 16, marginBottom: 0, cursor: "pointer" }}>
+        <label style={{ ...label, display: "flex", alignItems: "center", gap: 8, marginBottom: 0, cursor: "pointer" }}>
           <input type="checkbox" checked={autoMeter} disabled={autoSaving}
             onChange={(e) => toggleAutoMeter(e.target.checked)} aria-label="auto-brake"
             style={{ accentColor: "var(--accent)", cursor: "pointer" }} />
-          auto-brake when the window crosses the threshold
+          auto-brake on plan usage
         </label>
         <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-3)" }}>
-          off by default. manual + reactive (rate-limit) braking stays on either way.
+          brakes new work at 95% of the session or weekly limit; releases below 85%. manual and rate-limit braking stay on either way.
         </div>
       </div>
 

@@ -3,6 +3,7 @@ mod events;
 mod pipeline_activator;
 mod process_records;
 mod process_registry;
+mod usage_poller;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -54,6 +55,8 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (13, include_str!("../migrations/013_lifecycle_hardening.sql")),
         (14, include_str!("../migrations/014_task_worktree.sql")),
         (15, include_str!("../migrations/015_usage_budget_recalibrate.sql")),
+        (16, include_str!("../migrations/016_utilization.sql")),
+        (17, include_str!("../migrations/017_drop_cc_usage_log.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -1381,7 +1384,7 @@ impl ToolDispatcher for RootDispatcher {
             "usage_snapshot" => {
                 let cfg = usage_telemetry::api::load_config(&self.usage.pool).await;
                 let braked = (self.usage.is_braked)();
-                match usage_telemetry::snapshot::compute_snapshot(&self.usage.cc, &self.usage.worker, &cfg, braked, now_unix()).await {
+                match usage_telemetry::snapshot::compute_snapshot(&self.usage.worker, &self.usage.util, &cfg, braked, now_unix()).await {
                     Ok(snap) => serde_json::to_value(snap).map(ok).unwrap_or_else(err),
                     Err(e) => err(e),
                 }
@@ -1424,15 +1427,6 @@ async fn restore_brake_from(store: &crate::brake_persist::BrakeStore) -> Arc<Bra
         }
     }
     brake
-}
-
-/// Resolve `~/.claude/projects` (the Claude Code transcript tree this app
-/// ingests for the window meter). Mirrors the existing HOME convention; on a
-/// machine with no HOME it returns `.claude/projects` (relative) which simply
-/// yields an empty walk.
-fn cc_claude_projects_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::PathBuf::from(home).join(".claude").join("projects")
 }
 
 /// Resolve the active project + pipeline at startup. v1: the newest project
@@ -1556,6 +1550,18 @@ pub fn run() {
             version: 15,
             description: "recalibrate legacy usage window_budget to the all-tokens basis",
             sql: include_str!("../migrations/015_usage_budget_recalibrate.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 16,
+            description: "real plan utilization + worker cost",
+            sql: include_str!("../migrations/016_utilization.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 17,
+            description: "drop transcript usage mirror",
+            sql: include_str!("../migrations/017_drop_cc_usage_log.sql"),
             kind: MigrationKind::Up,
         },
     ];
@@ -1747,22 +1753,19 @@ pub fn run() {
                 // Usage Telemetry (Plan 5). The WorkerUsageStore is the concrete
                 // UsageSink (kernel seam); the brake-state callback lets Telemetry
                 // read Runtime's brake without depending on the runtime crate.
-                use usage_telemetry::cc_log::CcUsageStore;
+                use usage_telemetry::utilization_store::UtilizationStore;
                 use usage_telemetry::worker_log::WorkerUsageStore;
-                let cc_store = Arc::new(CcUsageStore::new(pool.clone()));
                 let worker_usage = Arc::new(WorkerUsageStore::new(pool.clone()));
-                let ingestor = Arc::new(usage_telemetry::ingest::TranscriptIngestor::new(
-                    cc_claude_projects_dir(),
-                    cc_store.clone(),
-                ));
+                let util_store = Arc::new(UtilizationStore::new(pool.clone()));
+                let usage_poll = Arc::new(tokio::sync::Notify::new());
                 let usage_sink: Arc<dyn agent_bus_core::UsageSink> = worker_usage.clone();
                 let usage_state_arc = Arc::new(usage_telemetry::api::UsageState {
-                    cc: cc_store.clone(), worker: worker_usage.clone(), pool: pool.clone(),
+                    worker: worker_usage.clone(), util: util_store.clone(), pool: pool.clone(),
                     is_braked: Arc::new({ let b = brake.clone(); move || b.is_on() }),
                 });
                 handle.manage(usage_telemetry::api::UsageState {
-                    cc: cc_store.clone(),
                     worker: worker_usage.clone(),
+                    util: util_store.clone(),
                     pool: pool.clone(),
                     is_braked: Arc::new({ let b = brake.clone(); move || b.is_on() }),
                 });
@@ -1874,6 +1877,7 @@ pub fn run() {
                         process_registry: process_registry.clone(),
                         app_data: data_dir.clone(),
                         worktree_git: Some(worktree_git.clone()),
+                        usage_poll: Some(usage_poll.clone()),
                     },
                 ));
                 handle.manage(activator.clone());
@@ -1882,80 +1886,53 @@ pub fn run() {
                     eprintln!("app: boot activation failed: {e}");
                 }
 
-                // Boot backfill: prime cc_usage_log from transcripts modified
-                // within the rolling window so the meter is correct on launch
-                // instead of 0 until the first new transcript line. Emit only
-                // when rows were inserted (avoids a needless refetch).
+                // Utilization poller: reads the account's real plan usage from
+                // claude (no model call), stores it, and applies the auto-brake.
+                // Runs at boot, every 60s, and when a worker step settles. Polls
+                // are at least 10s apart: a trigger that arrives sooner is
+                // deferred to the 10s mark, not dropped.
                 {
-                    let cfg = usage_telemetry::api::load_config(&pool).await;
-                    let n = ingestor
-                        .backfill_window(cfg.window_secs, now_unix())
-                        .await
-                        .unwrap_or(0);
-                    if n > 0 {
-                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
-                    }
-                }
-
-                // Auto-meter sweep (D8/D9). v1 config has auto_meter_enabled=0 so
-                // decide() returns NoChange and nothing happens; when v1.1 flips
-                // the flag this trips/releases Runtime's brake by reason.
-                {
-                    let cc = cc_store.clone();
-                    let worker = worker_usage.clone();
+                    let util = util_store.clone();
                     let brake = brake.clone();
                     let pool = pool.clone();
                     let handle = handle.clone();
                     let brake_store = brake_store.clone();
-                    let ingestor = ingestor.clone();
+                    let usage_poll = usage_poll.clone();
+                    let source: Arc<dyn agent_bus_core::UtilizationSource> =
+                        Arc::new(runners::usage_query::ClaudeCliUtilizationSource::new());
                     tauri::async_runtime::spawn(async move {
                         use usage_telemetry::api::load_config;
-                        use usage_telemetry::brake_policy::{BrakeDecision, AUTO_METER_REASON};
-                        use usage_telemetry::snapshot::{auto_brake_decision, compute_snapshot};
-                        // High-water mark: start at boot (BEFORE the first sleep) so
-                        // the first sweep only picks up files modified during/after
-                        // boot — the boot backfill already covered the window.
-                        let mut last_scan = now_unix();
+                        use usage_telemetry::brake_policy::{decide_utilization, BrakeDecision, AUTO_METER_REASON};
+                        let mut last_attempt: Option<std::time::Instant> = None;
                         loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                            let cfg = load_config(&pool).await;
-                            let now = now_unix();
-
-                            // Always ingest changed transcripts (the meter must stay
-                            // fresh even with the auto-brake disabled).
-                            let new = ingestor.ingest_changed(last_scan).await.unwrap_or(0);
-                            // Advance the watermark unconditionally, even past an errored
-                            // pass: full re-parse + INSERT OR IGNORE makes re-ingest
-                            // idempotent, and transcripts are append-only, so any line
-                            // missed by a failed pass is recovered on the file's next append.
-                            last_scan = now;
-                            // Bound table growth: keep two full windows of margin.
-                            let _ = cc.prune(now - 2 * cfg.window_secs).await;
-                            if new > 0 {
-                                let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                            let delay = crate::usage_poller::next_poll_delay(last_attempt, std::time::Instant::now());
+                            if !delay.is_zero() {
+                                tokio::time::sleep(delay).await;
                             }
-
-                            // Only the brake DECISION is gated on the enable flag.
-                            if !cfg.auto_meter_enabled { continue; }
-                            let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
-                            if let Ok(snap) = compute_snapshot(&cc, &worker, &cfg, brake.is_on(), now).await {
-                                match auto_brake_decision(&snap, &cfg, auto_on) {
+                            last_attempt = Some(std::time::Instant::now());
+                            let now = now_unix();
+                            crate::usage_poller::poll_once(source.clone(), &util, now).await;
+                            let cfg = load_config(&pool).await;
+                            if cfg.auto_meter_enabled {
+                                let stored = util.load().await;
+                                let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
+                                match decide_utilization(stored.reading.as_ref(), stored.available(), now, auto_on, brake.is_on(), cfg.brake_on_pct, cfg.brake_off_pct) {
                                     BrakeDecision::SetOn(reason) => {
+                                        // A soft brake: blocks new claims, never kills in-flight work.
                                         brake.set_on(reason.as_str());
-                                        // LH6: persist the brake row.
                                         let _ = brake_store.save(true, Some(&reason), now).await;
-                                        // LH7: auto-meter is a SOFT brake — block new
-                                        // claims via the brake gate, let in-flight
-                                        // finish, NO kill, NO re-run. (No kill here.)
-                                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
                                     }
                                     BrakeDecision::Release => {
                                         brake.set_off();
                                         let _ = brake_store.save(false, None, now).await;
-                                        let _ = handle.emit(crate::events::USAGE_CHANGED, ());
                                     }
                                     BrakeDecision::NoChange => {}
                                 }
+                            }
+                            let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                                _ = usage_poll.notified() => {}
                             }
                         }
                     });
@@ -2016,7 +1993,6 @@ pub fn run() {
             review::api::delete_comment,
             review::api::record_verdict,
             usage_telemetry::api::usage_snapshot,
-            usage_telemetry::api::usage_set_budget,
             usage_telemetry::api::usage_set_auto_meter,
             conversational_control::api::send_message,
             conversational_control::api::get_conversation,
@@ -2264,7 +2240,7 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 15, "all fifteen migrations recorded");
+        assert_eq!(version, 17, "all seventeen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }

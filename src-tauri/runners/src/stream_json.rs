@@ -91,6 +91,9 @@ impl StreamAccumulator {
                     self.usage = RunnerUsage { model, ..Default::default() };
                     self.add_usage(u);
                 }
+                if let Some(c) = v.get("total_cost_usd").and_then(|c| c.as_f64()) {
+                    self.usage.cost_micros = Some((c * 1_000_000.0).round() as u64);
+                }
                 if self.text.is_empty() {
                     if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
                         self.text = r.to_string();
@@ -565,5 +568,23 @@ ARTIFACT: artifacts/specs/gamma.md";
             "Analysing the repository.\n".to_string(),
             "VERDICT: approve\nARTIFACT: artifacts/analyses/T-1-v1.md".to_string(),
         ]);
+    }
+
+    #[test]
+    fn result_total_cost_usd_becomes_cost_micros() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","model":"claude-opus-5-5"}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: approve","total_cost_usd":0.004249,"usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}"#, "\n",
+        );
+        let out = parse_stream(raw, "claude-opus-5-5").unwrap();
+        assert_eq!(out.usage.cost_micros, Some(4_249));
+    }
+
+    #[test]
+    fn a_result_without_total_cost_usd_leaves_cost_unknown() {
+        let raw = concat!(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#, "\n",
+        );
+        assert_eq!(parse_stream(raw, "m").unwrap().usage.cost_micros, None);
     }
 }

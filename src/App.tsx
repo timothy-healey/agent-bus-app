@@ -21,7 +21,7 @@ import { approveGate, reviseGate, rejectGate, brakeOn as brakeOnCmd, brakeOff as
 import { recordVerdict, addComment } from "./ipc/review";
 import { listPipelines, loadPipeline, pipelineToDraft, type DraftPipeline, type Pipeline } from "./ipc/pipeline";
 import { useUsage } from "./hooks/useUsage";
-import { setBudget, setAutoMeter } from "./ipc/usage";
+import { setAutoMeter } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
 import { useConversation } from "./hooks/useConversation";
 import { useTaskLog } from "./hooks/useTaskLog";
@@ -400,7 +400,6 @@ export default function App() {
         ) : view === "settings" ? (
           <SettingsView
             usage={usage}
-            onSetBudget={setBudget}
             onSetAutoMeter={setAutoMeter}
             apiKeyPresent={apiKeyPresent}
             onSetApiKey={async (k) => { await setRunnerApiKey(ANTHROPIC_API_KEY_ID, k); setApiKeyPresent(true); }}

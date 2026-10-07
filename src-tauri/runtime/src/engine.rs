@@ -1425,6 +1425,7 @@ async fn invoke(
             output_tokens: output.usage.output_tokens,
             cache_creation: output.usage.cache_creation,
             cache_read: output.usage.cache_read,
+            cost_micros: output.usage.cost_micros,
         });
     }
 
@@ -2990,7 +2991,7 @@ mod tests {
             verdict: agent_bus_core::Verdict::Revise,
             artifact_path: None,
             final_text: "KEY: alpha\nVERDICT: revise".into(),
-            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3 },
+            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3, cost_micros: None },
         };
         let mut ctx = ctx_with(pool, p.clone(), Arc::new(FakeRunner::always(out))).await;
         ctx.audit = Some(audit.clone());
@@ -3054,7 +3055,7 @@ mod tests {
             verdict: agent_bus_core::Verdict::Approve,
             artifact_path: None,
             final_text: "KEY: alpha".into(),
-            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3 },
+            usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3, cost_micros: None },
         };
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
         let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
