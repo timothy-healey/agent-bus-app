@@ -207,6 +207,8 @@ impl RuntimeState {
             artifact_base: std::path::PathBuf::from(&active.project_root).join("artifacts"),
             read_prompt: Arc::new(|_t: &Team| String::new()),
             revision_reader: self.revision_reader.clone(),
+            // The gate-verdict context runs no reviewer, so writes no review comment.
+            review_writer: None,
             // The gate-verdict context never invokes the runner, so the
             // observability side-channels are not needed here.
             usage_sink: None,

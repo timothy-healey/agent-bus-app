@@ -74,11 +74,12 @@ fn comment_null_anchors_are_present_and_null() {
     assert!(v["anchor_offset"].is_null());
 }
 
-/// Locks `src/ipc/review.ts:3` `type CommentKind = "inline" | "direction"`.
+/// Locks `src/ipc/review.ts:3` `type CommentKind = "inline" | "direction" | "review"`.
 #[test]
 fn comment_kind_matches_ts_string_union() {
     assert_eq!(serde_json::to_value(CommentKind::Inline).unwrap(), Value::String("inline".into()));
     assert_eq!(serde_json::to_value(CommentKind::Direction).unwrap(), Value::String("direction".into()));
+    assert_eq!(serde_json::to_value(CommentKind::Review).unwrap(), Value::String("review".into()));
 }
 
 /// Locks `src/ipc/review.ts:17-21` `interface VerdictMarker`:

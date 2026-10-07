@@ -176,6 +176,9 @@ pub struct EngineContext {
     /// Reads a task's persisted revise bundle (revise-once feedback; ④c gate
     /// revise + join revise-once). `None` = no bundle composed (fresh-run text).
     pub revision_reader: Option<Arc<dyn RevisionBundleReader>>,
+    /// Stores every reviewer verdict's reason as a `review` comment on the
+    /// reviewed task. `None` = no comment written (runtime-only tests).
+    pub review_writer: Option<Arc<dyn crate::revision::ReviewCommentWriter>>,
     /// Where settled usage is published (the kernel UsageSink seam, D2/R5). `None`
     /// = drop usage (runtime-only tests / pre-project boot). Best-effort: a
     /// telemetry write never fails a settle. PRESERVED idiom from the deleted pool.
@@ -431,6 +434,18 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
         WorkerResult::Producer(p) => (None, p.artifact.clone(), p.description.clone()),
         WorkerResult::Generator(_) => (None, None, None),
     };
+
+    // Every reviewer verdict keeps its reason as a review comment on the
+    // reviewed task, anchored to the reviewed artifact, whatever the edge kind.
+    if let (WorkerResult::Reviewer(r), Some(writer)) = (&worker_result, &ctx.review_writer) {
+        writer
+            .record_review(
+                &task.id.0,
+                task.parent_artifact.as_deref().unwrap_or(""),
+                &crate::revision::review_note(&team.id, r.verdict, &r.reason),
+            )
+            .await;
+    }
 
     // 5a-bis. JOIN target: this team is a fork lane. Settle the lane's barrier
     //     with the reviewer's verdict (a producer lane forwards: Approve), free
@@ -1495,7 +1510,8 @@ async fn invoke(
         &task.topic,
         task.attempts,
         ctx.revision_reader.as_deref(),
-        &task.id.0,
+        task.run_id.as_deref().unwrap_or(&ctx.run_id),
+        task.item_key.as_deref().unwrap_or_default(),
     )
     .await;
     // A run is topic-less by design (the prompts ARE the work — the Start insight),
@@ -1818,6 +1834,7 @@ pub(crate) mod test_support {
             artifact_base: temp_root().join("artifacts"),
             read_prompt: Arc::new(|_t: &Team| "system prompt".to_string()),
             revision_reader: None,
+            review_writer: None,
             usage_sink: None,
             log_sink: None,
             audit: None,
@@ -3603,6 +3620,105 @@ mod tests {
         assert_eq!(o, StepOutcome::Revised { task_id: item.id.0.clone(), producer: "prod".into() });
         assert!(ctx.tasks.list_by_state(TaskState::Gated).await.unwrap().is_empty());
         assert_eq!(ctx.stores.occupancy(&ctx.run_id, "human-gate").await.unwrap(), Some(0));
+    }
+
+    // ---- Review comments reach the producer ----
+
+    /// An in-memory comment table: the writer records `(task_id, artifact, note)`
+    /// and the reader returns every review note for the item's lineage (the
+    /// SQLite reader joins comments to tasks by run and key; here every note
+    /// belongs to the one item under test).
+    #[derive(Default)]
+    struct MemComments(std::sync::Mutex<Vec<(String, String, String)>>);
+
+    #[async_trait::async_trait]
+    impl crate::revision::ReviewCommentWriter for MemComments {
+        async fn record_review(&self, task_id: &str, artifact_path: &str, note: &str) {
+            self.0.lock().unwrap().push((task_id.into(), artifact_path.into(), note.into()));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::revision::RevisionBundleReader for MemComments {
+        async fn load(&self, _run_id: &str, _item_key: &str) -> crate::revision::RevisionBundle {
+            crate::revision::RevisionBundle {
+                notes: self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(_, _, n)| crate::revision::RevisionNote { anchor_text: None, note: n.clone(), kind: "review".into() })
+                    .collect(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn every_reviewer_result_writes_one_review_comment_on_the_reviewed_task() {
+        for verdict in [Verdict::Approve, Verdict::Revise, Verdict::Reject] {
+            let (mut ctx, item, _) = reviewed(review_pipeline(routes(Some("done"), None, None)), verdict, 1).await;
+            let comments = Arc::new(MemComments::default());
+            ctx.review_writer = Some(comments.clone());
+            transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+            let written = comments.0.lock().unwrap().clone();
+            let v = serde_json::to_value(verdict).unwrap();
+            assert_eq!(
+                written,
+                vec![(item.id.0.clone(), "artifacts/alpha.md".to_string(), format!("rev: {}. the error handling is thin", v.as_str().unwrap()))],
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_producer_writes_no_review_comment() {
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let mut ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(producer_out()))).await;
+        let comments = Arc::new(MemComments::default());
+        ctx.review_writer = Some(comments.clone());
+        seed_item(&ctx, "research", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(comments.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_lane_writes_its_review_comment_too() {
+        let mut ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(reviewer_out(Verdict::Approve, "sound")))).await;
+        let comments = Arc::new(MemComments::default());
+        ctx.review_writer = Some(comments.clone());
+        ctx.stores.ensure(&ctx.run_id, "ddd", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "ddd").await.unwrap();
+        let lanes = seed_group(&ctx, "rejoin", 1).await;
+        let mut lane = lanes[0].clone();
+        lane.state = TaskState::Queued;
+        ctx.tasks.update(&lane).await.unwrap();
+        let ddd = ctx.pipeline.teams.iter().find(|t| t.id == "ddd").unwrap().clone();
+        transform_once(&ctx, &ddd).await.unwrap();
+        assert_eq!(comments.0.lock().unwrap().len(), 1);
+        assert_eq!(comments.0.lock().unwrap()[0].2, "ddd: approve. sound");
+    }
+
+    #[tokio::test]
+    async fn the_reviewers_reason_reaches_the_producers_next_attempt() {
+        let p = review_pipeline(routes(Some("done"), None, None));
+        let runner = Arc::new(KindRunner::new(vec![gen_out(&[])], producer_out(), reviewer_out(Verdict::Revise, "add a retry bound")));
+        let mut ctx = ctx_with(fresh_pool().await, p, runner.clone()).await;
+        let comments = Arc::new(MemComments::default());
+        ctx.review_writer = Some(comments.clone());
+        ctx.revision_reader = Some(comments.clone());
+        for s in ["prod", "rev", "done"] {
+            ctx.stores.ensure(&ctx.run_id, s, 8).await.unwrap();
+        }
+        seed_item(&ctx, "prod", "alpha").await;
+        let prod = ctx.pipeline.teams.iter().find(|t| t.id == "prod").unwrap().clone();
+        transform_once(&ctx, &prod).await.unwrap(); // produce
+        transform_once(&ctx, &rev_team(&ctx)).await.unwrap(); // review: revise
+        transform_once(&ctx, &prod).await.unwrap(); // second attempt
+        let received = runner.received.lock().unwrap();
+        let second = &received[2];
+        assert_eq!(second.output_kind, OutputKind::Producer);
+        assert!(second.user_message.contains("REVISION REQUEST (attempt 2)"), "{}", second.user_message);
+        assert!(second.user_message.contains("rev: revise. add a retry bound"), "{}", second.user_message);
     }
 
     #[tokio::test]
