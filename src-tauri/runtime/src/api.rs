@@ -121,6 +121,9 @@ pub struct RuntimeState {
     /// (the CardDrawer history panel). `None` = no audit wired (runtime-only tests
     /// / pre-project boot) → `list_invocations` returns an empty trail.
     pub audit: Option<Arc<InvocationAuditStore>>,
+    /// The current model list, shared with the composition root, which keeps
+    /// it fresh. `None` = no list wired (runtime-only tests) → no pre-flight.
+    model_list: Option<Arc<std::sync::RwLock<agent_bus_core::ModelList>>>,
     active: ArcSwap<ActivePipeline>,
 }
 
@@ -146,12 +149,26 @@ impl RuntimeState {
             fanout,
             revision_reader,
             audit,
+            model_list: None,
             active: ArcSwap::from_pointee(active),
         }
     }
 
     /// Lock-free snapshot of the current active pipeline/project. Each read gets a
     /// consistent `Arc<ActivePipeline>` — a concurrent activate never tears it.
+    pub fn with_model_list(mut self, list: Arc<std::sync::RwLock<agent_bus_core::ModelList>>) -> Self {
+        self.model_list = Some(list);
+        self
+    }
+
+    /// The pre-flight check over the active pipeline against the current list.
+    pub fn preflight(&self) -> Result<(), String> {
+        let Some(list) = &self.model_list else { return Ok(()) };
+        let Ok(list) = list.read() else { return Ok(()) };
+        let active = self.active();
+        crate::preflight::check_pipeline(&active.pipeline, &list).map_err(|f| f.describe(&active.pipeline))
+    }
+
     pub fn active(&self) -> Arc<ActivePipeline> {
         self.active.load_full()
     }
@@ -298,6 +315,7 @@ pub async fn start_run_inner(state: &RuntimeState, _topic: Option<String>) -> Re
     if active.pipeline.teams.is_empty() {
         return Err("cannot start a run: the active pipeline has no teams".to_string());
     }
+    state.preflight()?;
     let now = now_unix();
     let run_id = format!("R-{}", uuid::Uuid::new_v4());
     let run = Run::new(
@@ -354,6 +372,8 @@ impl StartOutcome {
 /// (`Started`). Tauri-unaware: the app-crate wrapper owns the brake-clear + the
 /// `run-changed` emit; this fn only owns the create-or-reuse decision.
 pub async fn start_or_resume_run_inner(state: &RuntimeState) -> Result<StartOutcome, String> {
+    // A resumed run also re-runs its workers, so it is checked too.
+    state.preflight()?;
     let project_id = state.active().project_id.clone();
     if let Some(existing) = state
         .runs
@@ -1050,6 +1070,63 @@ mod tests {
         let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&r1.id.as_str()));
         assert!(ids.contains(&r2.id.as_str()));
+    }
+
+    /// The two-team pipeline with every team on `haiku` at the given effort.
+    fn with_haiku_teams(state: RuntimeState, effort: agent_bus_core::Effort) -> RuntimeState {
+        let active = state.active();
+        let mut p = (*active.pipeline).clone();
+        for t in &mut p.teams {
+            t.runner = Some(pipeline::model::TeamRunnerConfig {
+                kind: Some(agent_bus_core::RunnerKind::ClaudeCli),
+                model: Some("haiku".into()),
+                effort: Some(effort.clone()),
+                api_key_env: None,
+            });
+        }
+        state.activate_into(ActivePipeline {
+            pipeline: Arc::new(p),
+            project_id: active.project_id.clone(),
+            project_root: active.project_root.clone(),
+            project_target_repo: None,
+        });
+        state
+    }
+
+    fn curated_list() -> Arc<std::sync::RwLock<agent_bus_core::ModelList>> {
+        Arc::new(std::sync::RwLock::new(runners::curated_models::curated()))
+    }
+
+    #[tokio::test]
+    async fn start_with_an_unsupported_combination_aborts_before_creating_a_run() {
+        let state = with_haiku_teams(state_with_two_team_pipeline().await, agent_bus_core::Effort::Level("high".into()))
+            .with_model_list(curated_list());
+        let err = start_or_resume_run_inner(&state).await.err().expect("must abort");
+        assert!(err.contains("research: effort 'high' is not supported by haiku"), "{err}");
+        assert!(err.contains("spec: effort 'high' is not supported by haiku"), "{err}");
+        assert!(state.runs.list_for_project("proj").await.unwrap().is_empty(), "no run created");
+        assert!(state.tasks.list_by_state(TaskState::Queued).await.unwrap().is_empty(), "no task queued");
+        assert!(state.tasks.list_by_state(TaskState::Running).await.unwrap().is_empty(), "no task claimed");
+        assert!(start_run_inner(&state, None).await.is_err(), "the direct start path checks too");
+    }
+
+    #[tokio::test]
+    async fn start_with_a_valid_combination_creates_the_run() {
+        let state = with_haiku_teams(state_with_two_team_pipeline().await, agent_bus_core::Effort::Default)
+            .with_model_list(curated_list());
+        let outcome = start_or_resume_run_inner(&state).await.unwrap();
+        assert!(matches!(outcome, StartOutcome::Started(_)));
+    }
+
+    #[tokio::test]
+    async fn the_check_reads_the_current_list() {
+        let list = curated_list();
+        let state = with_haiku_teams(state_with_two_team_pipeline().await, agent_bus_core::Effort::Level("high".into()))
+            .with_model_list(list.clone());
+        assert!(start_run_inner(&state, None).await.is_err());
+        // a later list where haiku supports `high` lets the run start
+        list.write().unwrap().models.iter_mut().find(|m| m.value == "haiku").unwrap().effort_levels = vec!["high".into()];
+        assert!(start_run_inner(&state, None).await.is_ok());
     }
 
     #[tokio::test]

@@ -22,7 +22,6 @@ pub mod curated_models;
 pub mod fake;
 pub mod model_query;
 pub mod output;
-pub mod probe;
 pub mod scope;
 pub mod stream_json;
 pub mod usage_query;
