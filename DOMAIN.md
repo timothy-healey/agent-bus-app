@@ -116,10 +116,14 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Send back** — the act of bundling comments + optional direction and emitting a `revise` verdict
 
 ### Usage Telemetry
+- **Limit** — one cap on the subscription, each with its own Utilization and reset time: the **session** limit (5-hour window), the **weekly** limit (7-day window), and **model-scoped weekly** limits (e.g. one model's own weekly cap). The brake watches the session and weekly limits; model-scoped limits are shown, never braked on.
+- **Utilization** — the share of a Limit used, as Claude reports it for the whole account (0–100%), including usage outside this app. The meter and the brake speak only Utilization. Never derived from token counts.
+- **Window** — the period a Limit resets over: 5-hour or 7-day.
+- **Cost** — the dollar figure Claude reports for one invocation. Informational on a subscription; never drives the brake.
+- **Token usage** — raw input/output/cache token counts. Informational; never drives the brake.
 - **Usage event** — one `(ts, team?, task?, model, input/output/cache tokens)` record
-- **Window** — the rolling 5h period for subscription-based runners
-- **Budget** — configured threshold for the window (per subscription tier)
-- **Burn rate** — tokens per minute, 1-min average
+- **Budget** *(retiring)* — the configured token threshold the meter used to divide by; replaced by Utilization.
+- **Burn rate** *(retiring)* — tokens per minute, 1-min average; meaningless once the meter reads Utilization.
 - **Threshold band** — `safe` (<60%), `warn` (60–85%), `hot` (≥85%), `braked`
 
 ### Runners (ACL)
