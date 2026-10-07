@@ -244,5 +244,5 @@ The generator (which has no parent task to inherit from) created its child work-
 
 ## Live run 2 — meal-planner, watched (2026-10-05)
 
-### LF35 · Usage meter reads ~2× real usage → auto-brake would trip at ~47% real — `open`
+### LF35 · Usage meter reads ~2× real usage → auto-brake would trip at ~47% real — `fixed (branch spec/real-utilization)`
 > Meter shows **83%**; claude.ai shows **41%** for the same 5h window. The LF34 calibration (all tokens ÷ ~190M budget) has drifted by ~2× — plausibly the model mix changed (Opus 5.5 default, different cache/price weighting), so token count is no longer a stable proxy for plan utilisation. Consequence: `brake_on_pct` 0.95 of the *estimate* ≈ 47% real, so the auto-brake stops a run with half the window unused. Workaround this run: raise `window_budget` to ~385M (190M × 83/41) in Settings. Real fix: LF34's premise ("claude.ai's formula + real plan limit are not queryable") no longer holds — every `claude --print` stream-json run emits `rate_limit_event.rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}`. Drive the meter and brake from that (architectural: Runners parses → usage seam → Usage Telemetry; stale-when-idle → show "as of"). Already proposed in-session as the "real usage" spec.
