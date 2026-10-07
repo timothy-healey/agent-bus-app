@@ -38,7 +38,7 @@ All build on chunk 1's `ProcessRegistry` / killable spawner / brake wiring.
 
 ## Platform / test hardening
 - **R4-API · Live-log + thinking for the anthropic-api runner** — `backlog` — the API runner uses the default `invoke_stream` (final result only), so API-path workers show no live log/thinking (pre-existing; R4 live-log was CLI-only). Surfaced by the live-worker-view candidates (LWV-A3).
-- **S3-validate · Validate the sandbox-exec boundary** — `backlog` — S3 shipped experimental + default OFF + not a proven boundary; needs a live confinement test + a Settings toggle.
+- **S3-validate · Validate the sandbox-exec boundary** — `dropped` — the sandbox-exec layer was deleted by real scope enforcement (`docs/superpowers/specs/2026-10-07-scope-enforcement-design.md`); the CLI's permission system is the boundary.
 - **S4-CI · Packaged-app E2E on Linux/Windows CI** — `backlog` — WebDriver harness scaffolded (can't run on macOS); wire `e2e.yml` + first live run. (S5's Playwright frontend-in-browser E2E runs locally.)
 - **E2E-live · Prove the live worker→`claude` run path end-to-end** — `backlog` — still structural-only; being exercised manually via live testing.
 
