@@ -53,9 +53,10 @@ pub enum RunnerError {
     NoResult,
     /// The run finished without a Structured output, or with one that does not
     /// fit the requested kind. The CLI reports this as an ordinary success, so
-    /// the missing object is the only signal.
+    /// the missing object is the only signal. `usage` is what the run cost: the
+    /// whole run, including the CLI's repair nudge, was paid for.
     #[error("no structured output: {detail}")]
-    NoStructuredOutput { detail: String },
+    NoStructuredOutput { detail: String, usage: RunnerUsage },
     /// Any other failure, with a message.
     #[error("runner failed: {0}")]
     Other(String),
@@ -235,7 +236,7 @@ mod tests {
 
     #[test]
     fn no_structured_output_carries_its_detail_and_is_not_a_rate_limit() {
-        let e = RunnerError::NoStructuredOutput { detail: "the result carried no structured_output".into() };
+        let e = RunnerError::NoStructuredOutput { detail: "the result carried no structured_output".into(), usage: RunnerUsage::default() };
         assert!(!e.is_rate_limited());
         assert!(e.to_string().contains("no structured output"));
         assert!(e.to_string().contains("the result carried no structured_output"));

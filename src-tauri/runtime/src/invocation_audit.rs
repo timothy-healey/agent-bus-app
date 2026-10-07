@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(ErrorClass::of(&RunnerError::Spawn("x".into())).as_str(), "spawn");
         assert_eq!(ErrorClass::of(&RunnerError::NoResult).as_str(), "no_result");
         assert_eq!(
-            ErrorClass::of(&RunnerError::NoStructuredOutput { detail: "x".into() }).as_str(),
+            ErrorClass::of(&RunnerError::NoStructuredOutput { detail: "x".into(), usage: Default::default() }).as_str(),
             "no_structured_output"
         );
         assert_eq!(ErrorClass::of(&RunnerError::Other("x".into())).as_str(), "other");

@@ -1559,6 +1559,7 @@ async fn invoke(
         } else {
             Err(runners::output::RunnerError::NoStructuredOutput {
                 detail: format!("asked for {kind:?}, got {:?}", o.result.kind()),
+                usage: o.usage,
             })
         }
     });
@@ -1566,36 +1567,29 @@ async fn invoke(
         Ok(o) => o,
         Err(e) => {
             // R3: settle the audit with the operational error class (no verdict
-            // was produced). Best-effort. Then propagate as the engine error the
+            // was produced). A run that ended without a Structured output was
+            // still paid for, so its usage is published and audited too.
+            // Best-effort. Then propagate as the engine error the
             // operational-failure path already handles.
+            let paid = match &e {
+                runners::output::RunnerError::NoStructuredOutput { usage, .. } => Some(usage.clone()),
+                _ => None,
+            };
+            if let Some(usage) = &paid {
+                publish_usage(ctx, team, task, usage);
+            }
             settle_audit(
                 ctx,
                 &audit_id,
                 &InvocationOutcome::Error(ErrorClass::of(&e)),
-                &AuditUsage::default(),
+                &paid.as_ref().map(audit_usage).unwrap_or_default(),
             )
             .await;
             return Err(EngineError::Invoke(e.to_string()));
         }
     };
 
-    // R5: publish usage to Telemetry (Customer-Supplier via the kernel UsageSink
-    // seam). Best-effort; a sink failure never blocks the invocation. The kernel
-    // `UsageEvent.team_id` is the `TeamId` newtype — wrap the plain team id; the
-    // task id is already a `TaskId`.
-    if let Some(sink) = &ctx.usage_sink {
-        sink.record(agent_bus_core::UsageEvent {
-            ts: now_unix(),
-            team_id: agent_bus_core::TeamId(team.id.clone()),
-            task_id: Some(task.id.clone()),
-            model: output.usage.model.clone(),
-            input_tokens: output.usage.input_tokens,
-            output_tokens: output.usage.output_tokens,
-            cache_creation: output.usage.cache_creation,
-            cache_read: output.usage.cache_read,
-            cost_micros: output.usage.cost_micros,
-        });
-    }
+    publish_usage(ctx, team, task, &output.usage);
 
     // R3: settle the audit with the invocation outcome plus the recorded usage. A
     // reviewer records its verdict; a producer or generator records approve,
@@ -1606,23 +1600,41 @@ async fn invoke(
         WorkerResult::Reviewer(r) => r.verdict,
         WorkerResult::Producer(_) | WorkerResult::Generator(_) => agent_bus_core::Verdict::Approve,
     };
-    settle_audit(
-        ctx,
-        &audit_id,
-        &InvocationOutcome::Verdict(verdict),
-        &AuditUsage {
-            model: output.usage.model.clone(),
-            input_tokens: output.usage.input_tokens,
-            output_tokens: output.usage.output_tokens,
-            cache_creation: output.usage.cache_creation,
-            cache_read: output.usage.cache_read,
-        },
-    )
-    .await;
+    settle_audit(ctx, &audit_id, &InvocationOutcome::Verdict(verdict), &audit_usage(&output.usage)).await;
 
     Ok(output.result)
 }
 
+/// R5: publish an invocation's usage to Telemetry (Customer-Supplier via the
+/// kernel UsageSink seam). Best-effort; a sink failure never blocks the
+/// invocation. The kernel `UsageEvent.team_id` is the `TeamId` newtype — wrap
+/// the plain team id; the task id is already a `TaskId`.
+fn publish_usage(ctx: &EngineContext, team: &Team, task: &Task, usage: &runners::output::RunnerUsage) {
+    if let Some(sink) = &ctx.usage_sink {
+        sink.record(agent_bus_core::UsageEvent {
+            ts: now_unix(),
+            team_id: agent_bus_core::TeamId(team.id.clone()),
+            task_id: Some(task.id.clone()),
+            model: usage.model.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation: usage.cache_creation,
+            cache_read: usage.cache_read,
+            cost_micros: usage.cost_micros,
+        });
+    }
+}
+
+/// The audit's view of an invocation's usage.
+fn audit_usage(usage: &runners::output::RunnerUsage) -> AuditUsage {
+    AuditUsage {
+        model: usage.model.clone(),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_creation: usage.cache_creation,
+        cache_read: usage.cache_read,
+    }
+}
 /// Best-effort settle of an audit row (R3). No-op when audit is unwired or the
 /// start write was lost; a failure is logged, never propagated — an audit write
 /// must never fail a settle (mirrors UsageSink discipline). PRESERVED idiom from
@@ -1902,7 +1914,7 @@ mod tests {
     }
 
     fn no_structured() -> RunnerError {
-        RunnerError::NoStructuredOutput { detail: "the run ended without a structured_output".into() }
+        RunnerError::NoStructuredOutput { detail: "the run ended without a structured_output".into(), usage: RunnerUsage::default() }
     }
 
     /// A runner that answers by the requested output kind, the way the real CLI
@@ -3424,6 +3436,26 @@ mod tests {
         transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
         let rows = audit.list_for_task(&item.id.0).await.unwrap();
         assert_eq!(rows[0].outcome.as_deref(), Some("error:no_structured_output"));
+    }
+
+    #[tokio::test]
+    async fn a_run_without_structured_output_still_records_its_usage() {
+        let (pool, audit) = pool_with_audit().await;
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let usage = RunnerUsage { model: "m".into(), input_tokens: 40, output_tokens: 9, cache_creation: 3, cache_read: 2, cost_micros: Some(70) };
+        let err = RunnerError::NoStructuredOutput { detail: "none".into(), usage };
+        let mut ctx = ctx_with(pool, p, Arc::new(FakeRunner::new(vec![Err(err)]))).await;
+        ctx.audit = Some(audit.clone());
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
+        ctx.usage_sink = Some(sink.clone());
+        let item = seed_item(&ctx, "research", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(), 1, "the paid run reaches telemetry");
+        assert_eq!((events[0].input_tokens, events[0].output_tokens, events[0].cost_micros), (40, 9, Some(70)));
+        let rows = audit.list_for_task(&item.id.0).await.unwrap();
+        assert_eq!(rows[0].outcome.as_deref(), Some("error:no_structured_output"));
+        assert_eq!((rows[0].usage.input_tokens, rows[0].usage.output_tokens), (40, 9));
     }
 
     #[tokio::test]

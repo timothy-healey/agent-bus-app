@@ -84,8 +84,8 @@ fn clone_err(e: &RunnerError) -> RunnerError {
         RunnerError::ModelUnavailable(s) => RunnerError::ModelUnavailable(s.clone()),
         RunnerError::Spawn(s) => RunnerError::Spawn(s.clone()),
         RunnerError::NoResult => RunnerError::NoResult,
-        RunnerError::NoStructuredOutput { detail } => {
-            RunnerError::NoStructuredOutput { detail: detail.clone() }
+        RunnerError::NoStructuredOutput { detail, usage } => {
+            RunnerError::NoStructuredOutput { detail: detail.clone(), usage: usage.clone() }
         }
         RunnerError::Other(s) => RunnerError::Other(s.clone()),
     }

@@ -129,18 +129,22 @@ impl StreamAccumulator {
         if !self.saw_result && self.text.is_empty() {
             return Err(RunnerError::NoResult);
         }
-        let Some(structured) = &self.structured else {
-            return Err(RunnerError::NoStructuredOutput {
-                detail: "the run ended without a structured_output".into(),
-            });
-        };
-        let result = kind
-            .parse(structured)
-            .map_err(|e| RunnerError::NoStructuredOutput { detail: format!("{kind:?} shape: {e}") })?;
         let mut usage = self.usage;
         if usage.model.is_empty() {
             usage.model = model.to_string();
         }
+        let Some(structured) = &self.structured else {
+            return Err(RunnerError::NoStructuredOutput {
+                detail: "the run ended without a structured_output".into(),
+                usage,
+            });
+        };
+        let result = match kind.parse(structured) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(RunnerError::NoStructuredOutput { detail: format!("{kind:?} shape: {e}"), usage })
+            }
+        };
         Ok(RunnerOutput { result, final_text: self.text, usage })
     }
 }
@@ -298,6 +302,18 @@ mod tests {
     }
 
     #[test]
+    fn a_run_without_structured_output_still_reports_what_it_cost() {
+        match parse_stream(MISSING, "m", OutputKind::Producer).unwrap_err() {
+            RunnerError::NoStructuredOutput { usage, .. } => {
+                assert_eq!(usage.model, "claude-haiku-4-5-20251001");
+                assert!(usage.output_tokens > 0);
+                assert!(usage.cost_micros.unwrap() > 0);
+            }
+            other => panic!("expected NoStructuredOutput, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn the_assistant_prose_is_kept_as_final_text_for_the_log() {
         // The reviewer run wrote prose before calling StructuredOutput.
         let out = parse_stream(REVIEWER, "m", OutputKind::Reviewer).unwrap();
@@ -309,7 +325,7 @@ mod tests {
         let raw = r#"{"type":"result","subtype":"success","is_error":false,"result":"{}","structured_output":{"verdict":"maybe"}}"#;
         let err = parse_stream(raw, "m", OutputKind::Reviewer).unwrap_err();
         match err {
-            RunnerError::NoStructuredOutput { detail } => assert!(!detail.is_empty()),
+            RunnerError::NoStructuredOutput { detail, .. } => assert!(!detail.is_empty()),
             other => panic!("expected NoStructuredOutput, got {other:?}"),
         }
     }
