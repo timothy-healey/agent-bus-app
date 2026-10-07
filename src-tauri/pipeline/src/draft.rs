@@ -7,7 +7,7 @@
 //! `prompt_body`; to_pipeline() converts it to a `prompts/<id>.md` path.
 
 use crate::model::{Escalation, Fork, Gate, Join, Pipeline, Role, Routes, RunnerConfig, Scope, Store, Team, Workers, SCHEMA_VERSION};
-use agent_bus_core::{EffortMode, RunnerKind};
+use agent_bus_core::{Effort, RunnerKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -38,8 +38,8 @@ pub struct DraftTeam {
 }
 
 impl DraftTeam {
-    /// A new team with smart defaults (claude-cli, standard effort, 1/1 workers,
-    /// empty prompt + scope + routes). `kickoff_generate` overrides these.
+    /// A new team with smart defaults (claude-cli, the `default` model alias,
+    /// Default effort, 1/1 workers, empty prompt + scope + routes). `kickoff_generate` overrides these.
     pub fn new(id: &str, name: &str) -> Self {
         Self {
             id: id.to_string(),
@@ -47,8 +47,8 @@ impl DraftTeam {
             prompt_body: String::new(),
             runner: RunnerConfig {
                 kind: RunnerKind::ClaudeCli,
-                model: agent_bus_core::DEFAULT_MODEL.into(),
-                effort: EffortMode::Standard,
+                model: agent_bus_core::DEFAULT_TEAM_MODEL.into(),
+                effort: Effort::Default,
                 api_key_env: None,
             },
             scope: Scope::default(),
@@ -463,9 +463,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_team_defaults_to_the_shared_default_model() {
+    fn new_team_defaults_to_the_default_alias_and_default_effort() {
         let t = DraftTeam::new("research", "Research");
-        assert_eq!(t.runner.model, agent_bus_core::DEFAULT_MODEL);
+        assert_eq!(t.runner.model, agent_bus_core::DEFAULT_TEAM_MODEL);
+        assert_eq!(t.runner.effort, agent_bus_core::Effort::Default);
     }
 
     #[test]
@@ -533,7 +534,7 @@ mod tests {
         assert_eq!(t.name, "Research");
         assert_eq!(t.prompt_body, "");
         assert_eq!(t.runner.kind, agent_bus_core::RunnerKind::ClaudeCli);
-        assert_eq!(t.runner.effort, agent_bus_core::EffortMode::Standard);
+        assert_eq!(t.runner.effort, agent_bus_core::Effort::Default);
     }
 
     #[test]

@@ -65,14 +65,8 @@ pub fn build_request_body(req: &ChatRequest, tools: &[ChatToolDef], force: Optio
         };
     }
 
-    // EffortMode→thinking budget. A forced/any tool_choice is incompatible with
-    // extended thinking, so thinking is only enabled on the plain text path.
-    if req.thinking_budget > 0 && !tool_choice_set {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": req.thinking_budget,
-        });
-    }
+    // No thinking field: effort levels are a CLI concept, and this runner is
+    // kept compiling but not maintained.
     body
 }
 
@@ -270,6 +264,7 @@ impl ChatRunner for AnthropicApiChatRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_bus_core::Effort;
 
     const TOOL_USE: &str = include_str!("fixtures/anthropic-tool-use-sample.json");
     const TEXT: &str = include_str!("fixtures/anthropic-text-sample.json");
@@ -281,7 +276,7 @@ mod tests {
             system_prompt: "You are the terminal.".into(),
             user_message: "emit the team set".into(),
             model: "claude-opus-4-8".into(),
-            thinking_budget: 8192,
+            effort: Effort::Level("high".into()),
             working_dir: None,
         }
     }
@@ -304,9 +299,16 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], "emit the team set");
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
-        // thinking enabled on the plain text path
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 8192);
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn never_sends_a_thinking_field() {
+        for effort in [Effort::Default, Effort::Level("max".into())] {
+            let mut r = req();
+            r.effort = effort;
+            assert!(build_request_body(&r, &[], None).get("thinking").is_none());
+        }
     }
 
     #[test]

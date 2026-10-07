@@ -56,7 +56,7 @@ async fn emit_structured<T: serde::de::DeserializeOwned + schemars::JsonSchema>(
         system_prompt: system_prompt.to_string(),
         user_message,
         model: agent_bus_core::DEFAULT_MODEL.to_string(),
-        thinking_budget: 8192,
+        effort: agent_bus_core::Effort::Level("high".into()),
         working_dir: None,
     };
     match runner.chat_structured(&req, &tools, Some(EMIT_TOOL)).await {
@@ -247,7 +247,7 @@ async fn chat_with_repair_parsed<T>(
             system_prompt: system_prompt.to_string(),
             user_message,
             model: agent_bus_core::DEFAULT_MODEL.to_string(),
-            thinking_budget: 8192,
+            effort: agent_bus_core::Effort::Level("high".into()),
             working_dir: None,
         };
         match runner.chat(&req).await {
@@ -598,6 +598,7 @@ mod tests {
         let runner = FakeChatRunner::new(vec![good]);
         let _ = design_session_turn(&runner, "sess-1", Step::Prompts, draft, "go").await;
         assert_eq!(runner.received.lock().unwrap()[0].model, agent_bus_core::DEFAULT_MODEL);
+        assert_eq!(runner.received.lock().unwrap()[0].effort, agent_bus_core::Effort::Level("high".into()));
     }
 
     #[tokio::test]
@@ -796,6 +797,7 @@ mod tests {
         assert_eq!(out.updated_draft.teams[0].prompt_body, "You investigate the repo and write findings.");
         // exactly ONE call — no repair turn on the forced-schema path
         assert_eq!(runner.received.lock().unwrap().len(), 1);
+        assert_eq!(runner.received.lock().unwrap()[0].effort, agent_bus_core::Effort::Level("high".into()));
         // the forced tool was the slice-emit tool with the derived schema
         let calls = runner.structured_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);

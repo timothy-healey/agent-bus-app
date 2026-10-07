@@ -27,7 +27,8 @@ pub struct ChatRequest {
     pub system_prompt: String,
     pub user_message: String,
     pub model: String,
-    pub thinking_budget: u32,
+    /// The `--effort` level, or Default for no flag.
+    pub effort: agent_bus_core::Effort,
     /// The directory the child `claude` process runs in (LF26 parity with the
     /// worker runner). `None` = inherit the parent's cwd (the default, used by
     /// the terminal chat which has no work-item working dir).
@@ -179,7 +180,7 @@ mod tests {
         let fake = FakeChatRunner::new(vec![ChatReply { text: "hi".into(), usage: ChatUsage::default() }]);
         let req = ChatRequest {
             dialogue_id: "d".into(), system_prompt: "s".into(), user_message: "u".into(),
-            model: "m".into(), thinking_budget: 0, working_dir: None,
+            model: "m".into(), effort: agent_bus_core::Effort::Default, working_dir: None,
         };
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let s = seen.clone();
@@ -198,7 +199,7 @@ mod tests {
         assert!(!fake.supports_structured());
         let req = ChatRequest {
             dialogue_id: "d".into(), system_prompt: "s".into(), user_message: "u".into(),
-            model: "m".into(), thinking_budget: 0, working_dir: None,
+            model: "m".into(), effort: agent_bus_core::Effort::Default, working_dir: None,
         };
         let tool = ChatToolDef {
             name: "emit".into(), description: "emit a slice".into(),

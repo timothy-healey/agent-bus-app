@@ -1,6 +1,6 @@
 import type React from "react";
 import type { CSSProperties } from "react";
-import type { DraftPipeline, DraftTeam, EffortMode } from "../../ipc/pipeline";
+import type { DraftPipeline, DraftTeam } from "../../ipc/pipeline";
 import { regenerateTeamPrompt } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
 import { useId, useState } from "react";
@@ -10,8 +10,8 @@ import { SkillAutocomplete } from "./SkillAutocomplete";
 import { FileTreePicker } from "../../components/FileTreePicker";
 import { InfoTip } from "../../components/InfoTip";
 import { toRepoRelative } from "../../components/fileTree";
-import { CLAUDE_MODELS } from "../../ipc/models";
-import { testModel, type ModelTestResult } from "../../ipc/runner";
+import { findModel, modelLabel, sourceLabel } from "../../ipc/models";
+import { useModelList } from "../../hooks/useModelList";
 import {
   renameTeam,
   setPromptBody,
@@ -32,12 +32,6 @@ import {
 /// (name, prompt, Runner, Scope, Role, Scale, Store). Gate → label / downstream.
 /// Join → Lanes / Quorum / Early-cancel. Fork → lanes. All edits go through the
 /// pure draft mutators so DraftPipeline stays the single source of truth.
-
-const EFFORT_PRESETS: EffortMode["mode"][] = ["off", "standard", "extended-low", "extended-high", "custom"];
-
-function effortFromSelect(mode: EffortMode["mode"], currentBudget: number): EffortMode {
-  return mode === "custom" ? { mode: "custom", budget_tokens: currentBudget } : { mode };
-}
 
 interface NodeDrawerProps {
   draft: DraftPipeline;
@@ -162,7 +156,7 @@ const HELP = {
   writes: "Paths the agent may WRITE. A producer needs its artifacts dir; a reviewer that only judges can have none.",
   tools: "Allowed tool names (e.g. Read, Edit, Bash, WebFetch). WebFetch/WebSearch also open network access under the sandbox profile.",
   role: "producer = does work and hands off on approve. reviewer = judges upstream work and emits approve / revise / reject.",
-  runner: "Which Claude is invoked and how hard it thinks. Model + effort; an API-key env var name when using the anthropic-api runner.",
+  runner: "Which Claude runs this team and how hard it reasons. Models and effort levels come from your installed Claude CLI. An API-key env var name is only used by the anthropic-api runner.",
   scale: "Worker concurrency for this team: minimum kept warm and maximum it can burst to.",
   store: "Bounded input buffer (WIP limit) — how many tasks can queue for this team before upstream back-pressures.",
   quorum: "Proceed once N of the M lanes approve (N-of-M). Blank means all must approve. A set quorum governs success and overrides early-cancel.",
@@ -189,77 +183,66 @@ function LabelTip({ text, children }: { text: string; children: React.ReactNode 
   );
 }
 
-/// G6 — model SELECTOR (curated known IDs) + a free-text override flagged
-/// "unverified", plus a "Test" button firing a 1-token probe via test_model.
-function ModelField({ id, value, onChange }: { id: string; value: string; onChange: (m: string) => void }) {
-  const known = CLAUDE_MODELS.some((m) => m.id === value);
-  const [override, setOverride] = useState(!known && value.length > 0);
-  const [testing, setTesting] = useState(false);
-  const [result, setResult] = useState<ModelTestResult | null>(null);
+/// Model and Effort pickers over the CLI's model list. Model offers the list's
+/// entries (aliases show what they resolve to); a saved model the list lacks
+/// shows as "not available". Effort offers Default plus the selected model's
+/// levels. Switching to a model that lacks the saved level snaps it to Default
+/// and says so.
+function RunnerPickers({ draft, team, onChange }: { draft: DraftPipeline; team: DraftTeam; onChange: (d: DraftPipeline) => void }) {
+  const { list, refreshing, refresh } = useModelList();
+  const [note, setNote] = useState<string | null>(null);
+  const id = team.id;
+  const model = team.runner.model;
+  const effort = team.runner.effort;
+  const option = findModel(list, model);
+  const levels = option?.effort_levels ?? [];
+  const modelMissing = !option;
+  const effortMissing = effort !== undefined && !levels.includes(effort);
 
-  async function runTest() {
-    setTesting(true);
-    setResult(null);
-    try {
-      setResult(await testModel(value));
-    } catch (e) {
-      setResult({ status: "error", message: String(e) });
-    } finally {
-      setTesting(false);
-    }
+  function pickModel(value: string) {
+    const { draft: next, snapped } = setTeamModel(draft, id, value, list);
+    onChange(next);
+    setNote(snapped ? `${snapped} isn't supported by ${value}; effort reset to Default.` : null);
   }
 
   return (
-    <div style={{ display: "grid", gap: "var(--sp-2)" }}>
-      {override ? (
-        <input
-          aria-label={`model override for ${id}`}
-          value={value}
-          placeholder="custom model id"
-          onChange={(e) => { onChange(e.target.value); setResult(null); }}
-          style={inp}
-        />
-      ) : (
-        <select aria-label={`model for ${id}`} value={known ? value : ""} onChange={(e) => { onChange(e.target.value); setResult(null); }} style={inp}>
-          {!known && <option value="">{value || "(select a model)"}</option>}
-          {CLAUDE_MODELS.map((m) => (
-            <option key={m.id} value={m.id}>{m.label} ({m.id})</option>
+    <>
+      <Field label="Model">
+        <select aria-label={`model for ${id}`} value={model} onChange={(e) => pickModel(e.target.value)} style={inp}>
+          {modelMissing && <option value={model}>{list ? `${model} — not available` : model}</option>}
+          {list?.models.map((m) => (
+            <option key={m.value} value={m.value}>{modelLabel(m)}</option>
           ))}
         </select>
+      </Field>
+      <Field label="Effort">
+        <select
+          aria-label={`effort for ${id}`}
+          value={effort ?? ""}
+          onChange={(e) => {
+            onChange(setTeamEffort(draft, id, e.target.value || undefined));
+            setNote(null);
+          }}
+          style={inp}
+        >
+          <option value="">Default</option>
+          {levels.map((l) => (
+            <option key={l} value={l}>{l}</option>
+          ))}
+          {effortMissing && <option value={effort}>{list ? `${effort} — not supported` : effort}</option>}
+        </select>
+      </Field>
+      {note && (
+        <span role="status" style={{ fontSize: "var(--ts-xs)", color: "var(--warn)" }}>{note}</span>
       )}
-      <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", flexWrap: "wrap" }}>
-        <label style={{ display: "inline-flex", alignItems: "center", gap: "var(--sp-1)", fontSize: "var(--ts-xs)", color: "var(--text-3)" }}>
-          <input type="checkbox" aria-label={`model override toggle for ${id}`} checked={override} onChange={(e) => { setOverride(e.target.checked); setResult(null); }} />
-          custom id
-        </label>
-        {override && value.length > 0 && (
-          <span style={{ fontSize: "var(--ts-xs)", color: "var(--warn)" }}>unverified</span>
-        )}
-        <Button size="sm" aria-label={`test model for ${id}`} disabled={testing || !value} onClick={runTest}>
-          {testing ? "Testing…" : "Test"}
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
+        <Button size="sm" aria-label="refresh model list" disabled={refreshing} onClick={() => void refresh()}>
+          {refreshing ? "Refreshing…" : "Refresh"}
         </Button>
-        {result && (
-          <span aria-live="polite" style={{ fontSize: "var(--ts-xs)", color: testResultColor(result.status) }}>
-            {testResultLabel(result)}
-          </span>
-        )}
+        {list && <span style={{ fontSize: "var(--ts-xs)", color: "var(--text-3)" }}>{sourceLabel(list.source)}</span>}
       </div>
-    </div>
+    </>
   );
-}
-
-// Restrained palette has no success-green by design: ochre accent carries the
-// positive "available" state; danger for unavailable; muted text for a generic
-// test failure.
-function testResultColor(status: ModelTestResult["status"]): string {
-  if (status === "ok") return "var(--accent)";
-  if (status === "unavailable") return "var(--danger)";
-  return "var(--text-3)";
-}
-function testResultLabel(r: ModelTestResult): string {
-  if (r.status === "ok") return "available";
-  if (r.status === "unavailable") return "unavailable, pick another";
-  return r.message || "test failed";
 }
 
 /// G7 — a Scope reads/writes field that offers the in-app FileTreePicker
@@ -319,7 +302,6 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { dr
   const [regenBusy, setRegenBusy] = useState(false);
   const [regenError, setRegenError] = useState<string | null>(null);
   if (!t) return null;
-  const effort = t.runner.effort;
   const workers = t.workers;
 
   async function regenerate() {
@@ -393,34 +375,8 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { dr
       <fieldset style={group}>
         <TipLegend text={HELP.runner}>Runner</TipLegend>
         <div style={{ display: "grid", gap: "var(--sp-3)" }}>
-          <Field label="Model">
-            <ModelField id={id} value={t.runner.model} onChange={(m) => onChange(setTeamModel(draft, id, m))} />
-          </Field>
-          <Field label="Effort">
-            <select
-              aria-label={`effort for ${id}`}
-              value={effort.mode}
-              onChange={(e) =>
-                onChange(
-                  setTeamEffort(
-                    draft,
-                    id,
-                    effortFromSelect(e.target.value as EffortMode["mode"], effort.mode === "custom" ? effort.budget_tokens : 16000),
-                  ),
-                )
-              }
-              style={inp}
-            >
-              {EFFORT_PRESETS.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </Field>
-          {effort.mode === "custom" && (
-            <Field label="Budget (tokens)">
-              <input type="number" aria-label={`budget for ${id}`} value={effort.budget_tokens} onChange={(e) => onChange(setTeamEffort(draft, id, { mode: "custom", budget_tokens: Number(e.target.value) || 0 }))} style={inp} />
-            </Field>
-          )}
+          {/* Keyed by team so the snap note belongs to the team it was about. */}
+          <RunnerPickers key={t.id} draft={draft} team={t} onChange={onChange} />
           <Field label="API-key env var (name only)">
             <input
               aria-label={`api key env for ${id}`}

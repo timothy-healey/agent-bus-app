@@ -217,7 +217,7 @@ mod tests {
             system_prompt: "sys".into(),
             user_message: msg.into(),
             model: "m".into(),
-            thinking_budget: 0,
+            effort: agent_bus_core::Effort::Default,
             working_dir: None,
         }
     }

@@ -20,6 +20,8 @@ pub const CONVERSATION_DELTA: &str = "conversation-delta";
 /// `{ run_id, stage, task_id, active }`. The frontend renders a transient
 /// clickable source card while `active`.
 pub const GENERATOR_STATUS: &str = "generator-status";
+/// A live model-list fetch replaced the current list. Pickers refetch.
+pub const MODEL_LIST_UPDATED: &str = "model-list-updated";
 
 #[cfg(test)]
 mod tests {
@@ -30,7 +32,7 @@ mod tests {
     /// breaks every frontend subscription.
     #[test]
     fn all_event_names_are_tauri_legal() {
-        for name in [TASK_CHANGED, RUN_CHANGED, USAGE_CHANGED, TASK_LOG, CONVERSATION_DELTA, GENERATOR_STATUS] {
+        for name in [TASK_CHANGED, RUN_CHANGED, USAGE_CHANGED, TASK_LOG, CONVERSATION_DELTA, GENERATOR_STATUS, MODEL_LIST_UPDATED] {
             assert!(!name.is_empty(), "event name must be non-empty");
             assert!(
                 name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '/' | ':' | '_')),

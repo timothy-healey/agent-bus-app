@@ -64,28 +64,12 @@ fn runner_kind_matches_ts_kebab_union() {
     assert_eq!(serde_json::to_value(RunnerKind::AnthropicApi).unwrap(), json!("anthropic-api"));
 }
 
-// --- EffortMode: internally-tagged on `mode`, kebab variants ----------------
+// --- Effort: a bare level string ------------------------------------------
 
-/// Locks `src/ipc/pipeline.ts:5-10`: the `EffortMode` discriminated union tagged
-/// on `mode` with kebab variant names; the `custom` variant adds `budget_tokens`.
+/// Locks `src/ipc/pipeline.ts` `type Effort = string`: a level is a bare string.
 #[test]
-fn effort_mode_matches_ts_discriminated_union() {
-    // Unit variants: object with exactly { mode }.
-    for (variant, tag) in [
-        (EffortMode::Off, "off"),
-        (EffortMode::Standard, "standard"),
-        (EffortMode::ExtendedLow, "extended-low"),
-        (EffortMode::ExtendedHigh, "extended-high"),
-    ] {
-        let v = serde_json::to_value(variant).unwrap();
-        assert_eq!(keys(&v), set(&["mode"]), "variant {tag} keys");
-        assert_eq!(v["mode"], json!(tag));
-    }
-    // Custom variant: { mode: "custom", budget_tokens: number }.
-    let custom = serde_json::to_value(EffortMode::Custom { budget_tokens: 16000 }).unwrap();
-    assert_eq!(keys(&custom), set(&["mode", "budget_tokens"]));
-    assert_eq!(custom["mode"], json!("custom"));
-    assert_eq!(custom["budget_tokens"], json!(16000));
+fn effort_level_matches_ts_string() {
+    assert_eq!(serde_json::to_value(Effort::Level("max".into())).unwrap(), json!("max"));
 }
 
 // --- ToolCallRequest: TS { tool_name, args } --------------------------------

@@ -1,5 +1,6 @@
 mod brake_persist;
 mod events;
+mod model_list_cache;
 mod pipeline_activator;
 mod process_records;
 mod process_registry;
@@ -57,6 +58,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (15, include_str!("../migrations/015_usage_budget_recalibrate.sql")),
         (16, include_str!("../migrations/016_utilization.sql")),
         (17, include_str!("../migrations/017_drop_cc_usage_log.sql")),
+        (18, include_str!("../migrations/018_invocation_effort.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -396,7 +398,7 @@ pub struct LlmEngine {
     dialogue_id: String,
     system_prompt: String,
     model: String,
-    thinking_budget: u32,
+    effort: agent_bus_core::Effort,
     delta: Option<ConversationDeltaEmitter>,
 }
 
@@ -406,9 +408,9 @@ impl LlmEngine {
         dialogue_id: String,
         system_prompt: String,
         model: String,
-        thinking_budget: u32,
+        effort: agent_bus_core::Effort,
     ) -> Self {
-        Self { runner, dialogue_id, system_prompt, model, thinking_budget, delta: None }
+        Self { runner, dialogue_id, system_prompt, model, effort, delta: None }
     }
 
     /// Attach a display-only delta emitter (root emits throttled conversation.delta).
@@ -426,7 +428,7 @@ impl ConversationEngine for LlmEngine {
             system_prompt: self.system_prompt.clone(),
             user_message: input.to_string(),
             model: self.model.clone(),
-            thinking_budget: self.thinking_budget,
+            effort: self.effort.clone(),
             working_dir: None,
         };
         // Display-only streaming when a delta emitter is attached; reset clears
@@ -523,7 +525,7 @@ pub struct AgenticChatEngine {
     dialogue_id: String,
     system_prompt_framing: String,
     model: String,
-    thinking_budget: u32,
+    effort: agent_bus_core::Effort,
     max_steps: usize,
     delta: Option<ConversationDeltaEmitter>,
 }
@@ -537,7 +539,7 @@ impl AgenticChatEngine {
         dialogue_id: String,
         system_prompt_framing: String,
         model: String,
-        thinking_budget: u32,
+        effort: agent_bus_core::Effort,
     ) -> Self {
         Self {
             runner,
@@ -546,7 +548,7 @@ impl AgenticChatEngine {
             dialogue_id,
             system_prompt_framing,
             model,
-            thinking_budget,
+            effort,
             max_steps: MAX_STEPS,
             delta: None,
         }
@@ -581,7 +583,7 @@ impl ConversationEngine for AgenticChatEngine {
                 system_prompt: system_prompt.clone(),
                 user_message: next_user_message.clone(),
                 model: self.model.clone(),
-                thinking_budget: self.thinking_budget,
+                effort: self.effort.clone(),
                 working_dir: None,
             };
 
@@ -838,16 +840,49 @@ fn seed_template_cmd(id: String) -> Result<DraftPipeline, String> {
     pipeline::seed_template::seed_template(&id).ok_or_else(|| format!("unknown seed template: {id}"))
 }
 
-/// OHS (G6): probe a model's availability with a 1-token call. Returns a
-/// `ModelProbe { status, message }` — `ok` / `unavailable` (the runner
-/// classified a model-not-found, surfaced as "pick another") / `error`. The
-/// live subprocess path is structural-only (no headless claude here); the
-/// default `ClaudeCliRunner` is used (authoring-time check, no team config).
-/// Pure classification + the seam are unit-tested in `runners::probe`.
+/// The current model list (live, cached or built-in), shared with Runtime's
+/// pre-flight check, plus where it is refreshed from and cached to.
+struct ModelListState {
+    list: Arc<std::sync::RwLock<agent_bus_core::ModelList>>,
+    source: Arc<dyn agent_bus_core::ModelSource>,
+    cache_path: std::path::PathBuf,
+}
+
+impl ModelListState {
+    fn current(&self) -> agent_bus_core::ModelList {
+        self.list.read().map(|l| l.clone()).unwrap_or_else(|_| runners::curated_models::curated())
+    }
+}
+
+/// Query the CLI off the async runtime; on success the list is replaced, cached
+/// and `model-list-updated` is emitted. A failure keeps the current list.
+async fn refresh_model_list_inner(state: &ModelListState, app: &tauri::AppHandle) {
+    let (source, list, path) = (state.source.clone(), state.list.clone(), state.cache_path.clone());
+    let changed = tauri::async_runtime::spawn_blocking(move || {
+        model_list_cache::refresh_from(source.as_ref(), &list, &path)
+    })
+    .await
+    .unwrap_or(false);
+    if changed {
+        let _ = app.emit(crate::events::MODEL_LIST_UPDATED, ());
+    }
+}
+
+/// OHS: the current model list. Never calls the CLI.
 #[tauri::command(rename_all = "snake_case")]
-async fn test_model(model: String) -> Result<runners::probe::ModelProbe, String> {
-    let runner = runners::claude_cli::ClaudeCliRunner::new();
-    Ok(runners::probe::run_probe(&runner, &model).await)
+fn model_list(state: tauri::State<'_, ModelListState>) -> agent_bus_core::ModelList {
+    state.current()
+}
+
+/// OHS: re-query the CLI's model list (no model call) and return the list now
+/// current — the fresh one, or the previous one if the query failed.
+#[tauri::command(rename_all = "snake_case")]
+async fn refresh_model_list(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ModelListState>,
+) -> Result<agent_bus_core::ModelList, String> {
+    refresh_model_list_inner(state.inner(), &app).await;
+    Ok(state.current())
 }
 
 /// OHS: one Design Session turn — apply a slice + return prose + updated draft.
@@ -1564,6 +1599,12 @@ pub fn run() {
             sql: include_str!("../migrations/017_drop_cc_usage_log.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 18,
+            description: "invocation effort level",
+            sql: include_str!("../migrations/018_invocation_effort.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     // Live child process-group registry (LF20): the killable spawners register
@@ -1723,6 +1764,18 @@ pub fn run() {
                 let revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>> =
                     Some(Arc::new(SqliteRevisionReader { pool: pool.clone() }));
 
+                // The model list: the disk cache (or the built-in list) at once,
+                // replaced by a live `initialize` query below. Runtime reads the
+                // same list for its run-start pre-flight check.
+                let model_list = Arc::new(std::sync::RwLock::new(model_list_cache::boot_list(
+                    model_list_cache::load(&data_dir.join(model_list_cache::CACHE_FILE)),
+                )));
+                let model_list_state = ModelListState {
+                    list: model_list.clone(),
+                    source: Arc::new(runners::model_query::ClaudeCliModelSource::new()),
+                    cache_path: data_dir.join(model_list_cache::CACHE_FILE),
+                };
+
                 let runtime_state_arc = Arc::new(RuntimeState::new(
                     tasks.clone(),
                     brake.clone(),
@@ -1738,8 +1791,16 @@ pub fn run() {
                         project_root: project_root.clone(),
                         project_target_repo: project_target_repo.clone(),
                     },
-                ));
+                ).with_model_list(model_list.clone()));
                 handle.manage(runtime_state_arc.clone());
+                handle.manage(model_list_state);
+                {
+                    let handle = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = handle.state::<ModelListState>();
+                        refresh_model_list_inner(state.inner(), &handle).await;
+                    });
+                }
                 // LF20: the process registry as managed State so the root
                 // `brake_on` command (and any other consumer) can resolve it.
                 handle.manage(process_registry.clone());
@@ -1827,7 +1888,7 @@ pub fn run() {
                          and inspect the pipeline (tasks, gates, usage, the brake). Be concise."
                             .into(),
                         agent_bus_core::DEFAULT_MODEL.into(),
-                        8192,
+                        agent_bus_core::Effort::Level("high".into()),
                     ).with_delta_sink(Some(make_conversation_delta_sink(handle.clone()))));
                 let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
                     Arc::new(CompositeEngine::new(command_engine, agentic_engine));
@@ -1963,7 +2024,8 @@ pub fn run() {
             kickoff_generate_cmd,
             list_seed_templates_cmd,
             seed_template_cmd,
-            test_model,
+            model_list,
+            refresh_model_list,
             design_session_turn_cmd,
             best_effort_validate_cmd,
             create_project_from_draft,
@@ -2240,9 +2302,19 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 17, "all seventeen migrations recorded");
+        assert_eq!(version, 18, "all eighteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn migration_018_adds_a_nullable_effort_column() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(invocation_audit)").fetch_all(&pool).await.unwrap();
+        let effort = cols.iter().find(|c| c.1 == "effort").expect("effort column");
+        assert_eq!(effort.3, 0, "effort must be nullable");
     }
 
     // LF34: migration 015 bumps existing installs off the old input+output-only
@@ -2336,7 +2408,7 @@ mod llm_engine_tests {
             text: "T-042 is in design.".into(),
             usage: ChatUsage::default(),
         }]));
-        let engine = LlmEngine::new(fake.clone() as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192);
+        let engine = LlmEngine::new(fake.clone() as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), agent_bus_core::Effort::Level("high".into()));
         let catalog = ToolCatalog::new(vec![]);
         let reply = engine.respond("how is T-042 going?", &catalog).await;
         assert_eq!(reply.text, "T-042 is in design.");
@@ -2356,7 +2428,7 @@ mod llm_engine_tests {
             usage: ChatUsage::default(),
         }]));
         let engine: Arc<dyn ConversationEngine> =
-            Arc::new(LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192));
+            Arc::new(LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), agent_bus_core::Effort::Level("high".into())));
         let catalog = ToolCatalog::new(vec![]);
 
         let convo = send_message_inner("p", &catalog, engine.as_ref(), &store, "hi there", 500)
@@ -2375,7 +2447,7 @@ mod llm_engine_tests {
     #[tokio::test]
     async fn llm_engine_surfaces_a_chat_error_as_an_error_turn() {
         let fake = Arc::new(FakeChatRunner::failing(llm_chat::chat::ChatError::Spawn("no claude on PATH".into())));
-        let engine = LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192);
+        let engine = LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), agent_bus_core::Effort::Level("high".into()));
         let catalog = ToolCatalog::new(vec![]);
         let reply = engine.respond("hi", &catalog).await;
         // a clear error turn, no panic, no tool calls
@@ -2725,7 +2797,7 @@ mod composite_engine_tests {
             "p".into(),
             "You are the god terminal.".into(),
             "m".into(),
-            8192,
+            agent_bus_core::Effort::Level("high".into()),
         )
     }
 
@@ -2854,7 +2926,7 @@ mod composite_engine_tests {
             "p".into(),
             "You are the god terminal.".into(),
             "m".into(),
-            8192,
+            agent_bus_core::Effort::Level("high".into()),
         )
     }
 

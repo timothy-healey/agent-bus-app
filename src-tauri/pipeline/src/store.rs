@@ -119,14 +119,14 @@ mod tests {
     #[test]
     fn save_round_trips_through_yaml() {
         use crate::model::{Escalation, Pipeline, Role, Routes, Scope, Store, Team, TeamRunnerConfig, Workers};
-        use agent_bus_core::{EffortMode, RunnerKind};
+        use agent_bus_core::{Effort, RunnerKind};
         let store = PipelineStore::new(temp_root());
         let p = Pipeline {
             id: "demo".into(), name: "Demo".into(), description: String::new(), schema_version: 1,
             defaults: None,
             teams: vec![Team {
                 id: "research".into(), name: "Research".into(), prompt: "prompts/research.md".into(),
-                runner: Some(TeamRunnerConfig { kind: Some(RunnerKind::ClaudeCli), model: Some("m".into()), effort: Some(EffortMode::Standard), api_key_env: None }),
+                runner: Some(TeamRunnerConfig { kind: Some(RunnerKind::ClaudeCli), model: Some("m".into()), effort: Some(Effort::Default), api_key_env: None }),
                 scope: Scope::default(),
                 outputs: Routes { on_approve: Some("needs-human".into()), on_revise: None, on_reject: None },
                 workers: Workers::default(),
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn load_resolves_pipeline_defaults_into_each_team() {
         use crate::model::{Escalation, Pipeline, PipelineDefaults, Role, Routes, Scope, Store, Team, Workers};
-        use agent_bus_core::{EffortMode, RunnerKind};
+        use agent_bus_core::{Effort, RunnerKind};
         let store = PipelineStore::new(temp_root());
         // author a pipeline whose team omits its runner; pipeline default supplies it
         let p = Pipeline {
@@ -154,7 +154,7 @@ mod tests {
             defaults: Some(PipelineDefaults {
                 default_runner: Some(RunnerKind::ClaudeCli),
                 default_model: Some("claude-opus-4-8".into()),
-                default_effort: Some(EffortMode::ExtendedHigh),
+                default_effort: Some(Effort::Level("high".into())),
             }),
             teams: vec![Team {
                 id: "research".into(), name: "Research".into(), prompt: "prompts/research.md".into(),
@@ -177,6 +177,6 @@ mod tests {
         let loaded = store.load("demo").unwrap();
         let er = loaded.teams[0].effective_runner();
         assert_eq!(er.model, "claude-opus-4-8");
-        assert_eq!(er.effort, EffortMode::ExtendedHigh);
+        assert_eq!(er.effort, Effort::Level("high".into()));
     }
 }

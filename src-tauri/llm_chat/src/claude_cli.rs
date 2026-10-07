@@ -161,7 +161,7 @@ mod tests {
             system_prompt: "sys".into(),
             user_message: msg.into(),
             model: "claude-opus-4-8".into(),
-            thinking_budget: 8192,
+            effort: agent_bus_core::Effort::Level("high".into()),
             working_dir: None,
         }
     }

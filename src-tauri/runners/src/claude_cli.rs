@@ -134,7 +134,7 @@ mod tests {
             task_id: "T-1".into(),
             team_id: "research".into(),
             model: "claude-opus-4-7".into(),
-            thinking_budget: 8192,
+            effort: agent_bus_core::Effort::Level("high".into()),
             system_prompt: "p".into(),
             user_message: "go".into(),
             settings_path: "/tmp/s.json".into(),

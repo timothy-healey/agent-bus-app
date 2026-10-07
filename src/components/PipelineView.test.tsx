@@ -13,7 +13,7 @@ const pipeline: Pipeline = {
       id: "research",
       name: "Research",
       prompt: "prompts/research.md",
-      runner: { kind: "claude-cli", model: "claude-opus-4-7", effort: { mode: "extended-high" } },
+      runner: { kind: "claude-cli", model: "claude-opus-4-7", effort: "high" },
       scope: { reads: ["${target_repo}"], writes: ["${project}/artifacts/analyses"], tools: ["Read"] },
       outputs: { on_approve: "spec-writers", on_revise: null, on_reject: null },
       workers: { min: 1, max: 3 },
@@ -38,8 +38,16 @@ describe("PipelineView", () => {
     render(<PipelineView pipeline={pipeline} />);
     // "Research" appears in both the graph node and the form card.
     expect(screen.getAllByText("Research").length).toBeGreaterThan(0);
-    expect(screen.getByText(/claude-opus-4-7/)).toBeInTheDocument();
-    expect(screen.getByText(/extended-high/)).toBeInTheDocument();
+    expect(screen.getByText(/claude-opus-4-7 · high effort/)).toBeInTheDocument();
+  });
+
+  it("shows a team without an effort level as default effort", () => {
+    const p: Pipeline = {
+      ...pipeline,
+      teams: [{ ...pipeline.teams[0], runner: { kind: "claude-cli", model: "default" } }],
+    };
+    render(<PipelineView pipeline={p} />);
+    expect(screen.getByText(/default · default effort/)).toBeInTheDocument();
   });
 
   it("renders a team's approve route target", () => {

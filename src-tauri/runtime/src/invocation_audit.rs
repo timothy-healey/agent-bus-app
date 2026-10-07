@@ -149,6 +149,8 @@ pub struct InvocationAudit {
     pub outcome_kind: Option<String>,
     pub outcome: Option<String>,
     pub usage: AuditUsage,
+    /// The `--effort` level the invocation ran with; `None` = Default.
+    pub effort: Option<String>,
 }
 
 type AuditRow = (
@@ -165,6 +167,7 @@ type AuditRow = (
     i64,
     i64,
     i64,
+    Option<String>,
 );
 
 fn row_to_audit(r: AuditRow) -> InvocationAudit {
@@ -185,6 +188,7 @@ fn row_to_audit(r: AuditRow) -> InvocationAudit {
             cache_creation: r.11 as u64,
             cache_read: r.12 as u64,
         },
+        effort: r.13,
     }
 }
 
@@ -200,10 +204,11 @@ impl InvocationAuditStore {
     const SELECT: &'static str =
         "SELECT invocation_id, task_id, team_id, model, attempts, started_at,
                 settled_at, outcome_kind, outcome,
-                input_tokens, output_tokens, cache_creation, cache_read
+                input_tokens, output_tokens, cache_creation, cache_read, effort
          FROM invocation_audit";
 
-    /// Write the start row (outcome NULL = in-flight). Returns the row's
+    /// Write the start row (outcome NULL = in-flight). `effort` is the level
+    /// passed as `--effort`, or `None` for Default. Returns the row's
     /// invocation_id (a fresh uuid) so the caller can settle it later. `attempts`
     /// is the *Task's* attempt counter at invoke time, not an invocation-local
     /// count (VET F2).
@@ -212,19 +217,21 @@ impl InvocationAuditStore {
         task_id: &str,
         team_id: &str,
         model: &str,
+        effort: Option<&str>,
         attempts: u32,
         started_at: i64,
     ) -> Result<String, InvocationAuditError> {
         let invocation_id = format!("I-{}", uuid::Uuid::new_v4());
         sqlx::query(
             "INSERT INTO invocation_audit
-               (invocation_id, task_id, team_id, model, attempts, started_at)
-             VALUES (?,?,?,?,?,?)",
+               (invocation_id, task_id, team_id, model, effort, attempts, started_at)
+             VALUES (?,?,?,?,?,?,?)",
         )
         .bind(&invocation_id)
         .bind(task_id)
         .bind(team_id)
         .bind(model)
+        .bind(effort)
         .bind(attempts as i64)
         .bind(started_at)
         .execute(&self.pool)
@@ -311,13 +318,24 @@ mod tests {
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql"))
             .execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/018_invocation_effort.sql"))
+            .execute(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn start_records_the_effort_level_and_null_for_default() {
+        let store = InvocationAuditStore::new(fresh_pool().await);
+        let a = store.record_start("T-1", "research", "opus", Some("low"), 1, 1000).await.unwrap();
+        let b = store.record_start("T-1", "research", "opus", None, 1, 1001).await.unwrap();
+        assert_eq!(store.get(&a).await.unwrap().unwrap().effort.as_deref(), Some("low"));
+        assert_eq!(store.get(&b).await.unwrap().unwrap().effort, None);
     }
 
     #[tokio::test]
     async fn start_then_settle_records_verdict_and_usage() {
         let store = InvocationAuditStore::new(fresh_pool().await);
-        let id = store.record_start("T-1", "research", "claude-opus-4-8", 1, 1000).await.unwrap();
+        let id = store.record_start("T-1", "research", "claude-opus-4-8", None, 1, 1000).await.unwrap();
 
         // in-flight: outcome NULL
         let row = store.get(&id).await.unwrap().unwrap();
@@ -345,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn settle_records_error_class() {
         let store = InvocationAuditStore::new(fresh_pool().await);
-        let id = store.record_start("T-2", "writers", "m", 2, 1).await.unwrap();
+        let id = store.record_start("T-2", "writers", "m", None, 2, 1).await.unwrap();
         let err = RunnerError::RateLimited("429".into());
         store
             .record_settle(&id, &InvocationOutcome::Error(ErrorClass::of(&err)), &AuditUsage::default(), 2)
@@ -359,9 +377,9 @@ mod tests {
     #[tokio::test]
     async fn list_for_task_orders_by_started_at() {
         let store = InvocationAuditStore::new(fresh_pool().await);
-        store.record_start("T-3", "research", "m", 1, 10).await.unwrap();
-        store.record_start("T-3", "research", "m", 2, 20).await.unwrap();
-        store.record_start("T-other", "research", "m", 1, 15).await.unwrap();
+        store.record_start("T-3", "research", "m", None, 1, 10).await.unwrap();
+        store.record_start("T-3", "research", "m", None, 2, 20).await.unwrap();
+        store.record_start("T-other", "research", "m", None, 1, 15).await.unwrap();
         let rows = store.list_for_task("T-3").await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].started_at, 10);
@@ -372,11 +390,11 @@ mod tests {
     async fn list_rows_for_task_is_newest_first_and_encodes_outcome() {
         let store = InvocationAuditStore::new(fresh_pool().await);
         // oldest: a settled approve verdict with usage.
-        let i1 = store.record_start("T-row", "research", "m1", 1, 10).await.unwrap();
+        let i1 = store.record_start("T-row", "research", "m1", None, 1, 10).await.unwrap();
         let usage = AuditUsage { model: "m1".into(), input_tokens: 7, output_tokens: 3, cache_creation: 0, cache_read: 0 };
         store.record_settle(&i1, &InvocationOutcome::Verdict(Verdict::Approve), &usage, 11).await.unwrap();
         // newest: a settled error (the headline reason).
-        let i2 = store.record_start("T-row", "writers", "m2", 2, 20).await.unwrap();
+        let i2 = store.record_start("T-row", "writers", "m2", None, 2, 20).await.unwrap();
         let err = RunnerError::ModelUnavailable("nope".into());
         store.record_settle(&i2, &InvocationOutcome::Error(ErrorClass::of(&err)), &AuditUsage::default(), 21).await.unwrap();
 
@@ -396,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn list_rows_in_flight_row_encodes_empty_outcome() {
         let store = InvocationAuditStore::new(fresh_pool().await);
-        store.record_start("T-if", "research", "m", 1, 10).await.unwrap();
+        store.record_start("T-if", "research", "m", None, 1, 10).await.unwrap();
         let rows = store.list_rows_for_task("T-if").await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].outcome, "", "an unsettled row has no outcome yet");

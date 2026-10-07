@@ -43,6 +43,8 @@ pub use generator_ledger::*;
 pub mod engine;
 pub use engine::*;
 
+pub mod preflight;
+
 pub mod revision;
 
 pub mod api;

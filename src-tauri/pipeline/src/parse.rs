@@ -19,7 +19,7 @@ pub fn parse_pipeline(yaml: &str) -> Result<Pipeline, PipelineParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_bus_core::{EffortMode, RunnerKind};
+    use agent_bus_core::{Effort, RunnerKind};
 
     const MINIMAL: &str = r#"
 id: demo
@@ -33,8 +33,7 @@ teams:
     runner:
       kind: claude-cli
       model: claude-opus-4-7
-      effort:
-        mode: extended-high
+      effort: high
     scope:
       reads: ["${target_repo}", "${project}/artifacts/analyses"]
       writes: ["${project}/artifacts/analyses"]
@@ -66,11 +65,54 @@ escalations:
         assert_eq!(team.id, "research");
         let runner = team.runner.as_ref().unwrap();
         assert_eq!(runner.kind, Some(RunnerKind::ClaudeCli));
-        assert_eq!(runner.effort, Some(EffortMode::ExtendedHigh));
+        assert_eq!(runner.effort, Some(Effort::Level("high".into())));
         assert_eq!(team.outputs.on_approve.as_deref(), Some("gate-1-spec"));
         assert_eq!(team.outputs.on_revise, None);
         assert_eq!(team.workers.max, 3);
         assert_eq!(team.scope.reads.len(), 2);
+    }
+
+    #[test]
+    fn every_legacy_effort_map_loads_as_default() {
+        for legacy in [
+            "effort: { mode: off }",
+            "effort: { mode: standard }",
+            "effort:\n        mode: extended-high",
+            "effort: { mode: custom, budget_tokens: 16000 }",
+        ] {
+            let yaml = format!(
+                "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: t.md\n    scope: {{}}\n    outputs: {{}}\n    runner:\n      kind: claude-cli\n      model: m\n      {legacy}\n"
+            );
+            let p = parse_pipeline(&yaml).unwrap();
+            assert_eq!(p.teams[0].runner.as_ref().unwrap().effort, Some(Effort::Default), "{legacy}");
+        }
+    }
+
+    #[test]
+    fn a_blank_effort_loads_as_default() {
+        let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: t.md\n    scope: {}\n    outputs: {}\n    runner:\n      kind: claude-cli\n      model: m\n      effort:\n";
+        let p = parse_pipeline(yaml).unwrap();
+        assert_eq!(p.teams[0].runner.as_ref().unwrap().effort, None);
+        let draft: crate::draft::DraftTeam = serde_json::from_str(
+            r#"{"id":"t","name":"T","prompt_body":"","runner":{"kind":"claude-cli","model":"m","effort":null},"scope":{"reads":[],"writes":[],"tools":[]},"outputs":{},"workers":{"min":1,"max":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(draft.runner.effort, Effort::Default);
+    }
+
+    #[test]
+    fn a_numeric_effort_is_a_parse_error() {
+        let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: t.md\n    scope: {}\n    outputs: {}\n    runner: { kind: claude-cli, model: m, effort: 8192 }\n";
+        assert!(parse_pipeline(yaml).is_err());
+    }
+
+    #[test]
+    fn a_legacy_file_resaves_without_an_effort_key() {
+        let yaml = "id: x\nname: X\nteams:\n  - id: t\n    name: T\n    prompt: t.md\n    scope: {}\n    outputs: {}\n    runner: { kind: claude-cli, model: m, effort: { mode: standard } }\n";
+        let p = parse_pipeline(yaml).unwrap();
+        let out = serde_yaml::to_string(&p).unwrap();
+        assert!(!out.contains("effort"), "{out}");
+        assert!(!out.contains("mode:"), "{out}");
     }
 
     #[test]

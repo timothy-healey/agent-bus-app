@@ -2,17 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type RunnerKind = "claude-cli" | "anthropic-api";
 
-export type EffortMode =
-  | { mode: "off" }
-  | { mode: "standard" }
-  | { mode: "extended-low" }
-  | { mode: "extended-high" }
-  | { mode: "custom"; budget_tokens: number };
+/** A CLI effort level (e.g. "high"), passed as `--effort`. An absent effort is
+ *  Default: no flag, the model's own default applies. */
+export type Effort = string;
 
 export interface RunnerConfig {
   kind: RunnerKind;
   model: string;
-  effort: EffortMode;
+  effort?: Effort;
   api_key_env?: string | null;
 }
 
@@ -21,7 +18,7 @@ export interface RunnerConfig {
 export interface TeamRunnerConfig {
   kind?: RunnerKind | null;
   model?: string | null;
-  effort?: EffortMode | null;
+  effort?: Effort;
   api_key_env?: string | null;
 }
 
@@ -29,7 +26,7 @@ export interface TeamRunnerConfig {
 export interface PipelineDefaults {
   default_runner?: RunnerKind | null;
   default_model?: string | null;
-  default_effort?: EffortMode | null;
+  default_effort?: Effort;
 }
 
 export interface Scope {

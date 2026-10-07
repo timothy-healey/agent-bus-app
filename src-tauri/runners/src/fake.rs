@@ -107,7 +107,7 @@ mod tests {
             task_id: "T".into(),
             team_id: "t".into(),
             model: "m".into(),
-            thinking_budget: 0,
+            effort: agent_bus_core::Effort::Default,
             system_prompt: String::new(),
             user_message: String::new(),
             settings_path: String::new(),
