@@ -326,7 +326,27 @@ describe("NodeDrawer — scope grants and plugins", () => {
     const onChange = vi.fn();
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText("bash patterns for research"), { target: { value: "git diff:*, git log:*" } });
+    fireEvent.blur(screen.getByLabelText("bash patterns for research"));
     expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.grants).toEqual(["bash(git diff:*)", "bash(git log:*)"]);
+  });
+
+  it("the bash patterns field keeps what is typed until it loses focus", () => {
+    let latest: DraftPipeline | null = null;
+    function Spy() {
+      const [draft, setDraft] = useState<DraftPipeline>(teamDraft);
+      latest = draft;
+      return <NodeDrawer draft={draft} selectedId="research" onChange={setDraft} onClose={() => {}} />;
+    }
+    render(<Spy />);
+    const input = screen.getByLabelText("bash patterns for research") as HTMLInputElement;
+    for (const v of ["git ", "git diff:*,", "git diff:*, git "]) {
+      fireEvent.change(input, { target: { value: v } });
+      expect(input.value).toBe(v);
+    }
+    fireEvent.change(input, { target: { value: "git diff:*, git log:*" } });
+    fireEvent.blur(input);
+    expect(latest!.teams[0].scope.grants).toEqual(["bash(git diff:*)", "bash(git log:*)"]);
+    expect(input.value).toBe("git diff:*, git log:*");
   });
 
   it("lists the installed plugins and toggles one onto the team", async () => {

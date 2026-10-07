@@ -50,6 +50,7 @@ fn request(root: &Path, repo: &Path, user_message: &str) -> InvocationRequest {
         writes: vec![repo.to_string_lossy().into_owned(), artifacts.to_string_lossy().into_owned()],
         grants: vec![ToolGrant::Bash, ToolGrant::Agent, ToolGrant::RemoteGit],
         repo_visibility: Some("private".into()),
+        deny_paths: vec![],
     };
     let ss = prepare(root, "implementers", "T-live", 1, &scope).unwrap();
     InvocationRequest {
@@ -85,7 +86,7 @@ async fn an_implementer_with_remote_git_pushes_its_branch() {
     let req = request(
         &root,
         &repo,
-        "Push the current branch feature-x to origin with: git push origin feature-x . Then report with no artifact.",
+        "Create a file notes.md in the repository containing the word hello, commit it, then push the current branch feature-x to origin with: git push origin feature-x . Then report with no artifact.",
     );
     let out = ClaudeCliRunner::new().invoke(&req).await;
     println!("{out:?}");
@@ -93,6 +94,36 @@ async fn an_implementer_with_remote_git_pushes_its_branch() {
     assert!(branches.contains("feature-x"), "origin branches: {branches}");
     let out = out.expect("the run settles");
     assert!(out.permission_denials.is_empty(), "{:?}", out.permission_denials);
+    let log = git(&origin, &["log", "--oneline", "feature-x"]);
+    assert_eq!(log.lines().count(), 3, "the new commit was pushed: {log}");
+}
+
+#[tokio::test]
+#[ignore = "runs the real claude CLI (paid); needs AGENT_BUS_LIVE_DIR"]
+async fn an_edit_outside_the_write_paths_is_refused() {
+    let Some(base) = live_dir() else { return };
+    let root = base.join("outside");
+    let (repo, _origin) = scratch_repo(&root);
+    let outside = base.join("outside-target");
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("x.txt");
+    let req = request(
+        &root,
+        &repo,
+        &format!(
+            "Use the Write tool once to create {} containing the word hi. If it is refused, do not retry or work around it; report with no artifact.",
+            target.display()
+        ),
+    );
+    let res = ClaudeCliRunner::new().invoke(&req).await;
+    println!("{res:?}");
+    assert!(!target.exists(), "the file outside the write paths was not written");
+    let denials = match &res {
+        Ok(o) => o.permission_denials.clone(),
+        Err(e) => e.denials().to_vec(),
+    };
+    assert!(denials.iter().any(|d| d.tool_name == "Write"), "{denials:?}");
 }
 
 #[tokio::test]

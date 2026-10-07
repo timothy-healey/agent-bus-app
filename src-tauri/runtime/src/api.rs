@@ -189,7 +189,8 @@ impl RuntimeState {
             target_repo: target_repo.as_deref(),
             plugin_exists: self.plugin_resolver.as_ref().map(|_| &exists as &dyn Fn(&str) -> bool),
         };
-        crate::preflight::check_pipeline(&active.pipeline, &list, &env).map_err(|f| f.describe(&active.pipeline))
+        crate::preflight::check_pipeline(&active.pipeline, &list, &env)
+            .map_err(|f| f.describe_with(&active.pipeline, target_repo.is_some()))
     }
 
     pub fn active(&self) -> Arc<ActivePipeline> {

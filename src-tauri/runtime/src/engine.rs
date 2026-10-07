@@ -1462,7 +1462,39 @@ pub fn effective_scope(
             push_unique(&mut reads, cwd.to_string());
         }
     }
-    Ok(runners::scope::WorkerScope { reads, writes, grants: team.scope.grants.clone(), repo_visibility })
+    Ok(runners::scope::WorkerScope {
+        reads,
+        writes,
+        grants: team.scope.grants.clone(),
+        repo_visibility,
+        deny_paths: vec![],
+    })
+}
+
+/// The worker scope for one invocation of `team` on `task`, run in
+/// `working_dir` (and `worktree` when it is one). `${target_repo}` binds to the
+/// worktree when there is one, and the main repo is then denied for editing.
+pub fn worker_scope_for(
+    ctx: &EngineContext,
+    team: &Team,
+    task: &Task,
+    working_dir: Option<&str>,
+    worktree: Option<&str>,
+) -> Result<runners::scope::WorkerScope, String> {
+    let effective_repo = effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref());
+    let mut vars = PathVars::new(&ctx.project_root).with_task_id(&task.id.0);
+    if let Some(repo) = worktree.map(PathBuf::from).or_else(|| effective_repo.clone()) {
+        vars = vars.with_target_repo(repo);
+    }
+    let artifact_dir = ctx.artifact_dir(&team.id);
+    let mut ws = effective_scope(team, &vars, working_dir, &ctx.artifact_base, &artifact_dir, ctx.repo_visibility.clone())?;
+    if let (Some(wt), Some(main)) = (worktree, effective_repo) {
+        let main = main.to_string_lossy().into_owned();
+        if main != wt {
+            ws.deny_paths.push(main);
+        }
+    }
+    Ok(ws)
 }
 
 /// One task-log line for a denial: the tool, what refused it, and its input
@@ -1541,25 +1573,15 @@ async fn invoke(
     } else {
         (effective_repo.as_ref().map(|p| p.to_string_lossy().into_owned()), None)
     };
-    // `${target_repo}` binds to the task's worktree when it runs in one (so an
-    // implementer never reaches the main repo), else to the effective repo.
-    let mut vars = PathVars::new(&ctx.project_root).with_task_id(&task.id.0);
-    if let Some(repo) = worktree.map(PathBuf::from).or_else(|| effective_repo.clone()) {
-        vars = vars.with_target_repo(repo);
-    }
     // The stage's absolute artifact dir is outside the worker's cwd, so it is a
     // write path (and an --add-dir). Create it so the agent can write there.
+    // With no repo to work in, the worker runs there too, never in the app's
+    // own cwd.
     let artifact_dir = ctx.artifact_dir(&team.id);
     let _ = std::fs::create_dir_all(&artifact_dir);
-    let worker_scope = effective_scope(
-        team,
-        &vars,
-        working_dir.as_deref(),
-        &ctx.artifact_base,
-        &artifact_dir,
-        ctx.repo_visibility.clone(),
-    )
-    .map_err(EngineError::Invoke)?;
+    let working_dir = working_dir.or_else(|| Some(artifact_dir.clone()));
+    let worker_scope = worker_scope_for(ctx, team, task, working_dir.as_deref(), worktree.as_deref())
+        .map_err(EngineError::Invoke)?;
     let plugin_dirs: Vec<String> = match &ctx.plugin_resolver {
         Some(resolver) => team
             .scope
@@ -3560,6 +3582,31 @@ mod tests {
         let req = &recorder.received.lock().unwrap()[0];
         assert!(req.add_dirs.contains(&"/proj/worktrees/R-1/alpha".to_string()), "{:?}", req.add_dirs);
         assert!(!req.add_dirs.contains(&"/repo".to_string()), "the main repo is out of reach: {:?}", req.add_dirs);
+    }
+
+    #[tokio::test]
+    async fn the_main_repo_is_denied_to_a_team_on_a_worktree() {
+        let mut t = team("implementers", None, Role::Implementer, 8);
+        t.scope.writes = vec!["${target_repo}".into()];
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![t.clone()]), recorder.clone()).await;
+        ctx.target_repo = Some(PathBuf::from("/repo"));
+        let item = seed_item(&ctx, "implementers", "alpha").await;
+        ctx.tasks.set_worktree_path(&item.id.0, "/proj/worktrees/R-1/alpha").await.unwrap();
+        let task = ctx.tasks.get(&item.id).await.unwrap();
+        let ws = super::worker_scope_for(&ctx, &t, &task, Some("/proj/worktrees/R-1/alpha"), Some("/proj/worktrees/R-1/alpha")).unwrap();
+        assert_eq!(ws.deny_paths, vec!["/repo".to_string()]);
+        assert!(ws.writes.contains(&"/proj/worktrees/R-1/alpha".to_string()));
+    }
+
+    #[tokio::test]
+    async fn without_a_target_repo_the_worker_runs_in_its_artifact_folder() {
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
+        let ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
+        seed_item(&ctx, "research", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let req = &recorder.received.lock().unwrap()[0];
+        assert_eq!(req.working_dir.as_deref(), Some(ctx.artifact_dir("research").as_str()));
     }
 
     #[tokio::test]

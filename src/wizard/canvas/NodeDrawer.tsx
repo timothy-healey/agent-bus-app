@@ -268,6 +268,9 @@ function ScopeGrants({ draft, team, onChange }: { draft: DraftPipeline; team: Dr
   const grants = team.scope.grants;
   const model = findModel(list, team.runner.model);
   const remoteWithoutAuto = grants.includes("remote-git") && model != null && !model.supports_auto_mode;
+  // The patterns are edited as free text and parsed when the field loses
+  // focus, so spaces and commas can be typed.
+  const [patternText, setPatternText] = useState(() => bashPatterns(team.scope).join(", "));
   return (
     <>
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: "var(--sp-1)" }}>
@@ -292,9 +295,15 @@ function ScopeGrants({ draft, team, onChange }: { draft: DraftPipeline; team: Dr
       <Field label={<LabelTip text={HELP.bashPatterns}>Bash patterns (comma-separated)</LabelTip>}>
         <input
           aria-label={`bash patterns for ${id}`}
-          value={bashPatterns(team.scope).join(", ")}
+          value={patternText}
           placeholder="e.g. git diff:*, npm test"
-          onChange={(e) => onChange(setTeamBashPatterns(draft, id, e.target.value))}
+          onChange={(e) => setPatternText(e.target.value)}
+          onBlur={() => {
+            const next = setTeamBashPatterns(draft, id, patternText);
+            onChange(next);
+            const t = next.teams.find((x) => x.id === id);
+            if (t) setPatternText(bashPatterns(t.scope).join(", "));
+          }}
           style={inp}
         />
       </Field>

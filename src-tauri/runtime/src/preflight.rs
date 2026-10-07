@@ -37,6 +37,12 @@ pub struct PreflightFailed {
 impl PreflightFailed {
     /// One message naming each offending team (by name, else id) and why.
     pub fn describe(&self, pipeline: &Pipeline) -> String {
+        self.describe_with(pipeline, true)
+    }
+
+    /// As `describe`; without a target repo, an unresolvable path that needs
+    /// one says so.
+    pub fn describe_with(&self, pipeline: &Pipeline, has_target_repo: bool) -> String {
         let parts: Vec<String> = self
             .problems
             .iter()
@@ -56,7 +62,13 @@ impl PreflightFailed {
                         format!("{name}: plugin '{plugin}' is not installed")
                     }
                     RunnerConfigProblem::PathUnresolvable { pattern } => {
-                        format!("{name}: scope path '{pattern}' cannot be resolved")
+                        let needs_repo = pattern.contains("${target_repo}")
+                            || !(pattern.starts_with('/') || pattern.starts_with("${"));
+                        if !has_target_repo && needs_repo {
+                            format!("{name}: scope path '{pattern}' needs a target repo; set one in Settings")
+                        } else {
+                            format!("{name}: scope path '{pattern}' cannot be resolved")
+                        }
                     }
                     RunnerConfigProblem::RemoteGitWithoutAutoMode => {
                         format!("{name}: Remote git needs a model with auto mode, and {model} has none")
@@ -166,10 +178,13 @@ mod tests {
         let err = check_pipeline(&p, &curated(), &env()).unwrap_err();
         assert_eq!(err.problems, vec![(TeamId("r".into()), RunnerConfigProblem::PathUnresolvable { pattern: "${nope}/x".into() })]);
         assert!(err.describe(&p).contains("Research: scope path '${nope}/x' cannot be resolved"));
-        // Without one, `${target_repo}` and the relative path fail too.
+        // Without one, `${target_repo}` and the relative path fail too, and the
+        // message says what to do.
         let bare = PreflightEnv::bare(Path::new("/p"));
         let err = check_pipeline(&p, &curated(), &bare).unwrap_err();
         assert_eq!(err.problems.len(), 3);
+        let msg = err.describe_with(&p, false);
+        assert!(msg.contains("Research: scope path '${target_repo}' needs a target repo; set one in Settings"), "{msg}");
     }
 
     #[test]

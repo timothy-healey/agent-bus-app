@@ -74,6 +74,9 @@ pub struct WorkerScope {
     pub grants: Vec<ToolGrant>,
     /// `public`, `private` or `internal`; `None` when the lookup failed.
     pub repo_visibility: Option<String>,
+    /// Paths denied for editing without being added (the main repo of a task
+    /// that runs in a worktree).
+    pub deny_paths: Vec<String>,
 }
 
 /// The `--settings` file (the subset the worker needs).
@@ -95,6 +98,10 @@ pub struct Permissions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AutoMode {
     pub environment: Vec<String>,
+    /// Prose limits the classifier never lets intent override. Covers what a
+    /// deny rule cannot: edits outside the write paths, and shell commands
+    /// outside a team's Bash patterns.
+    pub hard_deny: Vec<String>,
 }
 
 /// What preparing a scope gives the invocation: the settings file, the
@@ -231,7 +238,7 @@ pub fn build_settings(scope: &WorkerScope, list_dir: ListDir) -> SettingsFile {
         deny.extend(REMOTE_GIT_DENY.iter().map(|s| s.to_string()));
     }
     let writes: Vec<PathBuf> = scope.writes.iter().map(PathBuf::from).collect();
-    let mut reads: Vec<PathBuf> = scope.reads.iter().map(PathBuf::from).collect();
+    let mut reads: Vec<PathBuf> = scope.reads.iter().chain(scope.deny_paths.iter()).map(PathBuf::from).collect();
     reads.sort();
     reads.dedup();
     let mut denied: Vec<(PathBuf, bool)> = Vec::new();
@@ -252,7 +259,32 @@ pub fn build_settings(scope: &WorkerScope, list_dir: ListDir) -> SettingsFile {
         environment.push(format!("Repository visibility: {v}"));
     }
 
-    SettingsFile { permissions: Permissions { allow, deny }, auto_mode: AutoMode { environment } }
+    // In auto mode an edit outside the working directories goes to the
+    // classifier rather than being refused, so the write paths are stated as
+    // a hard limit.
+    let mut hard_deny = vec!["$defaults".to_string()];
+    if !scope.writes.is_empty() {
+        hard_deny.push(format!(
+            "Writing outside the work area: never create, edit, move or delete files outside these directories, by any tool or shell command: {}. Git's own bookkeeping for the work (commits, branches, pushes the task allows) is not a file edit.",
+            scope.writes.join(", ")
+        ));
+    }
+    let patterns: Vec<&str> = scope
+        .grants
+        .iter()
+        .filter_map(|g| match g {
+            ToolGrant::BashPattern(p) => Some(p.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !patterns.is_empty() && !scope.grants.contains(&ToolGrant::Bash) {
+        hard_deny.push(format!(
+            "Unlisted shell commands: never run a shell command unless it matches one of these patterns: {}",
+            patterns.join(", ")
+        ));
+    }
+
+    SettingsFile { permissions: Permissions { allow, deny }, auto_mode: AutoMode { environment, hard_deny } }
 }
 
 /// The directory per-invocation settings files live in: <project>/.agent-bus/runtime/.
@@ -297,8 +329,36 @@ mod tests {
             reads: reads.iter().map(|s| s.to_string()).collect(),
             writes: writes.iter().map(|s| s.to_string()).collect(),
             grants,
-            repo_visibility: None,
+            ..WorkerScope::default()
         }
+    }
+
+    #[test]
+    fn a_deny_path_is_denied_for_editing_but_not_added() {
+        let mut s = scope(&[], &["/wt/alpha"], vec![]);
+        s.deny_paths = vec!["/repo".into()];
+        let d = deny_of(&s, &no_fs);
+        assert!(d.contains(&"Edit(//repo/**)".to_string()), "{d:?}");
+        assert!(d.contains(&"Write(//repo/**)".to_string()), "{d:?}");
+        assert_eq!(add_dirs(&s), vec!["/wt/alpha".to_string()]);
+    }
+
+    #[test]
+    fn auto_mode_hard_denies_edits_outside_the_write_paths() {
+        let s = scope(&["/repo"], &["/art/me", "/wt"], vec![]);
+        let hd = build_settings(&s, &no_fs).auto_mode.hard_deny;
+        assert_eq!(hd[0], "$defaults");
+        assert!(hd.iter().any(|r| r.contains("/art/me") && r.contains("/wt") && r.contains("outside")), "{hd:?}");
+    }
+
+    #[test]
+    fn bash_patterns_alone_hard_deny_every_other_shell_command() {
+        let s = scope(&[], &["/w"], vec![BashPattern("git diff:*".into()), BashPattern("git log:*".into())]);
+        let hd = build_settings(&s, &no_fs).auto_mode.hard_deny;
+        assert!(hd.iter().any(|r| r.contains("git diff:*") && r.contains("git log:*") && r.contains("shell")), "{hd:?}");
+        let full = scope(&[], &["/w"], vec![Bash, BashPattern("git diff:*".into())]);
+        let hd = build_settings(&full, &no_fs).auto_mode.hard_deny;
+        assert!(!hd.iter().any(|r| r.contains("git diff:*")), "{hd:?}");
     }
 
     fn deny_of(s: &WorkerScope, list: ListDir) -> Vec<String> {
