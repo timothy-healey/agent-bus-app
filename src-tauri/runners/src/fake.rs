@@ -84,6 +84,9 @@ fn clone_err(e: &RunnerError) -> RunnerError {
         RunnerError::ModelUnavailable(s) => RunnerError::ModelUnavailable(s.clone()),
         RunnerError::Spawn(s) => RunnerError::Spawn(s.clone()),
         RunnerError::NoResult => RunnerError::NoResult,
+        RunnerError::NoStructuredOutput { detail } => {
+            RunnerError::NoStructuredOutput { detail: detail.clone() }
+        }
         RunnerError::Other(s) => RunnerError::Other(s.clone()),
     }
 }
@@ -91,14 +94,20 @@ fn clone_err(e: &RunnerError) -> RunnerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_bus_core::Verdict;
+    use agent_bus_core::{OutputKind, ReviewerOutput, Verdict, WorkerResult};
 
     fn output(v: Verdict) -> RunnerOutput {
         RunnerOutput {
-            verdict: v,
-            artifact_path: Some("a.md".into()),
+            result: WorkerResult::Reviewer(ReviewerOutput { verdict: v, reason: "r".into(), artifact: Some("a.md".into()) }),
             final_text: "x".into(),
             usage: Default::default(),
+        }
+    }
+
+    fn verdict(o: RunnerOutput) -> Verdict {
+        match o.result {
+            WorkerResult::Reviewer(r) => r.verdict,
+            other => panic!("expected a reviewer result, got {other:?}"),
         }
     }
 
@@ -114,16 +123,17 @@ mod tests {
             add_dirs: vec![],
             sandbox_profile: None,
             working_dir: None,
+            output_kind: OutputKind::Reviewer,
         }
     }
 
     #[tokio::test]
     async fn returns_seeded_responses_in_order_then_repeats_last() {
         let fake = FakeRunner::new(vec![Ok(output(Verdict::Approve)), Ok(output(Verdict::Revise))]);
-        assert_eq!(fake.invoke(&req()).await.unwrap().verdict, Verdict::Approve);
-        assert_eq!(fake.invoke(&req()).await.unwrap().verdict, Verdict::Revise);
+        assert_eq!(verdict(fake.invoke(&req()).await.unwrap()), Verdict::Approve);
+        assert_eq!(verdict(fake.invoke(&req()).await.unwrap()), Verdict::Revise);
         // exhausted -> last repeats
-        assert_eq!(fake.invoke(&req()).await.unwrap().verdict, Verdict::Revise);
+        assert_eq!(verdict(fake.invoke(&req()).await.unwrap()), Verdict::Revise);
         assert_eq!(fake.received.lock().unwrap().len(), 3);
     }
 
@@ -139,7 +149,7 @@ mod tests {
         let s = seen.clone();
         let sink: LogSink = Box::new(move |d: &LogDelta| s.lock().unwrap().push(d.text.clone()));
         let out = fake.invoke_stream(&req(), &sink).await.unwrap();
-        assert_eq!(out.verdict, Verdict::Approve);
+        assert_eq!(verdict(out), Verdict::Approve);
         assert_eq!(*seen.lock().unwrap(), vec!["Analy".to_string(), "sing.".to_string()]);
     }
 

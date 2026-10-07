@@ -1,11 +1,11 @@
 //! stream-json parsing — the inbound half of the ACL. Turns Claude's
-//! line-delimited JSON into our RunnerOutput. The verdict + artifact are parsed
-//! from the model's text using a simple, lenient convention (VERDICT: / ARTIFACT:)
-//! — the AI-Engineer-vs-Engineer tension (DOMAIN.md) is resolved by keeping the
-//! parser lenient and defaulting to a safe verdict, never panicking on shape.
+//! line-delimited JSON into our RunnerOutput. A worker's result is the
+//! `structured_output` object on the final `result` event, which the CLI has
+//! already validated against the `--json-schema` it was given. Assistant prose
+//! is kept for the live log and never parsed for a result.
 
 use crate::output::{RunnerError, RunnerOutput, RunnerUsage};
-use agent_bus_core::Verdict;
+use agent_bus_core::OutputKind;
 use serde_json::Value;
 
 /// Accumulator fed one parsed JSON line at a time.
@@ -14,6 +14,8 @@ pub struct StreamAccumulator {
     text: String,
     usage: RunnerUsage,
     saw_result: bool,
+    /// The `result` event's `structured_output`, when it carried one.
+    structured: Option<Value>,
 }
 
 impl StreamAccumulator {
@@ -23,7 +25,7 @@ impl StreamAccumulator {
 
     /// Feed one stream-json line (already a parsed Value). Returns the tagged
     /// `LogDelta`s this event produced (empty for non-prose events) so a streaming
-    /// caller can forward them; the accumulator keeps the running full text for the
+    /// caller can forward them; the accumulator keeps the running prose for the
     /// final RunnerOutput (Output blocks only — thinking is display-only and never
     /// accumulated). Returns Err only on a recognised rate-limit error event.
     /// (Mirrors `llm_chat::stream_json`'s `feed`, by design — separate ACL; vet F3.)
@@ -66,8 +68,8 @@ impl StreamAccumulator {
                             }
                             Some("thinking") => {
                                 if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
-                                    // Thinking is forwarded for display ONLY — never
-                                    // pushed into self.text (verdict/item parsing).
+                                    // Thinking is forwarded for display only, never
+                                    // kept in self.text.
                                     deltas.push(crate::output::LogDelta {
                                         kind: crate::output::LogKind::Thinking,
                                         text: t.to_string(),
@@ -94,6 +96,8 @@ impl StreamAccumulator {
                 if let Some(c) = v.get("total_cost_usd").and_then(|c| c.as_f64()) {
                     self.usage.cost_micros = Some((c * 1_000_000.0).round() as u64);
                 }
+                // An absent key and an explicit null both mean "no structured output".
+                self.structured = v.get("structured_output").filter(|s| !s.is_null()).cloned();
                 if self.text.is_empty() {
                     if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
                         self.text = r.to_string();
@@ -118,221 +122,78 @@ impl StreamAccumulator {
         self.usage.cache_read += g("cache_read_input_tokens");
     }
 
-    /// Finish: produce a RunnerOutput. Errors if nothing was accumulated.
-    pub fn finish(self, model: &str) -> Result<RunnerOutput, RunnerError> {
+    /// Finish: produce a RunnerOutput whose result is the `structured_output`
+    /// read as `kind`. An empty stream is `NoResult`; a run that ended without a
+    /// structured output, or with one of the wrong shape, is `NoStructuredOutput`.
+    pub fn finish(self, model: &str, kind: OutputKind) -> Result<RunnerOutput, RunnerError> {
         if !self.saw_result && self.text.is_empty() {
             return Err(RunnerError::NoResult);
         }
-        let verdict = parse_verdict(&self.text);
-        let artifact_path = parse_artifact(&self.text);
+        let Some(structured) = &self.structured else {
+            return Err(RunnerError::NoStructuredOutput {
+                detail: "the run ended without a structured_output".into(),
+            });
+        };
+        let result = kind
+            .parse(structured)
+            .map_err(|e| RunnerError::NoStructuredOutput { detail: format!("{kind:?} shape: {e}") })?;
         let mut usage = self.usage;
         if usage.model.is_empty() {
             usage.model = model.to_string();
         }
-        Ok(RunnerOutput { verdict, artifact_path, final_text: self.text, usage })
+        Ok(RunnerOutput { result, final_text: self.text, usage })
     }
 }
 
-/// Parse a verdict from assistant text. Convention: a line `VERDICT: <word>`.
-/// Lenient: defaults to Revise (the safe "send back for another look") when no
-/// verdict is found, so a malformed model response never auto-approves.
-pub fn parse_verdict(text: &str) -> Verdict {
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("VERDICT:") {
-            return match rest.trim().to_lowercase().as_str() {
-                "approve" => Verdict::Approve,
-                "reject" => Verdict::Reject,
-                _ => Verdict::Revise,
-            };
-        }
-    }
-    Verdict::Revise
-}
-
-/// Parse an artifact path from assistant text. Convention: `ARTIFACT: <path>`.
-pub fn parse_artifact(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("ARTIFACT:") {
-            let p = rest.trim();
-            if !p.is_empty() {
-                return Some(p.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// One item in the list-of-items output contract (Runtime redesign ④b / L1).
-///
-/// The new bounded-buffer engine asks an agent to emit a *list* of items rather
-/// than the legacy single `VERDICT:`/`ARTIFACT:` pair: a generator emits one item
-/// per NEW candidate key, a transformer emits one item per output it produced, and
-/// a reviewer adds a `VERDICT:` per item. This is the dual to `parse_verdict`/
-/// `parse_artifact` and lives beside them in the Runners ACL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutputItem {
-    /// The work-item's stable candidate key (lineage + dedup identity). Empty
-    /// (`""`) for a legacy single-item response with no `KEY:` line.
-    pub key: String,
-    /// Path of the artifact the agent wrote, if any.
-    pub artifact_path: Option<String>,
-    /// The reviewer verdict for this item, if the agent emitted one. `None` for
-    /// producer/generator items (which imply forward).
-    pub verdict: Option<Verdict>,
-    /// A short (<=~80 char) plain-language summary the agent wrote alongside the
-    /// item (the `DESCRIPTION:` line). `None` when absent (legacy/transform items).
-    pub description: Option<String>,
-}
-
-/// Parse the agent's emitted item list (Runtime redesign ④b / L1 output contract).
-///
-/// CONVENTION (the dual to `output_contract`): each item is a block of marked
-/// lines — `KEY: <key>`, `ARTIFACT: <path>`, `VERDICT: <word>` — and a new
-/// `KEY:` line starts a new item. The parse is lenient and NEVER panics:
-///   * Lines are matched by prefix after trimming; unknown lines are ignored.
-///   * A `VERDICT:`/`ARTIFACT:` seen before any `KEY:` opens an implicit
-///     `key=""` item (the legacy single-item shape — one item, no key).
-///   * A blank `VERDICT:` value parses as `Verdict::Revise` (the same safe
-///     default `parse_verdict` uses), so a malformed verdict never auto-approves.
-///   * Malformed / empty input → an empty Vec (best-effort, the caller decides).
-pub fn parse_items(text: &str) -> Vec<OutputItem> {
-    let mut items: Vec<OutputItem> = Vec::new();
-    // The item currently being built (None until the first KEY/ARTIFACT/VERDICT).
-    let mut current: Option<OutputItem> = None;
-
-    fn verdict_of(rest: &str) -> Verdict {
-        match rest.trim().to_lowercase().as_str() {
-            "approve" => Verdict::Approve,
-            "reject" => Verdict::Reject,
-            _ => Verdict::Revise,
-        }
-    }
-
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("KEY:") {
-            // A new KEY always starts a fresh item; flush the previous one.
-            if let Some(item) = current.take() {
-                items.push(item);
-            }
-            current = Some(OutputItem {
-                key: rest.trim().to_string(),
-                artifact_path: None,
-                verdict: None,
-                description: None,
-            });
-        } else if let Some(rest) = line.strip_prefix("DESCRIPTION:") {
-            let d = rest.trim();
-            let item = current.get_or_insert_with(|| OutputItem {
-                key: String::new(),
-                artifact_path: None,
-                verdict: None,
-                description: None,
-            });
-            if !d.is_empty() {
-                item.description = Some(d.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("ARTIFACT:") {
-            let p = rest.trim();
-            let item = current.get_or_insert_with(|| OutputItem {
-                key: String::new(),
-                artifact_path: None,
-                verdict: None,
-                description: None,
-            });
-            if !p.is_empty() {
-                item.artifact_path = Some(p.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("VERDICT:") {
-            let item = current.get_or_insert_with(|| OutputItem {
-                key: String::new(),
-                artifact_path: None,
-                verdict: None,
-                description: None,
-            });
-            item.verdict = Some(verdict_of(rest));
-        }
-    }
-    if let Some(item) = current.take() {
-        items.push(item);
-    }
-    items
-}
-
-/// The output-contract system-prompt preamble (Runtime redesign ④b / the L1 fix).
-///
-/// This is the text that finally TELLS the agent to emit the item list — the live
-/// gap L1 named (the convention lived only in the parser + tests; nothing
-/// instructed the agent). The engine composes the returned block into the system
-/// prompt, where `role`, the `artifact_dir`, and the `already_found` key set are
-/// known. Pure (no I/O); it never panics.
-///
-/// * `role` — `"generator"` (emit only NEW keys not in `already_found`),
-///   `"reviewer"` (add a `VERDICT:` per item), or any producer role (emit items
-///   with keys + artifacts, implicit forward).
-/// * `artifact_dir` — the directory the agent must write artifacts under (the
-///   worker grants write access to it, fixing the L1 write-access gap).
-/// * `already_found` — keys the generator has already produced this run; only
-///   meaningful for the generator role.
-pub fn output_contract(role: &str, artifact_dir: &str, already_found: &[String]) -> String {
-    let role_lc = role.to_lowercase();
-    let mut s = String::new();
-    s.push_str("## Output contract\n\n");
-    s.push_str(
-        "When you finish, emit a list of work-items. Write each item as a block of \
-         marked lines:\n\n",
-    );
-    s.push_str("  KEY: <a stable, unique candidate key for this item>\n");
-    s.push_str("  DESCRIPTION: <a short (<=80 char) plain-language summary of this item>\n");
+/// The output-contract block the engine appends to a worker's system prompt.
+/// It carries the guidance the schema cannot: where to write files, which keys
+/// a generator has already found, and how long a description may be. The shape
+/// of the result itself is the `--json-schema` the runner passes. Pure.
+pub fn output_contract(kind: OutputKind, artifact_dir: &str, already_found: &[String]) -> String {
+    let mut s = String::from("## Output contract\n\n");
     s.push_str(&format!(
-        "  ARTIFACT: {artifact_dir}/<key>... (the file you wrote for this item)\n"
+        "Write any file you produce under `{artifact_dir}`. You have write access there.\n"
     ));
-    if role_lc == "reviewer" {
-        s.push_str("  VERDICT: approve | revise | reject\n");
-    }
-    s.push('\n');
-    s.push_str(&format!(
-        "Write every artifact file under `{artifact_dir}` — you have write access \
-         there. Use the exact KEY as part of the path so items stay traceable.\n",
-    ));
-
-    match role_lc.as_str() {
-        "generator" => {
+    match kind {
+        OutputKind::Generator => {
             s.push_str(
-                "\nYou are the GENERATOR (source) stage. Scan the work and emit ONE item \
-                 per NEW candidate you find — assign each a stable KEY. Do NOT re-emit any \
-                 key that already exists. Emit nothing when you find no new candidates.\n",
+                "\nYou are the GENERATOR (source) stage. Scan the work and return one item per \
+                 NEW candidate you find, each with a stable, unique key and a description of 80 \
+                 characters or fewer. Use the key in any file name so items stay traceable. Do \
+                 NOT return a key that was already found. Return an empty list when you find \
+                 nothing new.\n",
             );
             if already_found.is_empty() {
-                s.push_str("Already-found keys: (none yet — this is the first pass).\n");
+                s.push_str("Already-found keys: none yet (this is the first pass).\n");
             } else {
-                s.push_str("Already-found keys (do NOT re-emit these):\n");
+                s.push_str("Already-found keys (do NOT return these):\n");
                 for k in already_found {
                     s.push_str(&format!("  - {k}\n"));
                 }
             }
         }
-        "reviewer" => {
+        OutputKind::Reviewer => {
             s.push_str(
-                "\nYou are a REVIEWER. For every item you assess, emit a VERDICT \
-                 (approve / revise / reject) alongside its KEY.\n",
+                "\nYou are a REVIEWER. Assess your input and give a verdict: approve (it moves \
+                 on), revise (it goes back to its producer) or reject (it goes to a human). \
+                 Always give a reason; on revise the producer acts on it. If you write a \
+                 critique file, return its path as the artifact.\n",
             );
         }
-        _ => {
+        OutputKind::Producer => {
             s.push_str(
-                "\nYou are a PRODUCER. Transform your input into one output item, emit its \
-                 KEY and ARTIFACT; it is forwarded downstream implicitly (no verdict needed).\n",
+                "\nYou are a PRODUCER. Transform your input into one output file, return its \
+                 path as the artifact, and a description of 80 characters or fewer.\n",
             );
         }
     }
+    s.push_str("\nReport your result by calling the StructuredOutput tool.\n");
     s
 }
 
 /// Parse a full stream from raw text (newline-delimited JSON), feeding each
 /// non-blank line. Convenience used by ClaudeCliRunner + tests.
-pub fn parse_stream(raw: &str, model: &str) -> Result<RunnerOutput, RunnerError> {
+pub fn parse_stream(raw: &str, model: &str, kind: OutputKind) -> Result<RunnerOutput, RunnerError> {
     let mut acc = StreamAccumulator::new();
     for line in raw.lines() {
         let line = line.trim();
@@ -343,19 +204,20 @@ pub fn parse_stream(raw: &str, model: &str) -> Result<RunnerOutput, RunnerError>
             .map_err(|e| RunnerError::Other(format!("bad stream-json line: {e}")))?;
         let _ = acc.feed(&v)?;
     }
-    acc.finish(model)
+    acc.finish(model, kind)
 }
 
 /// Streaming variant of `parse_stream`. Parses the same newline-delimited JSON
 /// but invokes `on_delta` with each assistant *prose fragment* as it is parsed
 /// (display-only), then returns the identical final RunnerOutput. The result
-/// line's authoritative prose is NOT forwarded as a delta — it has already been
-/// streamed via the assistant events. Mirrors
+/// line's prose is NOT forwarded as a delta — it has already been streamed via
+/// the assistant events. Mirrors
 /// `llm_chat::stream_json::parse_chat_stream_streaming` (separate ACL crate, by
 /// design — vet F3; do not merge the two parsers).
 pub fn parse_stream_streaming(
     raw: &str,
     model: &str,
+    kind: OutputKind,
     on_delta: &mut dyn FnMut(&crate::output::LogDelta),
 ) -> Result<RunnerOutput, RunnerError> {
     let mut acc = StreamAccumulator::new();
@@ -370,60 +232,129 @@ pub fn parse_stream_streaming(
             on_delta(&d);
         }
     }
-    acc.finish(model)
+    acc.finish(model, kind)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_bus_core::{GeneratedItem, OutputKind, ProducerOutput, Verdict, WorkerResult};
 
-    const SAMPLE: &str = include_str!("fixtures/stream-json-sample.txt");
+    // Real `claude --print --output-format stream-json --verbose --json-schema=...`
+    // runs (haiku), trimmed of account, path and session detail.
+    const GENERATOR: &str = include_str!("fixtures/structured-generator.jsonl");
+    const PRODUCER: &str = include_str!("fixtures/structured-producer.jsonl");
+    const REVIEWER: &str = include_str!("fixtures/structured-reviewer.jsonl");
+    // The model could not satisfy the schema, was nudged once, and gave up in
+    // prose: `subtype: success`, exit 0, and no `structured_output` key.
+    const MISSING: &str = include_str!("fixtures/structured-missing.jsonl");
 
     #[test]
-    fn parses_sample_into_approve_with_artifact_and_usage() {
-        let out = parse_stream(SAMPLE, "fallback-model").unwrap();
-        assert_eq!(out.verdict, Verdict::Approve);
-        assert_eq!(out.artifact_path.as_deref(), Some("artifacts/analyses/T-1-v1.md"));
-        // result usage is authoritative (1200/32/300/50), not the sum of deltas.
-        assert_eq!(out.usage.input_tokens, 1200);
-        assert_eq!(out.usage.output_tokens, 32);
-        assert_eq!(out.usage.cache_creation, 300);
-        assert_eq!(out.usage.cache_read, 50);
-        // model came from the system init line.
-        assert_eq!(out.usage.model, "claude-opus-4-7");
+    fn a_real_reviewer_run_gives_its_verdict_and_reason() {
+        let out = parse_stream(REVIEWER, "fallback", OutputKind::Reviewer).unwrap();
+        match out.result {
+            WorkerResult::Reviewer(r) => {
+                assert_eq!(r.verdict, Verdict::Approve);
+                assert!(r.reason.contains("2+2=4"), "{}", r.reason);
+                assert_eq!(r.artifact, None);
+            }
+            other => panic!("expected a reviewer result, got {other:?}"),
+        }
+        assert_eq!(out.usage.model, "claude-haiku-4-5-20251001");
+        assert!(out.usage.cost_micros.unwrap() > 0);
     }
 
     #[test]
-    fn verdict_defaults_to_revise_when_absent() {
-        assert_eq!(parse_verdict("no verdict here"), Verdict::Revise);
-        assert_eq!(parse_verdict("VERDICT: approve"), Verdict::Approve);
-        assert_eq!(parse_verdict("VERDICT: reject"), Verdict::Reject);
-        assert_eq!(parse_verdict("VERDICT: nonsense"), Verdict::Revise);
+    fn a_real_producer_run_gives_its_artifact_and_description() {
+        let out = parse_stream(PRODUCER, "fallback", OutputKind::Producer).unwrap();
+        assert_eq!(
+            out.result,
+            WorkerResult::Producer(ProducerOutput {
+                artifact: Some("artifacts/notes/greeting-v1.md".into()),
+                description: Some("A short greeting note.".into()),
+            })
+        );
     }
 
     #[test]
-    fn artifact_is_optional() {
-        assert_eq!(parse_artifact("VERDICT: approve"), None);
-        assert_eq!(parse_artifact("ARTIFACT: a/b.md"), Some("a/b.md".to_string()));
+    fn a_real_generator_run_gives_its_items() {
+        let out = parse_stream(GENERATOR, "fallback", OutputKind::Generator).unwrap();
+        match out.result {
+            WorkerResult::Generator(g) => assert_eq!(
+                g.items,
+                vec![
+                    GeneratedItem { key: "apple".into(), description: "a red fruit".into(), artifact: None },
+                    GeneratedItem { key: "pear".into(), description: "a green fruit".into(), artifact: None },
+                ]
+            ),
+            other => panic!("expected a generator result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_success_result_without_structured_output_is_no_structured_output() {
+        let err = parse_stream(MISSING, "m", OutputKind::Producer).unwrap_err();
+        assert!(matches!(err, RunnerError::NoStructuredOutput { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn the_assistant_prose_is_kept_as_final_text_for_the_log() {
+        // The reviewer run wrote prose before calling StructuredOutput.
+        let out = parse_stream(REVIEWER, "m", OutputKind::Reviewer).unwrap();
+        assert!(out.final_text.contains("2+2=4"));
+    }
+
+    #[test]
+    fn an_object_of_the_wrong_shape_is_no_structured_output() {
+        let raw = r#"{"type":"result","subtype":"success","is_error":false,"result":"{}","structured_output":{"verdict":"maybe"}}"#;
+        let err = parse_stream(raw, "m", OutputKind::Reviewer).unwrap_err();
+        match err {
+            RunnerError::NoStructuredOutput { detail } => assert!(!detail.is_empty()),
+            other => panic!("expected NoStructuredOutput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reviewer_object_handed_to_a_generator_is_no_structured_output() {
+        let raw = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdict":"approve","reason":"ok"}}"#;
+        assert!(matches!(
+            parse_stream(raw, "m", OutputKind::Generator).unwrap_err(),
+            RunnerError::NoStructuredOutput { .. }
+        ));
     }
 
     #[test]
     fn rate_limit_event_is_an_error() {
         let raw = r#"{"type":"error","error":{"message":"Rate limit exceeded (429)"}}"#;
-        let err = parse_stream(raw, "m").unwrap_err();
+        let err = parse_stream(raw, "m", OutputKind::Producer).unwrap_err();
         assert!(err.is_rate_limited());
     }
 
     #[test]
     fn empty_stream_is_no_result() {
-        let err = parse_stream("\n  \n", "m").unwrap_err();
+        let err = parse_stream("\n  \n", "m", OutputKind::Producer).unwrap_err();
         assert!(matches!(err, RunnerError::NoResult));
     }
 
     #[test]
     fn malformed_line_is_other_error() {
-        let err = parse_stream("not json", "m").unwrap_err();
+        let err = parse_stream("not json", "m", OutputKind::Producer).unwrap_err();
         assert!(matches!(err, RunnerError::Other(_)));
+    }
+
+    #[test]
+    fn result_usage_is_authoritative_and_model_comes_from_init() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#, "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":9,"output_tokens":9}}}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"usage":{"input_tokens":1200,"output_tokens":32,"cache_creation_input_tokens":300,"cache_read_input_tokens":50}}"#,
+        );
+        let out = parse_stream(raw, "fallback", OutputKind::Producer).unwrap();
+        assert_eq!(out.usage.input_tokens, 1200);
+        assert_eq!(out.usage.output_tokens, 32);
+        assert_eq!(out.usage.cache_creation, 300);
+        assert_eq!(out.usage.cache_read, 50);
+        assert_eq!(out.usage.model, "claude-opus-4-7");
     }
 
     #[test]
@@ -431,160 +362,77 @@ mod tests {
         use crate::output::{LogDelta, LogKind};
         let raw = concat!(
             r#"{"type":"system","subtype":"init","model":"m"}"#, "\n",
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"let me reason"},{"type":"text","text":"VERDICT: approve"}]}}"#, "\n",
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"let me reason"},{"type":"text","text":"Looks right."}]}}"#, "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"{}","structured_output":{"verdict":"approve","reason":"fine"},"usage":{"input_tokens":1,"output_tokens":1}}"#
         );
         let mut seen: Vec<LogDelta> = vec![];
-        let out = parse_stream_streaming(raw, "m", &mut |d: &LogDelta| seen.push(d.clone())).unwrap();
-        // both channels were forwarded, in document order (thinking before text)
+        let out = parse_stream_streaming(raw, "m", OutputKind::Reviewer, &mut |d: &LogDelta| seen.push(d.clone())).unwrap();
         assert_eq!(seen, vec![
             LogDelta { kind: LogKind::Thinking, text: "let me reason".into() },
-            LogDelta { kind: LogKind::Output, text: "VERDICT: approve".into() },
+            LogDelta { kind: LogKind::Output, text: "Looks right.".into() },
         ]);
-        // the verdict parsed from OUTPUT only; thinking never reached final_text
-        assert_eq!(out.verdict, agent_bus_core::Verdict::Approve);
         assert!(!out.final_text.contains("let me reason"));
+        assert_eq!(out.final_text, "Looks right.");
     }
 
     #[test]
-    fn feed_returns_output_delta_for_assistant_text_only() {
-        use crate::output::{LogDelta, LogKind};
-        let mut acc = StreamAccumulator::new();
-        let sys: Value = serde_json::from_str(r#"{"type":"system","subtype":"init","model":"m"}"#).unwrap();
-        let asst: Value = serde_json::from_str(
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello "}]}}"#,
-        ).unwrap();
-        let res: Value = serde_json::from_str(r#"{"type":"result","subtype":"success","result":"hello world"}"#).unwrap();
-        assert!(acc.feed(&sys).unwrap().is_empty());
-        assert_eq!(acc.feed(&asst).unwrap(), vec![LogDelta { kind: LogKind::Output, text: "hello ".into() }]);
-        assert!(acc.feed(&res).unwrap().is_empty());
-    }
-
-    #[test]
-    fn parse_items_captures_description_per_item() {
-        let text = "\
-KEY: lwv-a1-logdelta-seam
-DESCRIPTION: Tag stream deltas as output or thinking
-ARTIFACT: artifacts/specs/a1.md
-KEY: lwv-a2-no-desc
-ARTIFACT: artifacts/specs/a2.md";
-        let items = parse_items(text);
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].description.as_deref(), Some("Tag stream deltas as output or thinking"));
-        assert_eq!(items[1].description, None);
-    }
-
-    #[test]
-    fn parse_items_reads_a_list_of_n_items() {
-        let text = "\
-KEY: alpha
-ARTIFACT: artifacts/specs/alpha.md
-VERDICT: approve
-KEY: beta
-ARTIFACT: artifacts/specs/beta.md
-VERDICT: revise
-KEY: gamma
-ARTIFACT: artifacts/specs/gamma.md";
-        let items = parse_items(text);
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0], OutputItem { key: "alpha".into(), artifact_path: Some("artifacts/specs/alpha.md".into()), verdict: Some(Verdict::Approve), description: None });
-        assert_eq!(items[1], OutputItem { key: "beta".into(), artifact_path: Some("artifacts/specs/beta.md".into()), verdict: Some(Verdict::Revise), description: None });
-        assert_eq!(items[2], OutputItem { key: "gamma".into(), artifact_path: Some("artifacts/specs/gamma.md".into()), verdict: None, description: None });
-    }
-
-    #[test]
-    fn parse_items_handles_legacy_single_item_with_no_key() {
-        // A legacy VERDICT:/ARTIFACT: with no KEY: => one item, key="".
-        let text = "Some prose.\nARTIFACT: artifacts/analyses/a.md\nVERDICT: approve";
-        let items = parse_items(text);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].key, "");
-        assert_eq!(items[0].artifact_path.as_deref(), Some("artifacts/analyses/a.md"));
-        assert_eq!(items[0].verdict, Some(Verdict::Approve));
-    }
-
-    #[test]
-    fn parse_items_is_best_effort_on_malformed_and_empty() {
-        assert!(parse_items("").is_empty());
-        assert!(parse_items("just prose, no markers").is_empty());
-        // a blank verdict value defaults to the safe Revise (never auto-approve)
-        let items = parse_items("KEY: x\nVERDICT:");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].verdict, Some(Verdict::Revise));
-        // a KEY with no artifact/verdict is still an item
-        let items = parse_items("KEY: only");
-        assert_eq!(items, vec![OutputItem { key: "only".into(), artifact_path: None, verdict: None, description: None }]);
-    }
-
-    #[test]
-    fn output_contract_tells_generator_to_emit_new_keys() {
-        let found = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-        let c = output_contract("generator", "${project}/artifacts/research", &found);
-        assert!(c.contains("KEY:"));
-        assert!(c.contains("ARTIFACT:"));
-        assert!(c.contains("${project}/artifacts/research"));
-        assert!(c.to_lowercase().contains("generator"));
-        // the already-found set is embedded so the agent dedups
-        assert!(c.contains("src/a.rs"));
-        assert!(c.contains("src/b.rs"));
-        // a generator is not told to emit a verdict
-        assert!(!c.contains("VERDICT:"));
-    }
-
-    #[test]
-    fn output_contract_tells_every_role_to_emit_a_description() {
-        for role in ["generator", "reviewer", "producer"] {
-            let c = output_contract(role, "${project}/artifacts/x", &[]);
-            assert!(c.contains("DESCRIPTION:"), "role {role} contract must request a DESCRIPTION line");
-        }
-    }
-
-    #[test]
-    fn output_contract_tells_reviewer_to_emit_a_verdict() {
-        let c = output_contract("reviewer", "${project}/artifacts/specs", &[]);
-        assert!(c.contains("VERDICT:"));
-        assert!(c.to_lowercase().contains("reviewer"));
-    }
-
-    #[test]
-    fn output_contract_producer_has_no_verdict_and_grants_write_access() {
-        let c = output_contract("producer", "${project}/artifacts/plans", &[]);
-        assert!(!c.contains("VERDICT:"));
-        assert!(c.contains("${project}/artifacts/plans"));
-        assert!(c.to_lowercase().contains("write access"));
-    }
-
-    #[test]
-    fn streaming_parse_forwards_only_assistant_prose_and_returns_same_output() {
-        use crate::output::{LogDelta, LogKind};
-        let mut deltas: Vec<LogDelta> = vec![];
-        let out = parse_stream_streaming(SAMPLE, "fallback-model", &mut |d| deltas.push(d.clone())).unwrap();
-        // identical final output to the whole-buffer parse
-        let plain = parse_stream(SAMPLE, "fallback-model").unwrap();
-        assert_eq!(out, plain);
-        // the two assistant lines streamed their prose; the result line did not
-        let texts: Vec<String> = deltas.iter().filter(|d| d.kind == LogKind::Output).map(|d| d.text.clone()).collect();
-        assert_eq!(texts, vec![
-            "Analysing the repository.\n".to_string(),
-            "VERDICT: approve\nARTIFACT: artifacts/analyses/T-1-v1.md".to_string(),
-        ]);
+    fn streaming_parse_returns_the_same_output_as_the_whole_buffer_parse() {
+        let mut n = 0;
+        let streamed = parse_stream_streaming(REVIEWER, "m", OutputKind::Reviewer, &mut |_d| n += 1).unwrap();
+        assert_eq!(streamed, parse_stream(REVIEWER, "m", OutputKind::Reviewer).unwrap());
+        assert!(n > 0, "the run's prose was forwarded");
     }
 
     #[test]
     fn result_total_cost_usd_becomes_cost_micros() {
-        let raw = concat!(
-            r#"{"type":"system","subtype":"init","model":"claude-opus-5-5"}"#, "\n",
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: approve","total_cost_usd":0.004249,"usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}"#, "\n",
-        );
-        let out = parse_stream(raw, "claude-opus-5-5").unwrap();
-        assert_eq!(out.usage.cost_micros, Some(4_249));
+        let raw = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"total_cost_usd":0.004249,"usage":{"input_tokens":10,"output_tokens":2}}"#;
+        assert_eq!(parse_stream(raw, "m", OutputKind::Producer).unwrap().usage.cost_micros, Some(4_249));
     }
 
     #[test]
     fn a_result_without_total_cost_usd_leaves_cost_unknown() {
-        let raw = concat!(
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#, "\n",
-        );
-        assert_eq!(parse_stream(raw, "m").unwrap().usage.cost_micros, None);
+        let raw = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        assert_eq!(parse_stream(raw, "m", OutputKind::Producer).unwrap().usage.cost_micros, None);
+    }
+
+    #[test]
+    fn every_contract_says_to_call_the_structured_output_tool_and_has_no_markers() {
+        for kind in [OutputKind::Generator, OutputKind::Producer, OutputKind::Reviewer] {
+            let c = output_contract(kind, "/data/artifacts/x", &[]);
+            assert!(c.contains("Report your result by calling the StructuredOutput tool."), "{kind:?}");
+            for marker in ["KEY:", "VERDICT:", "ARTIFACT:", "DESCRIPTION:"] {
+                assert!(!c.contains(marker), "{kind:?} contract still has {marker}");
+            }
+            assert!(c.contains("/data/artifacts/x"), "{kind:?} names the artifact folder");
+        }
+    }
+
+    #[test]
+    fn the_generator_contract_lists_the_already_found_keys() {
+        let found = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let c = output_contract(OutputKind::Generator, "/d", &found);
+        assert!(c.contains("src/a.rs") && c.contains("src/b.rs"));
+        assert!(output_contract(OutputKind::Generator, "/d", &[]).contains("none yet"));
+    }
+
+    #[test]
+    fn contracts_with_a_description_state_its_length() {
+        for kind in [OutputKind::Generator, OutputKind::Producer] {
+            assert!(output_contract(kind, "/d", &[]).contains("80 characters"), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_reviewer_contract_asks_for_a_verdict_with_a_reason() {
+        let c = output_contract(OutputKind::Reviewer, "/d", &[]);
+        assert!(c.contains("approve") && c.contains("revise") && c.contains("reject"));
+        assert!(c.to_lowercase().contains("reason"));
+    }
+
+    #[test]
+    fn the_producer_contract_grants_write_access_to_the_artifact_folder() {
+        let c = output_contract(OutputKind::Producer, "/data/artifacts/plans", &[]);
+        assert!(c.contains("/data/artifacts/plans"));
+        assert!(c.to_lowercase().contains("write access"));
     }
 }

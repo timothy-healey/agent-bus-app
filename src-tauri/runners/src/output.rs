@@ -2,7 +2,7 @@
 //! Nothing here mentions stream-json, CLI flags, or HTTP: those are sealed
 //! inside the concrete runners. Runtime sees only RunnerOutput/RunnerError.
 
-use agent_bus_core::Verdict;
+use agent_bus_core::{OutputKind, WorkerResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,12 +23,10 @@ pub struct RunnerUsage {
 /// The result of one completed invocation, translated out of Claude's idiom.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerOutput {
-    /// The verdict the worker settled on (parsed from the model's final text).
-    pub verdict: Verdict,
-    /// Path (relative to project root) of the artifact the worker produced, if
-    /// any. None when the team produces no artifact (e.g. a terminal "done").
-    pub artifact_path: Option<String>,
-    /// The full assistant text, kept for the live-log + diagnostics.
+    /// The worker's schema-validated Structured output: its items, artifact or
+    /// verdict. The only source of a worker's result.
+    pub result: WorkerResult,
+    /// The assistant prose, kept for the live log and diagnostics. Never parsed.
     pub final_text: String,
     /// Token usage recorded across the invocation.
     pub usage: RunnerUsage,
@@ -53,6 +51,11 @@ pub enum RunnerError {
     /// The stream produced no parseable result.
     #[error("no result parsed from runner output")]
     NoResult,
+    /// The run finished without a Structured output, or with one that does not
+    /// fit the requested kind. The CLI reports this as an ordinary success, so
+    /// the missing object is the only signal.
+    #[error("no structured output: {detail}")]
+    NoStructuredOutput { detail: String },
     /// Any other failure, with a message.
     #[error("runner failed: {0}")]
     Other(String),
@@ -139,10 +142,12 @@ pub struct InvocationRequest {
     /// implementers, target repo otherwise). `None` = inherit the parent's cwd
     /// (the pre-LF26 behaviour, kept for the plain `.output()` spawner + tests).
     pub working_dir: Option<String>,
+    /// Which Structured output shape the worker must return.
+    pub output_kind: OutputKind,
 }
 
 /// Which channel a streamed fragment belongs to. `Output` is the model's visible
-/// prose (accumulated into the final text used for verdict/item parsing);
+/// prose (accumulated into the final text kept for the log);
 /// `Thinking` is reasoning the model emits in `thinking` blocks — forwarded for
 /// live display only, NEVER accumulated into the parsed text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,9 +180,9 @@ pub trait Runner: Send + Sync {
     async fn invoke(&self, req: &InvocationRequest) -> Result<RunnerOutput, RunnerError>;
 
     /// Streaming variant: identical contract to `invoke` (same final
-    /// `RunnerOutput` — verdict, artifact, usage), but assistant prose fragments
-    /// are forwarded to `sink` as they arrive for live-log display. The verdict/
-    /// artifact/usage parse + the value returned are unchanged; streaming is
+    /// `RunnerOutput` — result, usage), but assistant prose fragments
+    /// are forwarded to `sink` as they arrive for live-log display. The result
+    /// and usage + the value returned are unchanged; streaming is
     /// purely additive. The default delegates to `invoke` (no deltas) so existing
     /// runners keep working; streaming runners override this.
     async fn invoke_stream(
@@ -193,6 +198,7 @@ pub trait Runner: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_bus_core::{OutputKind, ProducerOutput, ReviewerOutput, Verdict, WorkerResult};
 
     #[test]
     fn log_delta_carries_kind_and_text() {
@@ -207,8 +213,11 @@ mod tests {
     #[test]
     fn runner_output_round_trips() {
         let out = RunnerOutput {
-            verdict: Verdict::Approve,
-            artifact_path: Some("artifacts/specs/T-1-v1.md".into()),
+            result: WorkerResult::Reviewer(ReviewerOutput {
+                verdict: Verdict::Approve,
+                reason: "complete".into(),
+                artifact: Some("artifacts/specs/T-1-v1.md".into()),
+            }),
             final_text: "done".into(),
             usage: RunnerUsage {
                 model: "claude-opus-4-7".into(),
@@ -222,6 +231,14 @@ mod tests {
         let s = serde_json::to_string(&out).unwrap();
         let back: RunnerOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(out, back);
+    }
+
+    #[test]
+    fn no_structured_output_carries_its_detail_and_is_not_a_rate_limit() {
+        let e = RunnerError::NoStructuredOutput { detail: "the result carried no structured_output".into() };
+        assert!(!e.is_rate_limited());
+        assert!(e.to_string().contains("no structured output"));
+        assert!(e.to_string().contains("the result carried no structured_output"));
     }
 
     #[test]
@@ -275,8 +292,7 @@ mod tests {
     async fn default_invoke_stream_delegates_to_invoke_with_no_deltas() {
         use crate::fake::FakeRunner;
         let out = RunnerOutput {
-            verdict: Verdict::Approve,
-            artifact_path: Some("a.md".into()),
+            result: WorkerResult::Producer(ProducerOutput { artifact: Some("a.md".into()), description: None }),
             final_text: "x".into(),
             usage: RunnerUsage::default(),
         };
@@ -287,6 +303,7 @@ mod tests {
             settings_path: String::new(), add_dirs: vec![],
             sandbox_profile: None,
             working_dir: None,
+            output_kind: OutputKind::Producer,
         };
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let s = seen.clone();
@@ -294,7 +311,7 @@ mod tests {
         // FakeRunner gets a streaming override in a later task; even with it, a
         // FakeRunner built without scripted deltas forwards nothing.
         let result = fake.invoke_stream(&req, &sink).await.unwrap();
-        assert_eq!(result.verdict, Verdict::Approve);
+        assert_eq!(result.result.kind(), OutputKind::Producer);
         assert!(seen.lock().unwrap().is_empty());
     }
 }
