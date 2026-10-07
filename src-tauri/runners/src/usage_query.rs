@@ -1,6 +1,11 @@
 //! The `get_usage` control request: the account's real plan Utilization, read
 //! from the `claude` CLI without calling a model. The only code that knows the
 //! request and response shape.
+//!
+//! The poll runs `claude` with `--setting-sources=` and `--strict-mcp-config`
+//! from the system temp dir, so it never loads the operator's settings, hooks
+//! or MCP servers (a poll fires every minute). Valued flags use the `=` form so
+//! an empty value cannot swallow the next argument.
 
 use agent_bus_core::{LimitKind, LimitReading, UtilizationReading, UtilizationSource};
 use serde_json::Value;
@@ -22,6 +27,8 @@ const ARGS: &[&str] = &[
     "stream-json",
     "--verbose",
     "--no-session-persistence",
+    "--setting-sources=",
+    "--strict-mcp-config",
 ];
 
 /// RFC 3339 → unix seconds. Accepts optional fractional seconds and either `Z`
@@ -170,6 +177,7 @@ impl UtilizationSource for ClaudeCliUtilizationSource {
     fn fetch(&self) -> Result<UtilizationReading, String> {
         let mut child = Command::new(&self.bin)
             .args(ARGS)
+            .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -344,6 +352,44 @@ mod tests {
         let src = ClaudeCliUtilizationSource::with_bin(bin, std::time::Duration::from_secs(5));
         let r = src.fetch().unwrap();
         assert_eq!(r.limits[0].utilization_pct, 41.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_source_skips_operator_settings_and_runs_outside_the_app_cwd() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fixtures/get-usage-sample.jsonl");
+        let (dir, bin) = script("");
+        let record = dir.join("record");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do echo \"arg:$a\"; done > '{r}'\necho \"cwd:$(pwd -P)\" >> '{r}'\ncat > /dev/null\ncat '{f}'\n",
+                r = record.display(),
+                f = fixture.display()
+            ),
+        )
+        .unwrap();
+        let src = ClaudeCliUtilizationSource::with_bin(bin, std::time::Duration::from_secs(5));
+        src.fetch().unwrap();
+        let rec = std::fs::read_to_string(&record).unwrap();
+        let args: Vec<&str> = rec.lines().filter_map(|l| l.strip_prefix("arg:")).collect();
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--no-session-persistence",
+                "--setting-sources=",
+                "--strict-mcp-config",
+            ]
+        );
+        let cwd = rec.lines().find_map(|l| l.strip_prefix("cwd:")).unwrap();
+        assert_eq!(std::path::Path::new(cwd), std::env::temp_dir().canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 
