@@ -1,10 +1,33 @@
 //! Pre-flight check at run start: every `claude-cli` team's effective model and
-//! effort must be in the current model list, or the run does not start. The
-//! CLI never validates `--effort` (an unsupported level is silently ignored),
-//! so this is where an invalid combination is caught.
+//! effort must be in the current model list, its plugins must resolve, its
+//! scope paths must become absolute, and a Remote git grant needs a model with
+//! auto mode. Otherwise the run does not start. The CLI never validates
+//! `--effort` (an unsupported level is silently ignored), so this is where an
+//! invalid combination is caught.
 
-use agent_bus_core::{ModelList, RunnerConfigProblem, RunnerKind, TeamId};
+use agent_bus_core::{ModelList, RunnerConfigProblem, RunnerKind, TeamId, ToolGrant};
 use pipeline::model::Pipeline;
+use std::path::Path;
+use workspace::paths::{resolve_absolute, PathVars};
+
+/// What the scope checks need beyond the pipeline and the model list.
+#[derive(Clone, Copy)]
+pub struct PreflightEnv<'a> {
+    pub project_root: &'a Path,
+    /// The project's target repo, which `${target_repo}` and relative scope
+    /// paths resolve against.
+    pub target_repo: Option<&'a Path>,
+    /// Whether a declared plugin resolves. `None` skips the plugin check.
+    pub plugin_exists: Option<&'a dyn Fn(&str) -> bool>,
+}
+
+impl<'a> PreflightEnv<'a> {
+    /// No scope context: only model, effort and Remote git are checked against
+    /// a repo-less project root.
+    pub fn bare(project_root: &'a Path) -> Self {
+        Self { project_root, target_repo: None, plugin_exists: None }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreflightFailed {
@@ -45,22 +68,43 @@ impl PreflightFailed {
     }
 }
 
-/// Check every `claude-cli` team against the list. A team with no resolved
-/// runner or model is skipped: pipeline validation already rejects those.
-pub fn check_pipeline(pipeline: &Pipeline, list: &ModelList) -> Result<(), PreflightFailed> {
-    let problems: Vec<(TeamId, RunnerConfigProblem)> = pipeline
-        .teams
-        .iter()
-        .filter_map(|t| {
-            let r = t.runner.as_ref()?;
-            if r.kind != Some(RunnerKind::ClaudeCli) {
-                return None;
+/// Check every `claude-cli` team against the list and its scope. A team with
+/// no resolved runner or model is skipped: pipeline validation already
+/// rejects those. A team may have several problems; each is reported.
+pub fn check_pipeline(pipeline: &Pipeline, list: &ModelList, env: &PreflightEnv) -> Result<(), PreflightFailed> {
+    let mut problems: Vec<(TeamId, RunnerConfigProblem)> = Vec::new();
+    for t in &pipeline.teams {
+        let Some(r) = t.runner.as_ref() else { continue };
+        if r.kind != Some(RunnerKind::ClaudeCli) {
+            continue;
+        }
+        let Some(model) = r.model.as_deref() else { continue };
+        let id = || TeamId(t.id.clone());
+        let effort = r.effort.clone().unwrap_or_default();
+        if let Err(p) = list.check(model, &effort) {
+            problems.push((id(), p));
+        }
+        if let Some(exists) = env.plugin_exists {
+            for name in &t.scope.plugins {
+                if !exists(name) {
+                    problems.push((id(), RunnerConfigProblem::PluginNotFound { name: name.clone() }));
+                }
             }
-            let model = r.model.as_deref()?;
-            let effort = r.effort.clone().unwrap_or_default();
-            list.check(model, &effort).err().map(|p| (TeamId(t.id.clone()), p))
-        })
-        .collect();
+        }
+        // `${task_id}` is per task; any value proves the pattern resolves.
+        let mut vars = PathVars::new(env.project_root).with_task_id("T");
+        if let Some(repo) = env.target_repo {
+            vars = vars.with_target_repo(repo);
+        }
+        for pattern in t.scope.reads.iter().chain(t.scope.writes.iter()) {
+            if resolve_absolute(pattern, &vars).is_err() {
+                problems.push((id(), RunnerConfigProblem::PathUnresolvable { pattern: pattern.clone() }));
+            }
+        }
+        if t.scope.grants.contains(&ToolGrant::RemoteGit) && !list.supports_auto_mode(model) {
+            problems.push((id(), RunnerConfigProblem::RemoteGitWithoutAutoMode));
+        }
+    }
     if problems.is_empty() {
         Ok(())
     } else {
@@ -94,6 +138,52 @@ mod tests {
         }
     }
 
+    fn env() -> PreflightEnv<'static> {
+        PreflightEnv { project_root: Path::new("/p"), target_repo: Some(Path::new("/repo")), plugin_exists: None }
+    }
+
+    fn installed(name: &str) -> bool {
+        name == "superpowers"
+    }
+
+    #[test]
+    fn a_plugin_that_does_not_resolve_blocks_the_run_and_names_the_team() {
+        let mut t = team("w", "Writers", "opus", Effort::Default);
+        t.scope.plugins = vec!["superpowers".into(), "ghost".into()];
+        let p = pipeline(vec![t]);
+        let e = PreflightEnv { plugin_exists: Some(&installed), ..env() };
+        let err = check_pipeline(&p, &curated(), &e).unwrap_err();
+        assert_eq!(err.problems, vec![(TeamId("w".into()), RunnerConfigProblem::PluginNotFound { name: "ghost".into() })]);
+        assert!(err.describe(&p).contains("Writers: plugin 'ghost' is not installed"), "{}", err.describe(&p));
+    }
+
+    #[test]
+    fn an_unresolvable_scope_path_blocks_the_run() {
+        let mut t = team("r", "Research", "opus", Effort::Default);
+        t.scope.reads = vec!["${target_repo}".into(), "${nope}/x".into(), "docs".into()];
+        let p = pipeline(vec![t]);
+        // With a target repo, only the unknown variable fails.
+        let err = check_pipeline(&p, &curated(), &env()).unwrap_err();
+        assert_eq!(err.problems, vec![(TeamId("r".into()), RunnerConfigProblem::PathUnresolvable { pattern: "${nope}/x".into() })]);
+        assert!(err.describe(&p).contains("Research: scope path '${nope}/x' cannot be resolved"));
+        // Without one, `${target_repo}` and the relative path fail too.
+        let bare = PreflightEnv::bare(Path::new("/p"));
+        let err = check_pipeline(&p, &curated(), &bare).unwrap_err();
+        assert_eq!(err.problems.len(), 3);
+    }
+
+    #[test]
+    fn remote_git_on_a_model_without_auto_mode_blocks_the_run() {
+        let mut t = team("i", "Implementers", "haiku", Effort::Default);
+        t.scope.grants = vec![agent_bus_core::ToolGrant::Bash, agent_bus_core::ToolGrant::RemoteGit];
+        let p = pipeline(vec![t.clone()]);
+        let err = check_pipeline(&p, &curated(), &env()).unwrap_err();
+        assert_eq!(err.problems, vec![(TeamId("i".into()), RunnerConfigProblem::RemoteGitWithoutAutoMode)]);
+        assert!(err.describe(&p).contains("Implementers: Remote git needs a model with auto mode, and haiku has none"));
+        t.runner.as_mut().unwrap().model = Some("sonnet".into());
+        assert!(check_pipeline(&pipeline(vec![t]), &curated(), &env()).is_ok());
+    }
+
     fn pipeline(teams: Vec<Team>) -> Pipeline {
         Pipeline {
             id: "p".into(),
@@ -115,7 +205,7 @@ mod tests {
             team("a", "A", "opus", Effort::Level("high".into())),
             team("b", "B", "haiku", Effort::Default),
         ]);
-        assert!(check_pipeline(&p, &curated()).is_ok());
+        assert!(check_pipeline(&p, &curated(), &env()).is_ok());
     }
 
     #[test]
@@ -125,7 +215,7 @@ mod tests {
             team("b", "Review", "claude-opus-4-6", Effort::Level("xhigh".into())),
             team("c", "Fine", "haiku", Effort::Default),
         ]);
-        let err = check_pipeline(&p, &curated()).unwrap_err();
+        let err = check_pipeline(&p, &curated(), &env()).unwrap_err();
         assert_eq!(err.problems.len(), 2);
         assert_eq!(err.problems[0].0, TeamId("a".into()));
         let msg = err.describe(&p);
@@ -138,7 +228,7 @@ mod tests {
     #[test]
     fn a_team_without_a_name_is_named_by_its_id() {
         let p = pipeline(vec![team("research", "", "claude-gone", Effort::Default)]);
-        let msg = check_pipeline(&p, &curated()).unwrap_err().describe(&p);
+        let msg = check_pipeline(&p, &curated(), &env()).unwrap_err().describe(&p);
         assert!(msg.contains("research: model 'claude-gone' is not available"), "{msg}");
     }
 
@@ -146,13 +236,13 @@ mod tests {
     fn anthropic_api_teams_are_not_checked() {
         let mut t = team("a", "A", "claude-api-only-id", Effort::Default);
         t.runner.as_mut().unwrap().kind = Some(RunnerKind::AnthropicApi);
-        assert!(check_pipeline(&pipeline(vec![t]), &curated()).is_ok());
+        assert!(check_pipeline(&pipeline(vec![t]), &curated(), &env()).is_ok());
     }
 
     #[test]
     fn an_unresolved_team_is_skipped() {
         let mut t = team("a", "A", "opus", Effort::Default);
         t.runner = None;
-        assert!(check_pipeline(&pipeline(vec![t]), &curated()).is_ok());
+        assert!(check_pipeline(&pipeline(vec![t]), &curated(), &env()).is_ok());
     }
 }

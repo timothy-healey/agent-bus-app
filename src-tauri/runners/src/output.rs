@@ -178,6 +178,8 @@ pub struct InvocationRequest {
 pub enum LogKind {
     Output,
     Thinking,
+    /// One permission denial, as a line naming the tool, its source and input.
+    Denial,
 }
 
 /// A tagged display-only log fragment. The streaming worker path forwards each

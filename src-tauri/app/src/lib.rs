@@ -59,6 +59,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (16, include_str!("../migrations/016_utilization.sql")),
         (17, include_str!("../migrations/017_drop_cc_usage_log.sql")),
         (18, include_str!("../migrations/018_invocation_effort.sql")),
+        (19, include_str!("../migrations/019_invocation_denials.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -398,6 +399,7 @@ fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::log_sink::LogSin
         use std::sync::Mutex;
         // One coalescing buffer per kind so output and thinking never interleave
         // within a single emitted fragment; each emit carries its kind.
+        let task_id_owned = task_id.to_string();
         let out_buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
         let think_buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
         let handle = handle.clone();
@@ -405,6 +407,14 @@ fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::log_sink::LogSin
             let (buf, kind_str) = match d.kind {
                 LogKind::Output => (&out_buf, "output"),
                 LogKind::Thinking => (&think_buf, "thinking"),
+                // A denial is one whole line; it is emitted at once, unthrottled.
+                LogKind::Denial => {
+                    let _ = handle.emit(
+                        crate::events::TASK_LOG,
+                        serde_json::json!({ "task_id": task_id_owned, "delta": d.text, "kind": "denial" }),
+                    );
+                    return;
+                }
             };
             let mut b = buf.lock().unwrap();
             b.push(&d.text);
@@ -1638,6 +1648,12 @@ pub fn run() {
             sql: include_str!("../migrations/018_invocation_effort.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 19,
+            description: "invocation permission denials",
+            sql: include_str!("../migrations/019_invocation_denials.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     // Live child process-group registry (LF20): the killable spawners register
@@ -2124,6 +2140,7 @@ mod task_log_tests {
             match d.kind {
                 LogKind::Output => out_buf.push(&d.text),
                 LogKind::Thinking => think_buf.push(&d.text),
+                LogKind::Denial => unreachable!("no denial in this test"),
             }
         }
         let emitted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
@@ -2379,9 +2396,20 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 18, "all eighteen migrations recorded");
+        assert_eq!(version, 19, "all nineteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn migration_019_adds_a_nullable_permission_denials_column() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(invocation_audit)").fetch_all(&pool).await.unwrap();
+        let d = cols.iter().find(|c| c.1 == "permission_denials").expect("permission_denials column");
+        assert_eq!(d.2, "TEXT");
+        assert_eq!(d.3, 0, "permission_denials must be nullable");
     }
 
     #[tokio::test]

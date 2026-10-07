@@ -418,6 +418,9 @@ impl PipelineActivator {
             log_sink: log_sink.clone(),
             audit: audit.clone(),
             worktree_provider: worktree_provider.clone(),
+            model_list: None,
+            plugin_resolver: None,
+            repo_visibility: None,
         }
     }
 }

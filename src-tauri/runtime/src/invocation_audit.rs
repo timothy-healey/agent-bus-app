@@ -6,7 +6,8 @@
 //! and are never in the same transaction as the Task aggregate's claim/settle.
 //! Mirrors TaskStore's sqlx patterns.
 
-use agent_bus_core::Verdict;
+use agent_bus_core::{PermissionDenial, Verdict};
+use std::collections::HashMap;
 use runners::output::RunnerError;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -117,6 +118,10 @@ pub struct InvocationRow {
     pub outcome: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// What the invocation was refused; empty when nothing was (or for rows
+    /// written before denials were recorded).
+    #[serde(default)]
+    pub permission_denials: Vec<PermissionDenial>,
 }
 
 impl From<InvocationAudit> for InvocationRow {
@@ -140,6 +145,7 @@ impl From<InvocationAudit> for InvocationRow {
             outcome,
             input_tokens: a.usage.input_tokens,
             output_tokens: a.usage.output_tokens,
+            permission_denials: a.permission_denials,
         }
     }
 }
@@ -159,6 +165,8 @@ pub struct InvocationAudit {
     pub usage: AuditUsage,
     /// The `--effort` level the invocation ran with; `None` = Default.
     pub effort: Option<String>,
+    /// What the invocation was refused (the `permission_denials` JSON column).
+    pub permission_denials: Vec<PermissionDenial>,
 }
 
 type AuditRow = (
@@ -175,6 +183,7 @@ type AuditRow = (
     i64,
     i64,
     i64,
+    Option<String>,
     Option<String>,
 );
 
@@ -197,6 +206,11 @@ fn row_to_audit(r: AuditRow) -> InvocationAudit {
             cache_read: r.12 as u64,
         },
         effort: r.13,
+        permission_denials: r
+            .14
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -212,7 +226,8 @@ impl InvocationAuditStore {
     const SELECT: &'static str =
         "SELECT invocation_id, task_id, team_id, model, attempts, started_at,
                 settled_at, outcome_kind, outcome,
-                input_tokens, output_tokens, cache_creation, cache_read, effort
+                input_tokens, output_tokens, cache_creation, cache_read, effort,
+                permission_denials
          FROM invocation_audit";
 
     /// Write the start row (outcome NULL = in-flight). `effort` is the level
@@ -276,6 +291,35 @@ impl InvocationAuditStore {
         Ok(())
     }
 
+    /// Record what the invocation was refused, as a JSON array.
+    pub async fn record_denials(
+        &self,
+        invocation_id: &str,
+        denials: &[PermissionDenial],
+    ) -> Result<(), InvocationAuditError> {
+        let json = serde_json::to_string(denials).unwrap_or_else(|_| "[]".into());
+        sqlx::query("UPDATE invocation_audit SET permission_denials=? WHERE invocation_id=?")
+            .bind(json)
+            .bind(invocation_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// How many denials each task's invocations recorded, summed per task.
+    /// Tasks with none are absent.
+    pub async fn denial_counts(&self) -> Result<HashMap<String, u32>, InvocationAuditError> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT task_id, SUM(json_array_length(permission_denials))
+             FROM invocation_audit
+             WHERE permission_denials IS NOT NULL AND json_valid(permission_denials)
+             GROUP BY task_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().filter(|(_, n)| *n > 0).map(|(t, n)| (t, n as u32)).collect())
+    }
+
     /// Read one row back (tests / future viewer).
     pub async fn get(&self, invocation_id: &str) -> Result<Option<InvocationAudit>, InvocationAuditError> {
         let row = sqlx::query_as::<_, AuditRow>(&format!("{} WHERE invocation_id = ?", Self::SELECT))
@@ -328,6 +372,8 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/018_invocation_effort.sql"))
             .execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/019_invocation_denials.sql"))
+            .execute(&pool).await.unwrap();
         pool
     }
 
@@ -366,6 +412,40 @@ mod tests {
         assert_eq!(row.usage.output_tokens, 20);
         assert_eq!(row.usage.cache_creation, 5);
         assert_eq!(row.usage.cache_read, 3);
+    }
+
+    fn denial(tool: &str, cmd: &str, source: agent_bus_core::DenialSource) -> PermissionDenial {
+        PermissionDenial { tool_name: tool.into(), tool_input: serde_json::json!({ "command": cmd }), source }
+    }
+
+    #[tokio::test]
+    async fn denials_round_trip_onto_the_row() {
+        use agent_bus_core::DenialSource::*;
+        let store = InvocationAuditStore::new(fresh_pool().await);
+        let id = store.record_start("T-1", "impl", "m", None, 1, 1).await.unwrap();
+        assert!(store.get(&id).await.unwrap().unwrap().permission_denials.is_empty(), "NULL reads as empty");
+        let ds = vec![denial("Bash", "git push --force", Rule), denial("Bash", "gh pr create", Classifier)];
+        store.record_denials(&id, &ds).await.unwrap();
+        assert_eq!(store.get(&id).await.unwrap().unwrap().permission_denials, ds);
+        let rows = store.list_rows_for_task("T-1").await.unwrap();
+        assert_eq!(rows[0].permission_denials, ds);
+    }
+
+    #[tokio::test]
+    async fn denial_counts_sum_per_task_and_skip_tasks_without_any() {
+        use agent_bus_core::DenialSource::*;
+        let store = InvocationAuditStore::new(fresh_pool().await);
+        let a1 = store.record_start("T-a", "impl", "m", None, 1, 1).await.unwrap();
+        let a2 = store.record_start("T-a", "impl", "m", None, 2, 2).await.unwrap();
+        let b = store.record_start("T-b", "impl", "m", None, 1, 3).await.unwrap();
+        store.record_start("T-c", "impl", "m", None, 1, 4).await.unwrap();
+        store.record_denials(&a1, &[denial("Bash", "x", Rule)]).await.unwrap();
+        store.record_denials(&a2, &[denial("Bash", "y", Rule), denial("Write", "z", Rule)]).await.unwrap();
+        store.record_denials(&b, &[]).await.unwrap();
+        let counts = store.denial_counts().await.unwrap();
+        assert_eq!(counts.get("T-a"), Some(&3));
+        assert_eq!(counts.get("T-b"), None);
+        assert_eq!(counts.get("T-c"), None);
     }
 
     #[tokio::test]
@@ -443,6 +523,7 @@ mod tests {
             outcome: "verdict:reject".into(),
             input_tokens: 50,
             output_tokens: 12,
+            permission_denials: vec![],
         };
         let v = serde_json::to_value(&row).unwrap();
         assert_eq!(v["invocation_id"], "I-1");

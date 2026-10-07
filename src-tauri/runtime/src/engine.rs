@@ -191,6 +191,15 @@ pub struct EngineContext {
     /// tests and topic-less runs ⇒ implementer stages fall back to the target-repo
     /// `working_dir`, preserving chunk-1 behavior.
     pub worktree_provider: Option<std::sync::Arc<dyn WorktreeProvider>>,
+    /// The CLI's model list; a model with auto mode runs its workers in
+    /// `auto`. `None` = every worker runs in `acceptEdits`.
+    pub model_list: Option<Arc<std::sync::RwLock<agent_bus_core::ModelList>>>,
+    /// Resolves the plugins a team declares to `--plugin-dir` paths. `None` =
+    /// no plugins are loaded.
+    pub plugin_resolver: Option<Arc<workspace::plugins::PluginResolver>>,
+    /// The target repo's visibility (`public` / `private` / `internal`), looked
+    /// up once per run for the auto-mode classifier. `None` = unknown.
+    pub repo_visibility: Option<String>,
 }
 
 impl EngineContext {
@@ -1411,6 +1420,69 @@ fn stage_store_capacity(ctx: &EngineContext, stage: &str) -> u32 {
         .unwrap_or(pipeline::model::DEFAULT_STORE_CAPACITY)
 }
 
+/// A team's scope for one invocation, made absolute:
+/// - reads: the team's read paths, the run's whole artifacts root (so
+///   reviewers see what producers wrote) and the worker's cwd;
+/// - writes: the team's write paths, its own artifact folder, and for an
+///   implementer its cwd (the worktree).
+///
+/// Relative paths and `${target_repo}` resolve against `vars`, whose target
+/// repo is the task's worktree when it runs in one. Pure.
+pub fn effective_scope(
+    team: &Team,
+    vars: &PathVars,
+    working_dir: Option<&str>,
+    artifact_base: &std::path::Path,
+    artifact_dir: &str,
+    repo_visibility: Option<String>,
+) -> Result<runners::scope::WorkerScope, String> {
+    let resolve_all = |patterns: &[String]| -> Result<Vec<String>, String> {
+        patterns
+            .iter()
+            .map(|p| {
+                workspace::paths::resolve_absolute(p, vars)
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .map_err(|e| format!("scope path '{p}' cannot be resolved: {e}"))
+            })
+            .collect()
+    };
+    let push_unique = |v: &mut Vec<String>, p: String| {
+        if !v.contains(&p) {
+            v.push(p);
+        }
+    };
+    let mut reads = resolve_all(&team.scope.reads)?;
+    let mut writes = resolve_all(&team.scope.writes)?;
+    push_unique(&mut reads, artifact_base.to_string_lossy().into_owned());
+    push_unique(&mut writes, artifact_dir.to_string());
+    if let Some(cwd) = working_dir {
+        if team.role == pipeline::model::Role::Implementer {
+            push_unique(&mut writes, cwd.to_string());
+        } else {
+            push_unique(&mut reads, cwd.to_string());
+        }
+    }
+    Ok(runners::scope::WorkerScope { reads, writes, grants: team.scope.grants.clone(), repo_visibility })
+}
+
+/// One task-log line for a denial: the tool, what refused it, and its input
+/// (the command, or the file path, else the input JSON).
+pub fn denial_log_line(d: &agent_bus_core::PermissionDenial) -> String {
+    let source = match d.source {
+        agent_bus_core::DenialSource::Rule => "rule",
+        agent_bus_core::DenialSource::Classifier => "classifier",
+    };
+    let input = d
+        .tool_input
+        .get("command")
+        .or_else(|| d.tool_input.get("file_path"))
+        .or_else(|| d.tool_input.get("url"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| d.tool_input.to_string());
+    format!("denied {} ({source}): {input}\n", d.tool_name)
+}
+
 /// A non-empty positional prompt for `claude --print` when the run is topic-less
 /// and there is no revise bundle. The agent's real instructions are in the system
 /// prompt; this only triggers the turn and points at the input artifact (a
@@ -1443,26 +1515,16 @@ async fn invoke(
     kind: OutputKind,
 ) -> Result<WorkerResult, EngineError> {
     let now = now_unix();
-    let mut vars = PathVars::new(&ctx.project_root).with_task_id(&task.id.0);
-    // `${target_repo}` binds to the task's own value, else the project-level
-    // default (A5) — task overrides project, via the single precedence fn. (Work-
-    // items carry no per-item target_repo in v1, so this is latent today, but the
-    // rule is now applied by the live engine rather than only by the deleted pool.)
-    // Compute the effective target repo once (task override → project default)
-    // and reuse it for both the `${target_repo}` var binding and the working dir.
+    // Compute the effective target repo once (task override → project default).
     let effective_repo =
         effective_target_repo(task.target_repo.as_deref(), ctx.target_repo.as_deref());
-    if let Some(repo) = effective_repo.clone() {
-        vars = vars.with_target_repo(repo);
-    }
     // LF26 + worktree isolation: the child `claude` runs in the work-item's
     // resolved working dir. An inherited `worktree_path` wins; else an
     // Implementer stage creates+records a worktree via the injected provider;
-    // else (read-only stages, or no provider/repo) the effective target repo
-    // (chunk-1 behavior). `None` keeps the pre-LF26 inherit-cwd behaviour for a
-    // topic-less run with no target repo configured.
-    let working_dir = if let Some(p) = task.worktree_path.clone() {
-        Some(p)
+    // else (read-only stages, or no provider/repo) the effective target repo.
+    // `None` keeps the inherit-cwd behaviour for a run with no target repo.
+    let (working_dir, worktree) = if let Some(p) = task.worktree_path.clone() {
+        (Some(p.clone()), Some(p))
     } else if team.role == pipeline::model::Role::Implementer {
         match (&ctx.worktree_provider, effective_repo.as_ref()) {
             (Some(wp), Some(repo)) => {
@@ -1472,36 +1534,45 @@ async fn invoke(
                 // Record on the task so downstream children inherit it. Persist
                 // before the run so a crash mid-run still resumes on the same tree.
                 ctx.tasks.set_worktree_path(&task.id.0, &path).await?;
-                Some(path)
+                (Some(path.clone()), Some(path))
             }
-            _ => effective_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            _ => (effective_repo.as_ref().map(|p| p.to_string_lossy().into_owned()), None),
         }
     } else {
-        effective_repo.as_ref().map(|p| p.to_string_lossy().into_owned())
+        (effective_repo.as_ref().map(|p| p.to_string_lossy().into_owned()), None)
     };
-    // Grant write access to this stage's ABSOLUTE artifact dir (the L1 + LF26
-    // fix): the dir is outside the worker's cwd, so it must be in scope.writes
-    // (settings allow) AND surfaced as an --add-dir (the build_settings pass
-    // turns scope.writes into both). Create it so the agent can write there.
+    // `${target_repo}` binds to the task's worktree when it runs in one (so an
+    // implementer never reaches the main repo), else to the effective repo.
+    let mut vars = PathVars::new(&ctx.project_root).with_task_id(&task.id.0);
+    if let Some(repo) = worktree.map(PathBuf::from).or_else(|| effective_repo.clone()) {
+        vars = vars.with_target_repo(repo);
+    }
+    // The stage's absolute artifact dir is outside the worker's cwd, so it is a
+    // write path (and an --add-dir). Create it so the agent can write there.
     let artifact_dir = ctx.artifact_dir(&team.id);
     let _ = std::fs::create_dir_all(&artifact_dir);
-    let resolve_all = |patterns: &[String]| -> Result<Vec<String>, EngineError> {
-        patterns
+    let worker_scope = effective_scope(
+        team,
+        &vars,
+        working_dir.as_deref(),
+        &ctx.artifact_base,
+        &artifact_dir,
+        ctx.repo_visibility.clone(),
+    )
+    .map_err(EngineError::Invoke)?;
+    let plugin_dirs: Vec<String> = match &ctx.plugin_resolver {
+        Some(resolver) => team
+            .scope
+            .plugins
             .iter()
-            .map(|p| {
-                workspace::paths::resolve_absolute(p, &vars)
-                    .map(|a| a.to_string_lossy().into_owned())
-                    .map_err(|e| EngineError::Invoke(format!("scope path '{p}': {e}")))
+            .map(|name| {
+                resolver
+                    .resolve(name)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .map_err(|e| EngineError::Invoke(e.to_string()))
             })
-            .collect()
-    };
-    let mut writes = resolve_all(&team.scope.writes)?;
-    writes.push(artifact_dir);
-    let worker_scope = runners::scope::WorkerScope {
-        reads: resolve_all(&team.scope.reads)?,
-        writes,
-        grants: team.scope.grants.clone(),
-        repo_visibility: None,
+            .collect::<Result<_, _>>()?,
+        None => vec![],
     };
     let scope_settings = prepare(&ctx.project_root, &team.id, &task.id.0, now, &worker_scope)?;
 
@@ -1542,9 +1613,13 @@ async fn invoke(
         user_message,
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
-        permission_mode: agent_bus_core::PermissionMode::AcceptEdits,
+        permission_mode: ctx
+            .model_list
+            .as_ref()
+            .and_then(|l| l.read().ok().map(|l| l.permission_mode(&effective.model)))
+            .unwrap_or(agent_bus_core::PermissionMode::AcceptEdits),
         disallowed_tools: scope_settings.disallowed_tools.clone(),
-        plugin_dirs: vec![],
+        plugin_dirs,
         working_dir,
         output_kind: kind,
     };
@@ -1565,14 +1640,24 @@ async fn invoke(
     // R4: stream display-only log deltas when a sink factory is wired; else use
     // the non-streaming invoke. Both return the IDENTICAL RunnerOutput — the parse
     // + settle/usage below are byte-for-byte the same on either path.
-    let result = match &ctx.log_sink {
-        Some(factory) => {
-            let sink = factory(&task.id.0);
-            ctx.runner.invoke_stream(&req, &sink).await
-        }
+    let sink = ctx.log_sink.as_ref().map(|factory| factory(&task.id.0));
+    let result = match &sink {
+        Some(sink) => ctx.runner.invoke_stream(&req, sink).await,
         None => ctx.runner.invoke(&req).await,
     };
     cleanup(&scope_settings.settings_path);
+    // Denials are reported, never fatal: they go to the task log and the audit
+    // row whatever the outcome.
+    let denials: Vec<agent_bus_core::PermissionDenial> = match &result {
+        Ok(o) => o.permission_denials.clone(),
+        Err(e) => e.denials().to_vec(),
+    };
+    if let Some(sink) = &sink {
+        for d in &denials {
+            sink(&runners::output::LogDelta { kind: runners::output::LogKind::Denial, text: denial_log_line(d) });
+        }
+    }
+    record_denials(ctx, &audit_id, &denials).await;
 
     // A runner returns the kind it was asked for; anything else is treated as a
     // Structured output of the wrong shape.
@@ -1595,10 +1680,7 @@ async fn invoke(
             // still paid for, so its usage is published and audited too.
             // Best-effort. Then propagate as the engine error the
             // operational-failure path already handles.
-            let paid = match &e {
-                runners::output::RunnerError::NoStructuredOutput { usage, .. } => Some(usage.clone()),
-                _ => None,
-            };
+            let paid = e.paid_usage().cloned();
             if let Some(usage) = &paid {
                 publish_usage(ctx, team, task, usage);
             }
@@ -1672,6 +1754,23 @@ async fn settle_audit(
     if let (Some(store), Some(id)) = (&ctx.audit, audit_id) {
         if let Err(e) = store.record_settle(id, outcome, usage, now_unix()).await {
             eprintln!("runtime: invocation audit settle failed: {e}");
+        }
+    }
+}
+
+/// Best-effort write of an invocation's denials to its audit row. Nothing is
+/// written when there were none, so the column stays NULL.
+async fn record_denials(
+    ctx: &EngineContext,
+    audit_id: &Option<String>,
+    denials: &[agent_bus_core::PermissionDenial],
+) {
+    if denials.is_empty() {
+        return;
+    }
+    if let (Some(store), Some(id)) = (&ctx.audit, audit_id) {
+        if let Err(e) = store.record_denials(id, denials).await {
+            eprintln!("runtime: invocation audit denials write failed: {e}");
         }
     }
 }
@@ -1779,6 +1878,7 @@ pub(crate) mod test_support {
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/018_invocation_effort.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/019_invocation_denials.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/008_nested_groups.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/014_task_worktree.sql")).execute(&pool).await.unwrap();
@@ -1862,6 +1962,9 @@ pub(crate) mod test_support {
             log_sink: None,
             audit: None,
             worktree_provider: None,
+            model_list: None,
+            plugin_resolver: None,
+            repo_visibility: None,
         }
     }
 
@@ -1881,6 +1984,9 @@ mod tests {
     use runners::fake::FakeRunner;
     use agent_bus_core::{GeneratedItem, GeneratorOutput, OutputKind, ProducerOutput, ReviewerOutput, Verdict, WorkerResult};
     use runners::output::{RunnerError, RunnerOutput, RunnerUsage};
+    use runners::output::{LogDelta, LogKind, LogSink};
+    use pipeline::model::Scope;
+    use std::path::Path;
 
     struct RecordingProvider {
         ensure_calls: std::sync::Mutex<Vec<(String, String, String)>>,
@@ -3222,6 +3328,7 @@ mod tests {
             include_str!("../../app/migrations/006_fanout.sql"),
             include_str!("../../app/migrations/007_invocation_audit.sql"),
             include_str!("../../app/migrations/018_invocation_effort.sql"),
+            include_str!("../../app/migrations/019_invocation_denials.sql"),
             include_str!("../../app/migrations/008_nested_groups.sql"),
             include_str!("../../app/migrations/012_runtime_stores.sql"),
             include_str!("../../app/migrations/014_task_worktree.sql"),
@@ -3390,6 +3497,195 @@ mod tests {
         let deltas: Vec<&str> = captured.iter().map(|(_, d)| d.as_str()).collect();
         assert_eq!(deltas, vec!["Analy", "sing."], "the scripted deltas streamed to the sink");
         assert!(captured.iter().all(|(tid, _)| tid == &item.id.0), "deltas keyed by the task id");
+    }
+
+    // ---- Scope enforcement: effective scope, mode, plugins, denials ----
+
+    fn scope_team(role: Role, scope: Scope) -> Team {
+        let mut t = team("t", None, role, 8);
+        t.scope = scope;
+        t
+    }
+
+    #[test]
+    fn effective_scope_reads_the_run_artifacts_and_writes_its_own_folder() {
+        let t = scope_team(Role::Producer, Scope { reads: vec!["${target_repo}".into(), "docs".into()], ..Scope::default() });
+        let vars = PathVars::new("/p").with_target_repo("/repo");
+        let ws = effective_scope(&t, &vars, Some("/repo"), Path::new("/art"), "/art/t", None).unwrap();
+        assert_eq!(ws.reads, vec!["/repo".to_string(), "/repo/docs".into(), "/art".into()]);
+        assert_eq!(ws.writes, vec!["/art/t".to_string()]);
+    }
+
+    #[test]
+    fn an_implementer_writes_its_working_dir() {
+        let t = scope_team(Role::Implementer, Scope { writes: vec!["${target_repo}".into()], ..Scope::default() });
+        let vars = PathVars::new("/p").with_target_repo("/wt/alpha");
+        let ws = effective_scope(&t, &vars, Some("/wt/alpha"), Path::new("/art"), "/art/t", Some("public".into())).unwrap();
+        assert_eq!(ws.writes, vec!["/wt/alpha".to_string(), "/art/t".into()]);
+        assert!(ws.reads.contains(&"/art".to_string()));
+        assert_eq!(ws.repo_visibility.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn a_non_implementer_reads_its_working_dir_even_when_unlisted() {
+        let t = scope_team(Role::Reviewer, Scope::default());
+        let vars = PathVars::new("/p").with_target_repo("/repo");
+        let ws = effective_scope(&t, &vars, Some("/repo"), Path::new("/art"), "/art/t", None).unwrap();
+        assert!(ws.reads.contains(&"/repo".to_string()), "{ws:?}");
+        assert!(!ws.writes.contains(&"/repo".to_string()));
+    }
+
+    #[test]
+    fn an_unresolvable_scope_path_is_an_error() {
+        let t = scope_team(Role::Producer, Scope { reads: vec!["docs".into()], ..Scope::default() });
+        let err = effective_scope(&t, &PathVars::new("/p"), None, Path::new("/art"), "/art/t", None).unwrap_err();
+        assert!(err.contains("docs"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_implementer_binds_target_repo_to_its_worktree() {
+        let mut t = team("implementers", None, Role::Implementer, 8);
+        t.scope.writes = vec!["${target_repo}".into()];
+        let p = pipeline(vec![t]);
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
+        let mut ctx = ctx_with(fresh_pool().await, p, recorder.clone()).await;
+        ctx.target_repo = Some(PathBuf::from("/repo"));
+        ctx.worktree_provider = Some(Arc::new(RecordingProvider {
+            ensure_calls: Default::default(),
+            reset_calls: Default::default(),
+            returns: "/proj/worktrees/R-1/alpha".into(),
+        }));
+        seed_item(&ctx, "implementers", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let req = &recorder.received.lock().unwrap()[0];
+        assert!(req.add_dirs.contains(&"/proj/worktrees/R-1/alpha".to_string()), "{:?}", req.add_dirs);
+        assert!(!req.add_dirs.contains(&"/repo".to_string()), "the main repo is out of reach: {:?}", req.add_dirs);
+    }
+
+    #[tokio::test]
+    async fn a_downstream_team_on_a_worktree_reads_it_as_target_repo() {
+        let mut t = team("code-reviewers", None, Role::Reviewer, 8);
+        t.scope.reads = vec!["${target_repo}".into()];
+        let recorder = Arc::new(FakeRunner::always(reviewer_out(Verdict::Approve, "ok")));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![t]), recorder.clone()).await;
+        ctx.target_repo = Some(PathBuf::from("/repo"));
+        let item = seed_item(&ctx, "code-reviewers", "alpha").await;
+        ctx.tasks.set_worktree_path(&item.id.0, "/proj/worktrees/R-1/alpha").await.unwrap();
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let req = &recorder.received.lock().unwrap()[0];
+        assert!(req.add_dirs.contains(&"/proj/worktrees/R-1/alpha".to_string()), "{:?}", req.add_dirs);
+        assert!(!req.add_dirs.contains(&"/repo".to_string()), "{:?}", req.add_dirs);
+    }
+
+    #[tokio::test]
+    async fn the_permission_mode_follows_the_model_list() {
+        for (model, wired, expect) in [
+            ("claude-opus-4-7", true, agent_bus_core::PermissionMode::Auto),
+            ("haiku", true, agent_bus_core::PermissionMode::AcceptEdits),
+            ("claude-opus-4-7", false, agent_bus_core::PermissionMode::AcceptEdits),
+        ] {
+            let mut t = team("research", None, Role::Producer, 8);
+            t.runner.as_mut().unwrap().model = Some(model.into());
+            let recorder = Arc::new(FakeRunner::always(producer_out()));
+            let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![t]), recorder.clone()).await;
+            if wired {
+                ctx.model_list = Some(Arc::new(std::sync::RwLock::new(runners::curated_models::curated())));
+            }
+            seed_item(&ctx, "research", "alpha").await;
+            transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+            assert_eq!(recorder.received.lock().unwrap()[0].permission_mode, expect, "{model} wired={wired}");
+        }
+    }
+
+    #[tokio::test]
+    async fn grants_and_plugins_reach_the_request() {
+        let root = temp_root();
+        let sp = root.join("plugins/cache/official/superpowers/1.0.0");
+        std::fs::create_dir_all(&sp).unwrap();
+        std::fs::write(
+            root.join("plugins/installed_plugins.json"),
+            serde_json::json!({"version": 2, "plugins": {"superpowers@official": [{"installPath": sp.to_string_lossy()}]}}).to_string(),
+        )
+        .unwrap();
+        let mut t = team("research", None, Role::Producer, 8);
+        t.scope.grants = vec![agent_bus_core::ToolGrant::WebFetch];
+        t.scope.plugins = vec!["superpowers".into()];
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![t]), recorder.clone()).await;
+        ctx.plugin_resolver = Some(Arc::new(workspace::plugins::PluginResolver::new(&root)));
+        seed_item(&ctx, "research", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let req = &recorder.received.lock().unwrap()[0];
+        assert_eq!(req.plugin_dirs, vec![sp.to_string_lossy().into_owned()]);
+        assert_eq!(req.disallowed_tools, runners::scope::disallowed_tools(&[agent_bus_core::ToolGrant::WebFetch]));
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_plugin_fails_the_invocation_operationally() {
+        let mut t = team("research", None, Role::Producer, 8);
+        t.scope.plugins = vec!["ghost".into()];
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
+        let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![t]), recorder.clone()).await;
+        ctx.plugin_resolver = Some(Arc::new(workspace::plugins::PluginResolver::new(temp_root())));
+        seed_item(&ctx, "research", "alpha").await;
+        let out = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(matches!(out, StepOutcome::Failed { .. }), "{out:?}");
+        assert!(recorder.received.lock().unwrap().is_empty(), "nothing is spawned");
+    }
+
+    fn denials() -> Vec<agent_bus_core::PermissionDenial> {
+        use agent_bus_core::{DenialSource, PermissionDenial};
+        vec![
+            PermissionDenial { tool_name: "Bash".into(), tool_input: serde_json::json!({"command": "git push --force origin x"}), source: DenialSource::Rule },
+            PermissionDenial { tool_name: "Write".into(), tool_input: serde_json::json!({"file_path": "/repo/a.md"}), source: DenialSource::Classifier },
+        ]
+    }
+
+    #[tokio::test]
+    async fn denials_reach_the_audit_row_and_the_task_log_without_changing_the_outcome() {
+        let (pool, audit) = pool_with_audit().await;
+        let mut out = producer_out();
+        out.permission_denials = denials();
+        let mut ctx = ctx_with(pool, pipeline(vec![team("research", None, Role::Producer, 8)]), Arc::new(FakeRunner::always(out))).await;
+        ctx.audit = Some(audit.clone());
+        let seen: Arc<std::sync::Mutex<Vec<LogDelta>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        ctx.log_sink = Some(Arc::new(move |_task_id: &str| -> LogSink {
+            let s3 = s2.clone();
+            Box::new(move |d: &LogDelta| s3.lock().unwrap().push(d.clone()))
+        }));
+        let item = seed_item(&ctx, "research", "alpha").await;
+        let outcome = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(!matches!(outcome, StepOutcome::Failed { .. }), "{outcome:?}");
+        let rows = audit.list_for_task(&item.id.0).await.unwrap();
+        assert_eq!(rows[0].permission_denials, denials());
+        let logged: Vec<String> = seen.lock().unwrap().iter().filter(|d| d.kind == LogKind::Denial).map(|d| d.text.clone()).collect();
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(logged[0].contains("Bash") && logged[0].contains("rule") && logged[0].contains("git push --force origin x"), "{logged:?}");
+        assert!(logged[1].contains("Write") && logged[1].contains("classifier") && logged[1].contains("/repo/a.md"), "{logged:?}");
+    }
+
+    #[tokio::test]
+    async fn a_mode_mismatch_is_an_operational_failure_with_its_class_and_denials() {
+        let (pool, audit) = pool_with_audit().await;
+        let err = RunnerError::PermissionModeMismatch {
+            requested: "auto".into(),
+            actual: "default".into(),
+            usage: RunnerUsage { model: "m".into(), input_tokens: 3, output_tokens: 2, ..Default::default() },
+            denials: denials(),
+        };
+        let mut ctx = ctx_with(pool, pipeline(vec![team("research", None, Role::Producer, 8)]), Arc::new(FakeRunner::new(vec![Err(err)]))).await;
+        ctx.audit = Some(audit.clone());
+        let item = seed_item(&ctx, "research", "alpha").await;
+        let outcome = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert!(matches!(outcome, StepOutcome::Failed { .. }), "{outcome:?}");
+        let row = &audit.list_for_task(&item.id.0).await.unwrap()[0];
+        assert_eq!(row.outcome.as_deref(), Some("error:permission_mode_mismatch"));
+        assert_eq!(row.usage.input_tokens, 3);
+        assert_eq!(row.permission_denials, denials());
+        let back = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!(back.state, TaskState::Queued, "retried at the same stage");
+        assert_eq!(back.attempts, 2);
     }
 
     // ---- Structured output: kinds, failures, audit ----
