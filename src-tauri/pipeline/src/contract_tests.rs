@@ -10,7 +10,7 @@
 
 use crate::model::{Escalation, Gate, Pipeline, Role, Routes, RunnerConfig, Scope, Store, Team, Workers};
 use crate::draft::{DraftPipeline, DraftTeam, Slice, SliceTeam, TeamsSlice};
-use agent_bus_core::{EffortMode, RunnerKind};
+use agent_bus_core::{Effort, RunnerKind};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -25,7 +25,7 @@ fn full_runner() -> RunnerConfig {
     RunnerConfig {
         kind: RunnerKind::AnthropicApi,
         model: "claude-opus-4-7".into(),
-        effort: EffortMode::ExtendedHigh,
+        effort: Effort::Level("high".into()),
         // Some so the skip_serializing_if field appears (TS: api_key_env?).
         api_key_env: Some("ANTHROPIC_API_KEY".into()),
     }
@@ -93,8 +93,8 @@ fn runner_config_key_set_matches_ts() {
     let v = serde_json::to_value(full_runner()).unwrap();
     assert_eq!(keys(&v), set(&["kind", "model", "effort", "api_key_env"]));
     assert_eq!(v["kind"], Value::String("anthropic-api".into()));
-    // effort is the internally-tagged EffortMode object.
-    assert_eq!(v["effort"]["mode"], Value::String("extended-high".into()));
+    // effort is a bare level string.
+    assert_eq!(v["effort"], Value::String("high".into()));
 }
 
 /// `api_key_env` is optional in TS (`api_key_env?`): omitted entirely when None
@@ -104,11 +104,12 @@ fn runner_config_omits_api_key_env_when_none() {
     let rc = RunnerConfig {
         kind: RunnerKind::ClaudeCli,
         model: "m".into(),
-        effort: EffortMode::Standard,
+        effort: Effort::Default,
         api_key_env: None,
     };
     let v = serde_json::to_value(&rc).unwrap();
-    assert_eq!(keys(&v), set(&["kind", "model", "effort"]));
+    // Default effort omits the key (TS `effort?`).
+    assert_eq!(keys(&v), set(&["kind", "model"]));
     assert!(!v.as_object().unwrap().contains_key("api_key_env"));
 }
 
@@ -183,7 +184,7 @@ fn pipeline_defaults_key_appears_when_present() {
         defaults: Some(PipelineDefaults {
             default_runner: Some(RunnerKind::ClaudeCli),
             default_model: Some("m".into()),
-            default_effort: Some(EffortMode::Standard),
+            default_effort: Some(Effort::Level("low".into())),
         }),
         teams: vec![full_team()], gates: vec![], escalations: vec![], forks: vec![], joins: vec![],
     };

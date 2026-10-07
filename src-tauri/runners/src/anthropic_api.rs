@@ -26,10 +26,10 @@ pub const MAX_OUTPUT_TOKENS: u32 = 8192;
 
 /// Build the Messages API request body (pure). Maps InvocationRequest → the
 /// anthropic wire shape: model, system (operating prompt), one user message,
-/// max_tokens, and budget-driven extended thinking. Mirrors how the CLI runner
-/// maps the same fields to argv (`command.rs::build_args`).
+/// and max_tokens. Mirrors how the CLI runner maps the same fields to argv
+/// (`command.rs::build_args`).
 pub fn build_request_body(req: &InvocationRequest) -> Value {
-    let mut body = json!({
+    let body = json!({
         "model": req.model,
         "max_tokens": MAX_OUTPUT_TOKENS,
         "system": req.system_prompt,
@@ -37,16 +37,8 @@ pub fn build_request_body(req: &InvocationRequest) -> Value {
             { "role": "user", "content": req.user_message }
         ],
     });
-    // EffortMode→thinking budget, already resolved by the caller into
-    // thinking_budget (the SAME field the CLI runner consumes via
-    // --max-thinking-tokens). budget 0 = thinking off (omit the field),
-    // matching `EffortMode::Off`.
-    if req.thinking_budget > 0 {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": req.thinking_budget,
-        });
-    }
+    // No thinking field: effort levels are a CLI concept, and this runner is
+    // kept compiling but not maintained.
     body
 }
 
@@ -192,6 +184,7 @@ impl Runner for AnthropicApiRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_bus_core::Effort;
 
     const SAMPLE: &str = include_str!("fixtures/anthropic-messages-sample.json");
     const RATE_LIMIT: &str = include_str!("fixtures/anthropic-messages-rate-limit.json");
@@ -201,7 +194,7 @@ mod tests {
             task_id: "T-1".into(),
             team_id: "research".into(),
             model: "claude-opus-4-7".into(),
-            thinking_budget: 8192,
+            effort: Effort::Level("high".into()),
             system_prompt: "You are research.".into(),
             user_message: "Investigate topic X".into(),
             settings_path: "/tmp/s.json".into(),
@@ -219,16 +212,16 @@ mod tests {
         assert_eq!(body["system"], "You are research.");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "Investigate topic X");
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 8192);
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]
-    fn omits_thinking_when_budget_is_zero() {
-        let mut r = req();
-        r.thinking_budget = 0;
-        let body = build_request_body(&r);
-        assert!(body.get("thinking").is_none(), "thinking must be omitted at budget 0");
+    fn never_sends_a_thinking_field() {
+        for effort in [Effort::Default, Effort::Level("max".into())] {
+            let mut r = req();
+            r.effort = effort;
+            assert!(build_request_body(&r).get("thinking").is_none());
+        }
     }
 
     #[test]

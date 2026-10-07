@@ -27,9 +27,11 @@ pub fn build_chat_args(req: &ChatRequest, resume: Option<&str>) -> Vec<String> {
         req.system_prompt.clone(),
         "--model".into(),
         req.model.clone(),
-        "--max-thinking-tokens".into(),
-        req.thinking_budget.to_string(),
     ];
+    if let Some(level) = req.effort.level() {
+        args.push("--effort".into());
+        args.push(level.to_string());
+    }
     if let Some(session) = resume {
         args.push("--resume".into());
         args.push(session.to_string());
@@ -43,6 +45,7 @@ pub fn build_chat_args(req: &ChatRequest, resume: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::chat::ChatRequest;
+    use agent_bus_core::Effort;
 
     fn req() -> ChatRequest {
         ChatRequest {
@@ -50,7 +53,7 @@ mod tests {
             system_prompt: "You are the god terminal.".into(),
             user_message: "how is T-042 going?".into(),
             model: "claude-opus-4-8".into(),
-            thinking_budget: 8192,
+            effort: Effort::Level("high".into()),
             working_dir: None,
         }
     }
@@ -63,11 +66,12 @@ mod tests {
         assert_eq!(args[2], "stream-json");
         // --verbose is required for --print stream-json
         assert!(args.iter().any(|a| a == "--verbose"));
-        // model + budget present
+        // model + effort present
         let m = args.iter().position(|a| a == "--model").unwrap();
         assert_eq!(args[m + 1], "claude-opus-4-8");
-        let b = args.iter().position(|a| a == "--max-thinking-tokens").unwrap();
-        assert_eq!(args[b + 1], "8192");
+        let e = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[e + 1], "high");
+        assert!(!args.iter().any(|a| a == "--max-thinking-tokens"));
         // system prompt carried
         let s = args.iter().position(|a| a == "--append-system-prompt").unwrap();
         assert_eq!(args[s + 1], "You are the god terminal.");
@@ -83,6 +87,18 @@ mod tests {
         let r = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[r + 1], "sess-abc");
         // user message still last
+        assert_eq!(args.last().unwrap(), "how is T-042 going?");
+    }
+
+    #[test]
+    fn default_effort_passes_no_effort_flag() {
+        let mut r = req();
+        r.effort = Effort::Default;
+        let args = build_chat_args(&r, Some("sess-abc"));
+        assert!(!args.iter().any(|a| a == "--effort"));
+        assert!(!args.iter().any(|a| a == "--max-thinking-tokens"));
+        let resume = args.iter().position(|a| a == "--resume").unwrap();
+        assert!(resume < args.len() - 1);
         assert_eq!(args.last().unwrap(), "how is T-042 going?");
     }
 

@@ -305,6 +305,16 @@ mod tests {
     }
 
     #[test]
+    fn every_seed_team_uses_the_default_alias_and_default_effort() {
+        let d = seed_template("ddd-spec-plan-impl").unwrap();
+        assert!(!d.teams.is_empty());
+        for t in &d.teams {
+            assert_eq!(t.runner.model, "default", "{}", t.id);
+            assert_eq!(t.runner.effort, agent_bus_core::Effort::Default, "{}", t.id);
+        }
+    }
+
+    #[test]
     fn ddd_seed_is_a_clean_best_effort_draft() {
         // Every route points at a known node (team/gate/escalation) and every
         // team has a prompt — best-effort validation is silent.

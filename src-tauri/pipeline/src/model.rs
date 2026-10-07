@@ -2,7 +2,7 @@
 //! design spec (Data model → Pipeline definition). Pure data + serde; parsing
 //! lives in parse.rs and invariant enforcement in validate.rs.
 
-use agent_bus_core::{EffortMode, RunnerKind};
+use agent_bus_core::{Effort, RunnerKind};
 use serde::{Deserialize, Serialize};
 
 /// The current pipeline schema version. Pipeline Authoring ↔ Runtime is a
@@ -70,16 +70,13 @@ pub struct Team {
 pub struct RunnerConfig {
     pub kind: RunnerKind,
     pub model: String,
-    #[serde(default = "default_effort")]
-    pub effort: EffortMode,
+    /// Default (no `--effort` flag) is never written.
+    #[serde(default, skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
     /// Only meaningful for the anthropic-api runner kind (v1.1); ignored by
     /// the claude-cli runner. Kept optional so v1 claude-cli teams omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
-}
-
-fn default_effort() -> EffortMode {
-    EffortMode::Standard
 }
 
 /// Pipeline-level runner defaults (R5). Every field optional: a pipeline may
@@ -92,8 +89,8 @@ pub struct PipelineDefaults {
     pub default_runner: Option<RunnerKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_effort: Option<EffortMode>,
+    #[serde(default, skip_serializing_if = "agent_bus_core::effort_is_unset")]
+    pub default_effort: Option<Effort>,
 }
 
 /// A team's runner config as authored (R5): every field optional so a team can
@@ -107,8 +104,8 @@ pub struct TeamRunnerConfig {
     pub kind: Option<RunnerKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<EffortMode>,
+    #[serde(default, skip_serializing_if = "agent_bus_core::effort_is_unset")]
+    pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
 }
@@ -277,7 +274,7 @@ impl Team {
         RunnerConfig {
             kind: tr.kind.expect("resolved runner missing kind"),
             model: tr.model.clone().expect("resolved runner missing model"),
-            effort: tr.effort.expect("resolved runner missing effort"),
+            effort: tr.effort.clone().expect("resolved runner missing effort"),
             api_key_env: tr.api_key_env.clone(),
         }
     }
@@ -309,7 +306,7 @@ mod tests {
             runner: Some(TeamRunnerConfig {
                 kind: Some(RunnerKind::ClaudeCli),
                 model: Some("claude-opus-4-7".into()),
-                effort: Some(EffortMode::ExtendedHigh),
+                effort: Some(Effort::Level("high".into())),
                 api_key_env: None,
             }),
             scope: Scope::default(),
@@ -455,7 +452,7 @@ mod tests {
         let full = TeamRunnerConfig {
             kind: Some(RunnerKind::ClaudeCli),
             model: Some("m".into()),
-            effort: Some(EffortMode::Standard),
+            effort: Some(Effort::Level("high".into())),
             api_key_env: None,
         };
         let s = serde_json::to_string(&full).unwrap();
@@ -470,7 +467,7 @@ mod tests {
         let d2 = PipelineDefaults {
             default_runner: Some(RunnerKind::ClaudeCli),
             default_model: Some("claude-opus-4-8".into()),
-            default_effort: Some(EffortMode::ExtendedHigh),
+            default_effort: Some(Effort::Level("high".into())),
         };
         let s = serde_json::to_string(&d2).unwrap();
         let back: PipelineDefaults = serde_json::from_str(&s).unwrap();

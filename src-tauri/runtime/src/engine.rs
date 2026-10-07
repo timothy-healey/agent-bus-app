@@ -1358,7 +1358,7 @@ async fn invoke(
         task_id: task.id.0.clone(),
         team_id: team.id.clone(),
         model: effective.model.clone(),
-        thinking_budget: effective.effort.budget_tokens(),
+        effort: effective.effort.clone(),
         system_prompt,
         user_message,
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
@@ -1562,7 +1562,7 @@ fn sanitize_key(key: &str) -> String {
 pub(crate) mod test_support {
     //! Shared in-memory `EngineContext` builder for the engine tests (tasks 3–7).
     use super::*;
-    use agent_bus_core::{EffortMode, RunnerKind};
+    use agent_bus_core::{Effort, RunnerKind};
     use pipeline::model::{Role, Routes, Scope, Store, TeamRunnerConfig, Workers};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use sqlx::SqlitePool;
@@ -1589,7 +1589,7 @@ pub(crate) mod test_support {
             runner: Some(TeamRunnerConfig {
                 kind: Some(RunnerKind::ClaudeCli),
                 model: Some("claude-opus-4-7".into()),
-                effort: Some(EffortMode::Standard),
+                effort: Some(Effort::Default),
                 api_key_env: None,
             }),
             scope: Scope { reads: vec![], writes: vec![], tools: vec!["Read".into(), "Write".into()] },

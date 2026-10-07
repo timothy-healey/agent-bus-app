@@ -31,8 +31,10 @@ pub fn build_args(req: &InvocationRequest) -> Vec<String> {
     args.push("acceptEdits".into());
     args.push("--model".into());
     args.push(req.model.clone());
-    args.push("--max-thinking-tokens".into());
-    args.push(req.thinking_budget.to_string());
+    if let Some(level) = req.effort.level() {
+        args.push("--effort".into());
+        args.push(level.to_string());
+    }
     // The user message is the final positional argument.
     args.push(req.user_message.clone());
     args
@@ -57,13 +59,14 @@ pub fn sandbox_wrap(profile: &str, argv: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_bus_core::Effort;
 
     fn req() -> InvocationRequest {
         InvocationRequest {
             task_id: "T-1".into(),
             team_id: "research".into(),
             model: "claude-opus-4-7".into(),
-            thinking_budget: 32000,
+            effort: Effort::Level("high".into()),
             system_prompt: "You are research.".into(),
             user_message: "Investigate topic X".into(),
             settings_path: "/p/.agent-bus/runtime/T-1-research-1700.settings.json".into(),
@@ -81,12 +84,23 @@ mod tests {
         assert_eq!(args[2], "stream-json");
         // --verbose is required for --print stream-json
         assert!(args.iter().any(|a| a == "--verbose"));
-        // model + budget present
+        // model + effort present
         let model_i = args.iter().position(|a| a == "--model").unwrap();
         assert_eq!(args[model_i + 1], "claude-opus-4-7");
-        let budget_i = args.iter().position(|a| a == "--max-thinking-tokens").unwrap();
-        assert_eq!(args[budget_i + 1], "32000");
+        let effort_i = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[effort_i + 1], "high");
+        assert!(!args.iter().any(|a| a == "--max-thinking-tokens"));
         // user message is last
+        assert_eq!(args.last().unwrap(), "Investigate topic X");
+    }
+
+    #[test]
+    fn default_effort_passes_no_effort_flag() {
+        let mut r = req();
+        r.effort = Effort::Default;
+        let args = build_args(&r);
+        assert!(!args.iter().any(|a| a == "--effort"));
+        assert!(!args.iter().any(|a| a == "--max-thinking-tokens"));
         assert_eq!(args.last().unwrap(), "Investigate topic X");
     }
 

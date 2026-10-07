@@ -396,7 +396,7 @@ pub struct LlmEngine {
     dialogue_id: String,
     system_prompt: String,
     model: String,
-    thinking_budget: u32,
+    effort: agent_bus_core::Effort,
     delta: Option<ConversationDeltaEmitter>,
 }
 
@@ -406,9 +406,9 @@ impl LlmEngine {
         dialogue_id: String,
         system_prompt: String,
         model: String,
-        thinking_budget: u32,
+        effort: agent_bus_core::Effort,
     ) -> Self {
-        Self { runner, dialogue_id, system_prompt, model, thinking_budget, delta: None }
+        Self { runner, dialogue_id, system_prompt, model, effort, delta: None }
     }
 
     /// Attach a display-only delta emitter (root emits throttled conversation.delta).
@@ -426,7 +426,7 @@ impl ConversationEngine for LlmEngine {
             system_prompt: self.system_prompt.clone(),
             user_message: input.to_string(),
             model: self.model.clone(),
-            thinking_budget: self.thinking_budget,
+            effort: self.effort.clone(),
             working_dir: None,
         };
         // Display-only streaming when a delta emitter is attached; reset clears
@@ -523,7 +523,7 @@ pub struct AgenticChatEngine {
     dialogue_id: String,
     system_prompt_framing: String,
     model: String,
-    thinking_budget: u32,
+    effort: agent_bus_core::Effort,
     max_steps: usize,
     delta: Option<ConversationDeltaEmitter>,
 }
@@ -537,7 +537,7 @@ impl AgenticChatEngine {
         dialogue_id: String,
         system_prompt_framing: String,
         model: String,
-        thinking_budget: u32,
+        effort: agent_bus_core::Effort,
     ) -> Self {
         Self {
             runner,
@@ -546,7 +546,7 @@ impl AgenticChatEngine {
             dialogue_id,
             system_prompt_framing,
             model,
-            thinking_budget,
+            effort,
             max_steps: MAX_STEPS,
             delta: None,
         }
@@ -581,7 +581,7 @@ impl ConversationEngine for AgenticChatEngine {
                 system_prompt: system_prompt.clone(),
                 user_message: next_user_message.clone(),
                 model: self.model.clone(),
-                thinking_budget: self.thinking_budget,
+                effort: self.effort.clone(),
                 working_dir: None,
             };
 
@@ -1827,7 +1827,7 @@ pub fn run() {
                          and inspect the pipeline (tasks, gates, usage, the brake). Be concise."
                             .into(),
                         agent_bus_core::DEFAULT_MODEL.into(),
-                        8192,
+                        agent_bus_core::Effort::Level("high".into()),
                     ).with_delta_sink(Some(make_conversation_delta_sink(handle.clone()))));
                 let engine: Arc<dyn conversational_control::engine::ConversationEngine> =
                     Arc::new(CompositeEngine::new(command_engine, agentic_engine));
@@ -2336,7 +2336,7 @@ mod llm_engine_tests {
             text: "T-042 is in design.".into(),
             usage: ChatUsage::default(),
         }]));
-        let engine = LlmEngine::new(fake.clone() as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192);
+        let engine = LlmEngine::new(fake.clone() as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), agent_bus_core::Effort::Level("high".into()));
         let catalog = ToolCatalog::new(vec![]);
         let reply = engine.respond("how is T-042 going?", &catalog).await;
         assert_eq!(reply.text, "T-042 is in design.");
@@ -2356,7 +2356,7 @@ mod llm_engine_tests {
             usage: ChatUsage::default(),
         }]));
         let engine: Arc<dyn ConversationEngine> =
-            Arc::new(LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192));
+            Arc::new(LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), agent_bus_core::Effort::Level("high".into())));
         let catalog = ToolCatalog::new(vec![]);
 
         let convo = send_message_inner("p", &catalog, engine.as_ref(), &store, "hi there", 500)
@@ -2375,7 +2375,7 @@ mod llm_engine_tests {
     #[tokio::test]
     async fn llm_engine_surfaces_a_chat_error_as_an_error_turn() {
         let fake = Arc::new(FakeChatRunner::failing(llm_chat::chat::ChatError::Spawn("no claude on PATH".into())));
-        let engine = LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), 8192);
+        let engine = LlmEngine::new(fake as Arc<dyn ChatRunner>, "p".into(), "framing".into(), "m".into(), agent_bus_core::Effort::Level("high".into()));
         let catalog = ToolCatalog::new(vec![]);
         let reply = engine.respond("hi", &catalog).await;
         // a clear error turn, no panic, no tool calls
@@ -2725,7 +2725,7 @@ mod composite_engine_tests {
             "p".into(),
             "You are the god terminal.".into(),
             "m".into(),
-            8192,
+            agent_bus_core::Effort::Level("high".into()),
         )
     }
 
@@ -2854,7 +2854,7 @@ mod composite_engine_tests {
             "p".into(),
             "You are the god terminal.".into(),
             "m".into(),
-            8192,
+            agent_bus_core::Effort::Level("high".into()),
         )
     }
 

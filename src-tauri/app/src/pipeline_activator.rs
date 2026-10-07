@@ -542,14 +542,14 @@ mod tests {
 #[cfg(test)]
 mod runner_factory_tests {
     use super::runner_for;
-    use agent_bus_core::{EffortMode, RunnerKind};
+    use agent_bus_core::{Effort, RunnerKind};
     use pipeline::model::RunnerConfig;
 
     fn cfg(kind: RunnerKind, api_key_env: Option<&str>) -> RunnerConfig {
         RunnerConfig {
             kind,
             model: "claude-opus-4-7".into(),
-            effort: EffortMode::Standard,
+            effort: Effort::Default,
             api_key_env: api_key_env.map(|s| s.to_string()),
         }
     }

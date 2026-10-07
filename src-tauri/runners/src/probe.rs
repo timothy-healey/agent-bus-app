@@ -35,7 +35,7 @@ pub fn probe_request(model: &str) -> InvocationRequest {
         task_id: "probe".into(),
         team_id: "probe".into(),
         model: model.to_string(),
-        thinking_budget: 0,
+        effort: agent_bus_core::Effort::Default,
         system_prompt: "Reply with the single token: ok".into(),
         user_message: "ok".into(),
         settings_path: String::new(),
@@ -98,7 +98,7 @@ mod tests {
     fn probe_request_is_one_token_shaped() {
         let req = probe_request("claude-opus-4-8");
         assert_eq!(req.model, "claude-opus-4-8");
-        assert_eq!(req.thinking_budget, 0);
+        assert_eq!(req.effort, agent_bus_core::Effort::Default);
         assert!(!req.user_message.is_empty());
     }
 

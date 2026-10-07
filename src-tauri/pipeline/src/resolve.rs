@@ -2,25 +2,25 @@
 //! `TeamRunnerConfig` on `Pipeline.defaults`, producing a Pipeline whose every
 //! team holds a fully-specified runner. Runtime consumes the resolved pipeline
 //! and never learns about defaults (DOMAIN.md: no resolution logic leaks into
-//! Runtime). Base fallbacks (claude-cli / standard effort) apply only when
+//! Runtime). Base fallbacks (claude-cli / Default effort) apply only when
 //! neither the team nor the pipeline default supplies a value; `model` has no
 //! base fallback (an unspecified model is a validation error, not a guess).
 
 use crate::model::{Pipeline, PipelineDefaults, TeamRunnerConfig};
-use agent_bus_core::{EffortMode, RunnerKind};
+use agent_bus_core::{Effort, RunnerKind};
 
 /// Overlay one team's authored runner over the pipeline defaults.
 /// Precedence: team field > pipeline default > base fallback. `model` may end
 /// up None (no base fallback) — validation rejects that.
 fn resolve_one(team: &TeamRunnerConfig, defaults: Option<&PipelineDefaults>) -> TeamRunnerConfig {
     let (dk, dm, de) = match defaults {
-        Some(d) => (d.default_runner, d.default_model.clone(), d.default_effort),
+        Some(d) => (d.default_runner, d.default_model.clone(), d.default_effort.clone()),
         None => (None, None, None),
     };
     TeamRunnerConfig {
         kind: team.kind.or(dk).or(Some(RunnerKind::ClaudeCli)),
         model: team.model.clone().or(dm),
-        effort: team.effort.or(de).or(Some(EffortMode::Standard)),
+        effort: team.effort.clone().or(de).or(Some(Effort::Default)),
         api_key_env: team.api_key_env.clone(),
     }
 }
@@ -48,7 +48,7 @@ pub fn is_fully_resolved(r: &TeamRunnerConfig) -> bool {
 mod tests {
     use super::*;
     use crate::model::{Pipeline, PipelineDefaults, Routes, Scope, Team, TeamRunnerConfig, Workers};
-    use agent_bus_core::{EffortMode, RunnerKind};
+    use agent_bus_core::{Effort, RunnerKind};
 
     fn team_with(id: &str, runner: Option<TeamRunnerConfig>) -> Team {
         Team {
@@ -78,7 +78,7 @@ mod tests {
             Some(PipelineDefaults {
                 default_runner: Some(RunnerKind::ClaudeCli),
                 default_model: Some("claude-opus-4-8".into()),
-                default_effort: Some(EffortMode::ExtendedHigh),
+                default_effort: Some(Effort::Level("high".into())),
             }),
             vec![team_with("research", None)],
         );
@@ -86,7 +86,7 @@ mod tests {
         let er = r.teams[0].effective_runner();
         assert_eq!(er.kind, RunnerKind::ClaudeCli);
         assert_eq!(er.model, "claude-opus-4-8");
-        assert_eq!(er.effort, EffortMode::ExtendedHigh);
+        assert_eq!(er.effort, Effort::Level("high".into()));
     }
 
     #[test]
@@ -95,7 +95,7 @@ mod tests {
             Some(PipelineDefaults {
                 default_runner: Some(RunnerKind::ClaudeCli),
                 default_model: Some("default-model".into()),
-                default_effort: Some(EffortMode::Standard),
+                default_effort: Some(Effort::Level("low".into())),
             }),
             vec![team_with("research", Some(TeamRunnerConfig {
                 model: Some("override-model".into()),
@@ -104,7 +104,7 @@ mod tests {
         );
         let er = resolve_defaults(&p).teams[0].effective_runner();
         assert_eq!(er.model, "override-model"); // team wins
-        assert_eq!(er.effort, EffortMode::Standard); // inherited
+        assert_eq!(er.effort, Effort::Level("low".into())); // inherited
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
         }))]);
         let er = resolve_defaults(&p).teams[0].effective_runner();
         assert_eq!(er.kind, RunnerKind::ClaudeCli);
-        assert_eq!(er.effort, EffortMode::Standard);
+        assert_eq!(er.effort, Effort::Default);
         assert_eq!(er.model, "m");
     }
 
@@ -132,7 +132,7 @@ mod tests {
     fn resolve_is_idempotent_on_a_full_runner() {
         let full = TeamRunnerConfig::from_full(crate::model::RunnerConfig {
             kind: RunnerKind::AnthropicApi, model: "x".into(),
-            effort: EffortMode::ExtendedLow, api_key_env: Some("K".into()),
+            effort: Effort::Level("low".into()), api_key_env: Some("K".into()),
         });
         let p = pipeline_with(None, vec![team_with("t", Some(full.clone()))]);
         let once = resolve_defaults(&p);

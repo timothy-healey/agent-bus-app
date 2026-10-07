@@ -116,8 +116,8 @@ pub struct InvocationRequest {
     pub task_id: String,
     pub team_id: String,
     pub model: String,
-    /// Thinking-token budget, already resolved from EffortMode by the caller.
-    pub thinking_budget: u32,
+    /// The `--effort` level, or Default for no flag.
+    pub effort: agent_bus_core::Effort,
     /// The team's operating prompt (already read from prompts/<team>.md).
     pub system_prompt: String,
     /// The user message handed to the model (e.g. the topic, or revise notes).
@@ -283,7 +283,7 @@ mod tests {
         let fake = FakeRunner::always(out);
         let req = InvocationRequest {
             task_id: "T".into(), team_id: "t".into(), model: "m".into(),
-            thinking_budget: 0, system_prompt: String::new(), user_message: String::new(),
+            effort: agent_bus_core::Effort::Default, system_prompt: String::new(), user_message: String::new(),
             settings_path: String::new(), add_dirs: vec![],
             sandbox_profile: None,
             working_dir: None,

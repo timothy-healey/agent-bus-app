@@ -407,7 +407,7 @@ fn forward_reachable_from<'a>(
 mod tests {
     use super::*;
     use crate::model::{Escalation, Gate, Role, Routes, Scope, Store, Team, TeamRunnerConfig, Workers};
-    use agent_bus_core::{EffortMode, RunnerKind};
+    use agent_bus_core::{Effort, RunnerKind};
 
     fn team(id: &str, approve: Option<&str>) -> Team {
         Team {
@@ -417,7 +417,7 @@ mod tests {
             runner: Some(TeamRunnerConfig {
                 kind: Some(RunnerKind::ClaudeCli),
                 model: Some("m".into()),
-                effort: Some(EffortMode::Standard),
+                effort: Some(Effort::Default),
                 api_key_env: None,
             }),
             scope: Scope::default(),
