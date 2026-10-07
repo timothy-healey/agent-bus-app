@@ -151,6 +151,19 @@ pub fn parse_get_usage(stdout: &str, now: i64) -> Result<UtilizationReading, Str
     Err("no usage response from claude".into())
 }
 
+/// SIGKILL `claude` and everything it started (MCP servers, hook shells): on
+/// unix the child leads its own process group, so the whole group is signalled.
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
 /// Production source: spawns `claude` and sends `get_usage`.
 pub struct ClaudeCliUtilizationSource {
     bin: String,
@@ -175,14 +188,18 @@ impl Default for ClaudeCliUtilizationSource {
 
 impl UtilizationSource for ClaudeCliUtilizationSource {
     fn fetch(&self) -> Result<UtilizationReading, String> {
-        let mut child = Command::new(&self.bin)
-            .args(ARGS)
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(ARGS)
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("could not start claude: {e}"))?;
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0); // claude leads a fresh group; pgid == child pid
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("could not start claude: {e}"))?;
 
         // Take stdout immediately and read it on a separate thread to avoid pipe-fill deadlock.
         let stdout = child.stdout.take();
@@ -210,7 +227,7 @@ impl UtilizationSource for ClaudeCliUtilizationSource {
                     Ok(Some(_)) => return, // Child exited
                     Ok(None) if Instant::now() >= deadline => {
                         // Deadline passed; force kill and wait (killed process reaps promptly).
-                        let _ = child.kill();
+                        kill_group(child);
                         let _ = child.wait();
                         return;
                     }
@@ -227,7 +244,7 @@ impl UtilizationSource for ClaudeCliUtilizationSource {
             match rx.recv_timeout(remaining) {
                 Ok(data) => break data,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let _ = child.kill();
+                    kill_group(&mut child);
                     bounded_reap(&mut child, deadline);
                     return Err("usage query timed out".into());
                 }
@@ -401,6 +418,41 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(src.fetch().unwrap_err(), "usage query timed out");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_source_timeout_kills_the_whole_process_group() {
+        let (dir, bin) = script("");
+        let pid_file = dir.join("grandchild.pid");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\nsleep 30 &\necho $! > '{}'\nsleep 30\n", pid_file.display()),
+        )
+        .unwrap();
+        let src = ClaudeCliUtilizationSource::with_bin(bin, std::time::Duration::from_millis(500));
+        assert_eq!(src.fetch().unwrap_err(), "usage query timed out");
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        // A killed grandchild is reparented to init and reaped; until then it is a zombie,
+        // which kill(pid, 0) still reports, so also accept the zombie state via `ps`.
+        let alive = |pid: i32| {
+            (unsafe { libc::kill(pid, 0) }) == 0
+                && std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .map(|o| !String::from_utf8_lossy(&o.stdout).trim_start().starts_with('Z'))
+                    .unwrap_or(true)
+        };
+        while alive(pid) && std::time::Instant::now() < gone_by {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let still_alive = alive(pid);
+        if still_alive {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(!still_alive, "grandchild {pid} survived the timeout kill");
         let _ = std::fs::remove_dir_all(dir);
     }
 
