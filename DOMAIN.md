@@ -63,7 +63,7 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 ### Pipeline Authoring
 - **Pipeline** — the graph: a versioned (`schema_version`) collection of teams, gates, escalations
 - **Team** — a node in the graph with one prompt, one scope, one runner config (a team may inherit the pipeline-level default and override fields selectively — R5; the *resolved* team always has exactly one fully-specified runner config)
-- **Role** — a team is a *producer* — hands its output forward without a verdict — or a *reviewer* — emits an approve/revise/reject verdict on each item it sees; default **producer** (vet F8). `Team.role` (additive enum, serialized lowercase). The graph builder reads it for role-aware edges; routing/verdict semantics consume it in the runtime-behavior chunk.
+- **Role** — a team is a *producer* — hands its output forward without a verdict — or a *reviewer* — emits an approve/revise/reject verdict on each item it sees; default **producer** (vet F8). `Team.role` (additive enum, serialized lowercase). The graph builder reads it for role-aware edges; Runtime routes a reviewer's verdict on every edge kind (revise → back to the producer, reject → escalation).
 - **Store** — a team's bounded **input buffer**; `capacity` is the WIP limit that drives backpressure to the upstream when full (`Team.store.capacity`, default 8; validated ≥ 1). The generator (source) team has no input store. Occupancy enforcement lands in the runtime-behavior chunk.
 - **Scale** — a team's worker-pool sizing dial: `workers.min` (the always-on floor) and `workers.max` (the ceiling). Renamed from `workers.default` to `workers.min` so the code matches the context-map invariant `workers.count ≥ team.workers.min` (vet F2). UI label: "Scale (min·max)".
 - **Pipeline defaults / effective runner config** — `Pipeline.defaults` (`default_runner` / `default_model` / `default_effort`) supply runner config that teams inherit when they omit their own (R5). The **effective runner config** is a team's runner after the pipeline defaults are overlaid; Pipeline Authoring resolves it at load (`resolve.rs`) so Runtime always consumes a fully-specified `RunnerConfig` and never learns about defaults.
@@ -86,7 +86,8 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Claim** — the atomic act of a worker taking a task from inbox to working (`queued → running`)
 - **Settle** — the worker finishing; emits a verdict event. Under the engine this is `transform_once` committing the produced item into the reserved downstream slot (or a gate/fork/join routing) — the verdict moment is unchanged.
 - **Stream (live log)** — while a worker runs, its invocation may **stream** display-only log deltas in addition to its terminal **Settle**. Streaming is a side channel for live display (R4); **Settle** remains the single verdict moment. The deltas never influence settle/route.
-- **Verdict** — `approve` | `revise` | `reject`
+- **Verdict** — a reviewer's `approve` | `revise` | `reject` on an item, always with a **reason**. The reason is kept as a review comment and reaches the producer on revise.
+- **Structured output** — the schema-validated object a worker returns: its items (generator), its artifact (producer), or its verdict and reason (reviewer). The only channel for a worker's result; prose is never parsed for it.
 - **Attempts** — counter incremented on revise; capped at 3
 - **Brake** — system-wide flag halting new claims (in-flight workers complete)
 - **Fan-out group** — the `FanOutGroup` aggregate (root `group_id`) owning the *completes-exactly-once* barrier invariant; the lane sibling Tasks reference it
