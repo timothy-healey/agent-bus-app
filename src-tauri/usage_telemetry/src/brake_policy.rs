@@ -44,16 +44,19 @@ pub fn watched_fraction(reading: &UtilizationReading, now: i64) -> Option<f64> {
 }
 
 /// The auto-brake decision from a real reading. Without a reading, or when the
-/// last poll failed, the brake is left as it is.
+/// last poll failed, or the brake is on for a reason the auto-meter didn't
+/// set, the brake is left as it is.
 pub fn decide_utilization(
     reading: Option<&UtilizationReading>,
     available: bool,
     now: i64,
     auto_on: bool,
+    brake_on: bool,
     brake_on_pct: f64,
     brake_off_pct: f64,
 ) -> BrakeDecision {
-    if !available {
+    // A brake the auto-meter didn't set is never taken over or released by it.
+    if !available || (brake_on && !auto_on) {
         return BrakeDecision::NoChange;
     }
     match reading.and_then(|r| watched_fraction(r, now)) {
@@ -103,35 +106,47 @@ mod tests {
 
     #[test]
     fn session_at_95_sets_the_brake() {
-        assert_eq!(decide_utilization(Some(&r(95.0, 2.0, 0.0, 5_000)), true, 100, false, 0.95, 0.85), BrakeDecision::SetOn(AUTO_METER_REASON.into()));
+        assert_eq!(decide_utilization(Some(&r(95.0, 2.0, 0.0, 5_000)), true, 100, false, false, 0.95, 0.85), BrakeDecision::SetOn(AUTO_METER_REASON.into()));
     }
 
     #[test]
     fn weekly_at_95_sets_the_brake() {
-        assert_eq!(decide_utilization(Some(&r(10.0, 96.0, 0.0, 5_000)), true, 100, false, 0.95, 0.85), BrakeDecision::SetOn(AUTO_METER_REASON.into()));
+        assert_eq!(decide_utilization(Some(&r(10.0, 96.0, 0.0, 5_000)), true, 100, false, false, 0.95, 0.85), BrakeDecision::SetOn(AUTO_METER_REASON.into()));
     }
 
     #[test]
     fn model_scoped_limits_never_brake() {
-        assert_eq!(decide_utilization(Some(&r(10.0, 2.0, 100.0, 5_000)), true, 100, false, 0.95, 0.85), BrakeDecision::NoChange);
+        assert_eq!(decide_utilization(Some(&r(10.0, 2.0, 100.0, 5_000)), true, 100, false, false, 0.95, 0.85), BrakeDecision::NoChange);
     }
 
     #[test]
     fn release_needs_both_watched_limits_below_85() {
-        assert_eq!(decide_utilization(Some(&r(80.0, 90.0, 0.0, 5_000)), true, 100, true, 0.95, 0.85), BrakeDecision::NoChange);
-        assert_eq!(decide_utilization(Some(&r(80.0, 84.0, 0.0, 5_000)), true, 100, true, 0.95, 0.85), BrakeDecision::Release);
+        assert_eq!(decide_utilization(Some(&r(80.0, 90.0, 0.0, 5_000)), true, 100, true, true, 0.95, 0.85), BrakeDecision::NoChange);
+        assert_eq!(decide_utilization(Some(&r(80.0, 84.0, 0.0, 5_000)), true, 100, true, true, 0.95, 0.85), BrakeDecision::Release);
     }
 
     #[test]
     fn an_expired_session_counts_as_zero_and_releases() {
         // session read 99% but its window reset at t=50; now is t=100.
-        assert_eq!(decide_utilization(Some(&r(99.0, 2.0, 0.0, 50)), true, 100, true, 0.95, 0.85), BrakeDecision::Release);
+        assert_eq!(decide_utilization(Some(&r(99.0, 2.0, 0.0, 50)), true, 100, true, true, 0.95, 0.85), BrakeDecision::Release);
     }
 
     #[test]
     fn no_reading_or_unavailable_changes_nothing() {
-        assert_eq!(decide_utilization(None, true, 100, false, 0.95, 0.85), BrakeDecision::NoChange);
-        assert_eq!(decide_utilization(Some(&r(99.0, 2.0, 0.0, 5_000)), false, 100, false, 0.95, 0.85), BrakeDecision::NoChange);
-        assert_eq!(decide_utilization(Some(&r(10.0, 2.0, 0.0, 5_000)), false, 100, true, 0.95, 0.85), BrakeDecision::NoChange);
+        assert_eq!(decide_utilization(None, true, 100, false, false, 0.95, 0.85), BrakeDecision::NoChange);
+        assert_eq!(decide_utilization(Some(&r(99.0, 2.0, 0.0, 5_000)), false, 100, false, false, 0.95, 0.85), BrakeDecision::NoChange);
+        assert_eq!(decide_utilization(Some(&r(10.0, 2.0, 0.0, 5_000)), false, 100, true, true, 0.95, 0.85), BrakeDecision::NoChange);
+    }
+
+    #[test]
+    fn a_brake_set_for_another_reason_is_never_taken_over_or_released() {
+        assert_eq!(decide_utilization(Some(&r(99.0, 2.0, 0.0, 5_000)), true, 100, false, true, 0.95, 0.85), BrakeDecision::NoChange);
+        assert_eq!(decide_utilization(Some(&r(10.0, 2.0, 0.0, 5_000)), true, 100, false, true, 0.95, 0.85), BrakeDecision::NoChange);
+    }
+
+    #[test]
+    fn auto_brake_still_releases_and_trips() {
+        assert_eq!(decide_utilization(Some(&r(80.0, 2.0, 0.0, 5_000)), true, 100, true, true, 0.95, 0.85), BrakeDecision::Release);
+        assert_eq!(decide_utilization(Some(&r(96.0, 2.0, 0.0, 5_000)), true, 100, false, false, 0.95, 0.85), BrakeDecision::SetOn(AUTO_METER_REASON.into()));
     }
 }

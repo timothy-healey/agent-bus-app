@@ -1920,7 +1920,7 @@ pub fn run() {
                             if cfg.auto_meter_enabled {
                                 let stored = util.load().await;
                                 let auto_on = brake.state().reason.as_deref() == Some(AUTO_METER_REASON);
-                                match decide_utilization(stored.reading.as_ref(), stored.available(), now, auto_on, cfg.brake_on_pct, cfg.brake_off_pct) {
+                                match decide_utilization(stored.reading.as_ref(), stored.available(), now, auto_on, brake.is_on(), cfg.brake_on_pct, cfg.brake_off_pct) {
                                     BrakeDecision::SetOn(reason) => {
                                         // A soft brake: blocks new claims, never kills in-flight work.
                                         brake.set_on(reason.as_str());
