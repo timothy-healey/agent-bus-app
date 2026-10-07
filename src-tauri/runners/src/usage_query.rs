@@ -195,6 +195,23 @@ impl UtilizationSource for ClaudeCliUtilizationSource {
             let _ = stdin.write_all(GET_USAGE_REQUEST.as_bytes());
         }
 
+        // Helper: reap child with bounded try_wait up to deadline.
+        let bounded_reap = |child: &mut std::process::Child, deadline: Instant| {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return, // Child exited
+                    Ok(None) if Instant::now() >= deadline => {
+                        // Deadline passed; force kill and wait (killed process reaps promptly).
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(30)),
+                    Err(_) => return, // Error reaping; give up
+                }
+            }
+        };
+
         // Wait for stdout data or timeout, bounded by the overall timeout.
         let deadline = Instant::now() + self.timeout;
         let out = loop {
@@ -203,19 +220,19 @@ impl UtilizationSource for ClaudeCliUtilizationSource {
                 Ok(data) => break data,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    bounded_reap(&mut child, deadline);
                     return Err("usage query timed out".into());
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // Reader thread panicked or closed; try to wait for child and read any remaining data.
-                    let _ = child.wait();
+                    // Reader thread panicked or closed; bounded reap then break.
+                    bounded_reap(&mut child, deadline);
                     break String::new();
                 }
             }
         };
 
-        // Reap the child if not already reaped.
-        let _ = child.wait();
+        // Reap the child with bounded try_wait (child may still be running if it closed stdout early).
+        bounded_reap(&mut child, deadline);
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         parse_get_usage(&out, now)
@@ -371,6 +388,28 @@ mod tests {
         let _ = src.fetch();
         let elapsed = started.elapsed();
         assert!(elapsed < std::time::Duration::from_secs(3), "fetch took too long: {:?}", elapsed);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_source_child_reap_bounded_by_deadline() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fixtures/get-usage-sample.jsonl");
+        // Binary prints fixture, closes stdout (exec 1>&-), then sleeps 30s
+        // The read completes when stdout closes, but the child keeps running.
+        // Bounded reap must not block indefinitely.
+        let (dir, bin) = script(&format!(
+            "cat > /dev/null\ncat '{}'\nexec 1>&-\nsleep 30",
+            fixture.display()
+        ));
+        let src = ClaudeCliUtilizationSource::with_bin(bin, std::time::Duration::from_secs(1));
+        let started = std::time::Instant::now();
+        let r = src.fetch();
+        let elapsed = started.elapsed();
+        // Must return Ok (data was complete) and finish within ~3s despite child still running
+        assert!(r.is_ok(), "fetch should succeed: {:?}", r);
+        assert_eq!(r.unwrap().limits[0].utilization_pct, 41.0);
+        assert!(elapsed < std::time::Duration::from_secs(3), "fetch reap took too long: {:?}", elapsed);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
