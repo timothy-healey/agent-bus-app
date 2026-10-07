@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type CommentKind = "inline" | "direction";
+export type CommentKind = "inline" | "direction" | "review";
 export type Verdict = "approve" | "revise" | "reject";
 
 export interface Comment {

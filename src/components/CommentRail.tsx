@@ -8,8 +8,16 @@ export interface CommentRailProps {
   activeId?: string;
 }
 
+/// A review comment's note is `<team>: <verdict>. <reason>`; split off the team
+/// so it shows as the author.
+export function splitReviewNote(note: string): { team: string; body: string } {
+  const i = note.indexOf(": ");
+  return i > 0 ? { team: note.slice(0, i), body: note.slice(i + 2) } : { team: "", body: note };
+}
+
 export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentRailProps) {
   const inline = comments.filter((c) => c.kind === "inline");
+  const reviews = comments.filter((c) => c.kind === "review");
   const addressed = inline.filter((c) => c.status === "addressed").length;
 
   const rail: CSSProperties = {
@@ -30,7 +38,47 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
     justifyContent: "space-between",
   };
 
-  if (inline.length === 0) {
+  const badge: CSSProperties = {
+    marginLeft: 6,
+    fontSize: 9.5,
+    color: "var(--accent)",
+    border: "1px solid var(--accent)",
+    borderRadius: "var(--r-xs)",
+    padding: "0 5px",
+    textTransform: "lowercase",
+  };
+  const bodyStyle: CSSProperties = {
+    color: "var(--text)",
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    fontSize: 12,
+    marginLeft: 22,
+    lineHeight: 1.45,
+  };
+
+  // A reviewer team's verdict and reason: not anchored to a span, so it is not
+  // numbered and does not count toward the inline comments.
+  const reviewEntries = reviews.map((c) => {
+    const { team, body } = splitReviewNote(c.note);
+    return (
+      <div
+        key={c.id}
+        data-kind="review"
+        style={{
+          padding: "10px 14px",
+          borderBottom: "1px solid var(--border)",
+          background: c.id === activeId ? "var(--accent-2)" : "transparent",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", marginLeft: 22 }}>
+          <span style={{ color: "var(--text-3)", fontSize: 10.5 }}>{team}</span>
+          <span style={badge}>review</span>
+        </div>
+        <div style={{ ...bodyStyle, marginTop: 6 }}>{body}</div>
+      </div>
+    );
+  });
+
+  if (inline.length === 0 && reviews.length === 0) {
     return (
       <div style={rail}>
         <div style={head}>
@@ -62,6 +110,7 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
             : `${inline.length} comment${inline.length === 1 ? "" : "s"}`}
         </span>
       </div>
+      {reviewEntries}
       {inline.map((c, idx) => {
         const active = c.id === activeId;
         const isAddressed = c.status === "addressed";
@@ -107,7 +156,7 @@ export function CommentRail({ comments, onSelect, onDelete, activeId }: CommentR
           lineHeight: 1.45,
         };
         return (
-          <div key={c.id} data-status={c.status} style={entry} onClick={() => onSelect(c.id)}>
+          <div key={c.id} data-kind="inline" data-status={c.status} style={entry} onClick={() => onSelect(c.id)}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span>
                 <span style={marker}>{idx + 1}</span>
