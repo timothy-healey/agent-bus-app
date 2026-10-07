@@ -53,6 +53,12 @@ pub fn review_note(team: &str, verdict: agent_bus_core::Verdict, reason: &str) -
     format!("{team}: {v}. {}", reason.trim())
 }
 
+/// Whether a review note (as written by `review_note`) records an approval.
+/// An approval asks for nothing, so it is not feedback for the producer.
+pub fn is_approving_review(note: &str) -> bool {
+    note.split_once(": ").is_some_and(|(_, rest)| rest.starts_with("approve."))
+}
+
 /// Compose the user message for an invocation. On a fresh run (no reader, or an
 /// empty bundle) returns the topic unchanged. On a re-claim with a bundle,
 /// appends a deterministic, prompt-shaped revision request: the newest overall
@@ -70,7 +76,8 @@ pub async fn compose_invocation_message(
         return topic.to_string();
     }
     let Some(reader) = reader else { return topic.to_string() };
-    let bundle = reader.load(run_id, item_key).await;
+    let mut bundle = reader.load(run_id, item_key).await;
+    bundle.notes.retain(|n| !(n.kind == "review" && is_approving_review(&n.note)));
     if bundle.notes.is_empty() {
         return topic.to_string();
     }
@@ -183,6 +190,18 @@ mod tests {
         assert!(msg.contains("- spec-review: revise. error handling is thin"));
         assert!(msg.contains("1. \"retry\" -> bound it"));
         assert!(!msg.contains('—'));
+    }
+
+    #[tokio::test]
+    async fn an_approving_review_is_not_feedback_to_act_on() {
+        let approve = note("review", None, &review_note("research-review", agent_bus_core::Verdict::Approve, "solid"));
+        let revise = note("review", None, &review_note("spec-review", agent_bus_core::Verdict::Revise, "thin"));
+        let reader = FakeRevisionReader { bundle: RevisionBundle { notes: vec![approve.clone(), revise] } };
+        let msg = compose_invocation_message("t", 2, Some(&reader), "R-1", "alpha").await;
+        assert!(msg.contains("spec-review: revise. thin"));
+        assert!(!msg.contains("solid"), "{msg}");
+        let only_approve = FakeRevisionReader { bundle: RevisionBundle { notes: vec![approve] } };
+        assert_eq!(compose_invocation_message("t", 2, Some(&only_approve), "R-1", "alpha").await, "t");
     }
 
     #[tokio::test]

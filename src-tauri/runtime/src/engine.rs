@@ -1491,12 +1491,17 @@ async fn invoke(
 
     // Compose the user message: the topic on a fresh pass, the topic + the
     // persisted revise feedback bundle on a re-claim (attempts > 1) — the gate
-    // `revise` / join collect-all-revise-once feedback path. Reuses the
-    // revision-bundle CONSUMER unchanged (Runtime-local seam).
+    // `revise` / join collect-all-revise-once / reviewer send-back feedback path.
+    // Only a producer acts on feedback: a reviewer (or generator) re-claimed
+    // after a failure judges afresh, without earlier cycles' notes.
+    let reader = match kind {
+        OutputKind::Producer => ctx.revision_reader.as_deref(),
+        OutputKind::Reviewer | OutputKind::Generator => None,
+    };
     let mut user_message = crate::revision::compose_invocation_message(
         &task.topic,
         task.attempts,
-        ctx.revision_reader.as_deref(),
+        reader,
         task.run_id.as_deref().unwrap_or(&ctx.run_id),
         task.item_key.as_deref().unwrap_or_default(),
     )
@@ -3705,6 +3710,22 @@ mod tests {
         transform_once(&ctx, &ddd).await.unwrap();
         assert_eq!(comments.0.lock().unwrap().len(), 1);
         assert_eq!(comments.0.lock().unwrap()[0].2, "ddd: approve. sound");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_retried_after_a_failure_is_not_sent_a_revision_request() {
+        let (mut ctx, _, runner) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Approve, 1).await;
+        let comments = Arc::new(MemComments::default());
+        comments.0.lock().unwrap().push(("T-old".into(), "a.md".into(), "rev: revise. earlier cycle".into()));
+        ctx.revision_reader = Some(comments.clone());
+        // the reviewed item is on its second attempt after an operational failure
+        let mut item = ctx.tasks.claim_next_for_stage("rev", 150).await.unwrap().unwrap();
+        item.state = TaskState::Queued;
+        item.attempts = 2;
+        ctx.tasks.update(&item).await.unwrap();
+        transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        let msg = runner.received.lock().unwrap()[0].user_message.clone();
+        assert_eq!(msg, "Investigate alpha", "a reviewer judges afresh");
     }
 
     #[tokio::test]
