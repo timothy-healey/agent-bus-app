@@ -1,12 +1,9 @@
-//! Serde contract regression tests for the Usage Telemetry IPC return types
-//! `UsageSnapshot`, `TeamSlice`, and the `ThresholdBand` enum. Lock the
-//! serialized JSON key set + enum strings against the TS interfaces. The
-//! snapshot is built FULLY populated (reset_in_secs / est_brake_at = Some) so
-//! every key appears. Additive only.
+//! Serde contract regression tests for the Usage Telemetry IPC types. Lock the
+//! JSON key sets + enum strings against `src/ipc/usage.ts`.
 
 #![cfg(test)]
 
-use crate::snapshot::{TeamSlice, UsageSnapshot};
+use crate::snapshot::{LimitView, TeamSlice, UsageSnapshot};
 use crate::window::ThresholdBand;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -21,84 +18,54 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 fn full_snapshot() -> UsageSnapshot {
     let mut tokens_by_task = HashMap::new();
     tokens_by_task.insert("T-1".to_string(), 120u64);
+    let lv = |label: &str| LimitView { label: label.into(), utilization_pct: 41.0, resets_in_secs: 600 };
     UsageSnapshot {
-        window_total: 2120,
-        window_budget: 4240,
-        window_pct: 0.5,
+        available: true,
+        observed_at: Some(1_700_000_000),
+        session: Some(lv("session (5h)")),
+        weekly: Some(lv("weekly (7d)")),
+        model_scoped: vec![lv("Fable weekly")],
         band: ThresholdBand::Warn,
-        burn_per_min: 12.5,
-        window_secs: 18_000,
-        reset_in_secs: Some(900),     // Some so the optional key appears
-        est_brake_at: Some(1_700_000_000), // Some so the optional key appears
-        by_team: vec![TeamSlice { team_id: "research".into(), tokens: 120 }],
-        tokens_by_task,
         braked: false,
         auto_meter_enabled: false,
+        by_team: vec![TeamSlice { team_id: "research".into(), tokens: 120, cost_usd: 0.25 }],
+        tokens_by_task,
     }
 }
 
-/// Locks `src/ipc/usage.ts:10-22` `interface UsageSnapshot`:
-/// { window_total, window_budget, window_pct, band, burn_per_min, window_secs,
-///   reset_in_secs, est_brake_at, by_team, tokens_by_task, braked }.
 #[test]
 fn usage_snapshot_key_set_matches_ts() {
     let v = serde_json::to_value(full_snapshot()).unwrap();
-    assert_eq!(
-        keys(&v),
-        set(&[
-            "window_total",
-            "window_budget",
-            "window_pct",
-            "band",
-            "burn_per_min",
-            "window_secs",
-            "reset_in_secs",
-            "est_brake_at",
-            "by_team",
-            "tokens_by_task",
-            "braked",
-            "auto_meter_enabled",
-        ]),
-    );
+    assert_eq!(keys(&v), set(&[
+        "available", "observed_at", "session", "weekly", "model_scoped", "band",
+        "braked", "auto_meter_enabled", "by_team", "tokens_by_task",
+    ]));
     assert_eq!(v["band"], Value::String("warn".into()));
-    assert!(v["by_team"].is_array());
-    // tokens_by_task is TS Record<string, number> → JSON object.
     assert!(v["tokens_by_task"].is_object());
-    assert_eq!(v["tokens_by_task"]["T-1"], serde_json::json!(120));
-    assert!(v["braked"].is_boolean());
 }
 
-/// `reset_in_secs` / `est_brake_at` are `number | null` in TS: present as `null`
-/// keys when None. Locks `src/ipc/usage.ts:17-18`.
 #[test]
-fn usage_snapshot_none_options_are_present_and_null() {
+fn absent_limits_are_present_and_null() {
     let mut s = full_snapshot();
-    s.reset_in_secs = None;
-    s.est_brake_at = None;
+    s.session = None;
+    s.observed_at = None;
     let v = serde_json::to_value(&s).unwrap();
-    assert!(v.as_object().unwrap().contains_key("reset_in_secs"));
-    assert!(v["reset_in_secs"].is_null());
-    assert!(v["est_brake_at"].is_null());
+    assert!(v.as_object().unwrap().contains_key("session"));
+    assert!(v["session"].is_null());
+    assert!(v["observed_at"].is_null());
 }
 
-/// Locks `src/ipc/usage.ts:5-8` `interface TeamSlice { team_id; tokens }`.
 #[test]
-fn team_slice_key_set_matches_ts() {
-    let v = serde_json::to_value(TeamSlice { team_id: "research".into(), tokens: 120 }).unwrap();
-    assert_eq!(keys(&v), set(&["team_id", "tokens"]));
-    assert!(v["tokens"].is_number());
+fn limit_view_and_team_slice_key_sets_match_ts() {
+    let lv = serde_json::to_value(LimitView { label: "x".into(), utilization_pct: 1.0, resets_in_secs: 2 }).unwrap();
+    assert_eq!(keys(&lv), set(&["label", "utilization_pct", "resets_in_secs"]));
+    let ts = serde_json::to_value(TeamSlice { team_id: "r".into(), tokens: 1, cost_usd: 0.5 }).unwrap();
+    assert_eq!(keys(&ts), set(&["team_id", "tokens", "cost_usd"]));
 }
 
-/// Locks `src/ipc/usage.ts:3` `type ThresholdBand = "safe" | "warn" | "hot" | "braked"`.
 #[test]
 fn threshold_band_matches_ts_string_union() {
-    let cases = [
-        (ThresholdBand::Safe, "safe"),
-        (ThresholdBand::Warn, "warn"),
-        (ThresholdBand::Hot, "hot"),
-        (ThresholdBand::Braked, "braked"),
-    ];
-    for (variant, s) in cases {
+    for (variant, s) in [(ThresholdBand::Safe, "safe"), (ThresholdBand::Warn, "warn"), (ThresholdBand::Hot, "hot"), (ThresholdBand::Braked, "braked")] {
         assert_eq!(serde_json::to_value(variant).unwrap(), Value::String(s.into()));
     }
 }

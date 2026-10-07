@@ -18,6 +18,7 @@ pub enum WorkerUsageError {
 pub struct TeamUsage {
     pub team_id: String,
     pub tokens: u64,
+    pub cost_micros: u64,
 }
 
 pub struct WorkerUsageStore {
@@ -52,17 +53,17 @@ impl WorkerUsageStore {
     }
 
     /// Per-team token totals (input+output) within the window, descending by
-    /// tokens. The tooltip's "by team" breakdown.
+    /// tokens. The tooltip's "by team" breakdown (tokens and list-price Cost).
     pub async fn team_breakdown(&self, since_ts: i64) -> Result<Vec<TeamUsage>, WorkerUsageError> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT team_id, COALESCE(SUM(input_tokens + output_tokens), 0)
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT team_id, COALESCE(SUM(input_tokens + output_tokens), 0), COALESCE(SUM(cost_micros), 0)
              FROM worker_usage_log WHERE ts > ?
              GROUP BY team_id ORDER BY 2 DESC",
         )
         .bind(since_ts)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(team_id, t)| TeamUsage { team_id, tokens: t as u64 }).collect())
+        Ok(rows.into_iter().map(|(team_id, t, c)| TeamUsage { team_id, tokens: t as u64, cost_micros: c as u64 }).collect())
     }
 
     /// Per-task token totals (input+output), all time (cards show lifetime cost).
@@ -75,19 +76,6 @@ impl WorkerUsageStore {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|(id, t)| (id, t as u64)).collect())
-    }
-
-    /// API-runner tokens within the window (the only worker rows that count
-    /// toward the window total — D3). v1 has none; returns 0.
-    pub async fn api_window_tokens(&self, since_ts: i64) -> Result<u64, WorkerUsageError> {
-        let (t,): (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
-             FROM worker_usage_log WHERE runner = 'api' AND ts > ?",
-        )
-        .bind(since_ts)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(t as u64)
     }
 }
 
@@ -143,8 +131,8 @@ mod tests {
         store.insert(&ev(100, "research", Some("T-0"), 999, 999)).await.unwrap(); // out of window
 
         let bd = store.team_breakdown(500).await.unwrap();
-        assert_eq!(bd[0], TeamUsage { team_id: "research".into(), tokens: 180 });
-        assert_eq!(bd[1], TeamUsage { team_id: "writers".into(), tokens: 35 });
+        assert_eq!(bd[0], TeamUsage { team_id: "research".into(), tokens: 180, cost_micros: 0 });
+        assert_eq!(bd[1], TeamUsage { team_id: "writers".into(), tokens: 35, cost_micros: 0 });
     }
 
     #[tokio::test]
@@ -155,13 +143,6 @@ mod tests {
         let mut by = store.tokens_by_task().await.unwrap();
         by.sort();
         assert_eq!(by, vec![("T-1".to_string(), 155)]);
-    }
-
-    #[tokio::test]
-    async fn api_window_tokens_is_zero_for_cli_rows() {
-        let store = WorkerUsageStore::new(fresh_pool().await);
-        store.insert(&ev(1000, "research", Some("T-1"), 100, 20)).await.unwrap();
-        assert_eq!(store.api_window_tokens(0).await.unwrap(), 0);
     }
 
     #[tokio::test]

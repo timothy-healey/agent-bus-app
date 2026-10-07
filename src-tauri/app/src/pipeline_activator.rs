@@ -70,6 +70,8 @@ pub struct WorkerDeps {
     /// or switched to after boot roots its worktrees in its own home.
     /// `None` ⇒ target-repo fallback.
     pub worktree_git: Option<Arc<dyn workspace::worktree::WorktreeGit>>,
+    /// Wakes the utilization poller after a worker step settles.
+    pub usage_poll: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Owns the runtime-activation lifecycle: swap the active pipeline + (re)spawn
@@ -298,6 +300,7 @@ impl PipelineActivator {
     fn spawn_transformer_loop(&self, active: ActivePipeline, team: Team, my_gen: u64) {
         let runner = self.runner_for_team(&team);
         let handle = self.handle.clone();
+        let usage_poll = self.deps.usage_poll.clone();
         let generation = self.generation.clone();
         let runs = self.deps.runs.clone();
         let pipeline = active.pipeline.clone();
@@ -328,6 +331,7 @@ impl PipelineActivator {
                         if settled {
                             let _ = handle.emit(crate::events::TASK_CHANGED, "settled");
                             let _ = handle.emit(crate::events::USAGE_CHANGED, ());
+                            if let Some(n) = &usage_poll { n.notify_one(); }
                         }
                         settled
                     }
