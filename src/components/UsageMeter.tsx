@@ -28,7 +28,7 @@ export function UsageMeter({ snapshot, now = Math.floor(Date.now() / 1000) }: Us
       data-testid="usage-meter"
       tabIndex={0}
       role="group"
-      aria-label={`usage ${pct}% of session limit`}
+      aria-label={session ? `usage ${pct}% of session limit` : "usage unavailable"}
       style={{
         position: "relative", display: "flex", alignItems: "center", gap: "var(--sp-3)",
         padding: "4px 12px", background: "var(--bg-2)",
@@ -37,16 +37,16 @@ export function UsageMeter({ snapshot, now = Math.floor(Date.now() / 1000) }: Us
       }}
       className="usage-meter-hoverable"
     >
-      <div data-testid="usage-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
+      <div data-testid="usage-bar" role="progressbar" {...(session ? { "aria-valuenow": pct } : { "aria-valuetext": "unknown" })} aria-valuemin={0} aria-valuemax={100}
         style={{ width: 100, height: 6, background: "var(--surface-3)", borderRadius: 3, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${Math.min(pct, 100)}%`, overflow: "hidden" }}>
           <div data-testid="usage-bar-fill" style={{ height: "100%", width: 100, background: GRADIENT }} />
         </div>
       </div>
 
-      <div style={{ fontSize: 11, color: "var(--text-2)", display: "flex", alignItems: "center", gap: 6, fontVariantNumeric: "tabular-nums" }}>
+      <div data-testid="usage-headline" style={{ fontSize: 11, color: "var(--text-2)", display: "flex", alignItems: "center", gap: 6, fontVariantNumeric: "tabular-nums" }}>
         {session ? <span style={{ color, fontWeight: 500 }}>{pct}%</span> : <span style={{ color: "var(--text-3)" }}>—</span>}
-        {unavailable && session && <span style={{ color: "var(--text-3)", fontSize: 10.5 }}>— usage unavailable</span>}
+        {unavailable && observedAt != null && <span style={{ color: "var(--text-3)", fontSize: 10.5 }}>— usage unavailable</span>}
         {showAge && observedAt != null && <span style={{ color: "var(--text-3)", fontSize: 10.5 }}>· {asOf(observedAt)}</span>}
         {!showAge && session && (
           <span style={{ color: "var(--text-3)", fontSize: 10.5 }}>· {resetCountdown(session.resets_in_secs)}</span>
@@ -65,7 +65,7 @@ export function UsageMeter({ snapshot, now = Math.floor(Date.now() / 1000) }: Us
             .map((l) => (
               <Row key={l.label} label={l.label} value={`${Math.round(l.utilization_pct)}% · ${resetCountdown(l.resets_in_secs)}`} />
             ))}
-          {observedAt != null && <Row label="reading" value={unavailable ? `${asOf(observedAt)} · unavailable` : asOf(observedAt)} />}
+          {observedAt != null && showAge && <Row label="reading" value={unavailable ? `${asOf(observedAt)} · unavailable` : asOf(observedAt)} />}
           <Row label="auto-brake" value={snapshot.auto_meter_enabled ? "on" : "off"} />
           <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
             <div style={{ color: "var(--text-3)", fontSize: 10.5, marginBottom: 6 }}>cost this 5h (list price)</div>

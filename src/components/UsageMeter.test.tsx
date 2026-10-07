@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { UsageMeter } from "./UsageMeter";
 import type { UsageSnapshot } from "../ipc/usage";
 
@@ -29,15 +29,36 @@ describe("UsageMeter", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
-  it("says usage unavailable and shows the reading's age when the last poll failed", () => {
-    render(<UsageMeter snapshot={snap({ available: false })} now={1_010} />);
-    expect(screen.getByText(/— usage unavailable/)).toBeInTheDocument();
-    expect(screen.getAllByText(/as of/).length).toBeGreaterThan(0);
+  const headline = () => within(screen.getByTestId("usage-headline"));
+
+  it("shows no 'as of' in the headline or tooltip for a fresh available reading", () => {
+    render(<UsageMeter snapshot={snap()} now={1_010} />);
+    expect(headline().queryByText(/as of/)).toBeNull();
+    expect(screen.queryByText("reading")).toBeNull();
   });
 
-  it("shows 'as of' once a good reading is over 3 minutes old", () => {
+  it("shows 'as of' in the headline once a good reading is over 3 minutes old", () => {
     render(<UsageMeter snapshot={snap()} now={1_000 + 600} />);
-    expect(screen.getAllByText(/as of/).length).toBeGreaterThan(0);
+    expect(headline().getByText(/as of/)).toBeInTheDocument();
+  });
+
+  it("says usage unavailable and shows the reading's age when the last poll failed", () => {
+    render(<UsageMeter snapshot={snap({ available: false })} now={1_010} />);
+    expect(headline().getByText(/— usage unavailable/)).toBeInTheDocument();
+    expect(headline().getByText(/as of/)).toBeInTheDocument();
+  });
+
+  it("says usage unavailable even when the failed poll left no session reading", () => {
+    render(<UsageMeter snapshot={snap({ available: false, session: null })} now={1_010} />);
+    expect(headline().getByText(/— usage unavailable/)).toBeInTheDocument();
+  });
+
+  it("reports unknown to assistive tech when there is no session reading", () => {
+    render(<UsageMeter snapshot={snap({ session: null })} now={1_010} />);
+    expect(screen.getByRole("group", { name: "usage unavailable" })).toBeInTheDocument();
+    const bar = screen.getByRole("progressbar");
+    expect(bar).toHaveAttribute("aria-valuetext", "unknown");
+    expect(bar).not.toHaveAttribute("aria-valuenow");
   });
 
   it("tooltip lists both windows, model-scoped limits and per-team cost", () => {
