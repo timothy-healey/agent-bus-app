@@ -1,11 +1,7 @@
 import type React from "react";
-import type { EffortMode, Pipeline } from "../ipc/pipeline";
+import type { Pipeline } from "../ipc/pipeline";
 import { Button } from "./ui/Button";
 import { PipelineGraph } from "./PipelineGraph";
-
-function effortLabel(e: EffortMode): string {
-  return e.mode === "custom" ? `custom(${e.budget_tokens})` : e.mode;
-}
 
 // Lowercase section header per DESIGN.md §Table (D8: reconcile the two header
 // styles to one — lowercase / 0.04em).
@@ -75,8 +71,8 @@ export function PipelineView({ pipeline, onEdit }: PipelineViewProps) {
             {t.name} <span style={meta}>· {t.id}</span>
           </div>
           <div style={meta}>
-            {t.runner?.kind ?? "—"} · {t.runner?.model ?? "—"} · effort{" "}
-            {t.runner?.effort ? effortLabel(t.runner.effort) : "—"} · workers{" "}
+            {t.runner?.kind ?? "—"} · {t.runner?.model ?? "—"} ·{" "}
+            {t.runner?.effort ? `${t.runner.effort} effort` : "default effort"} · workers{" "}
             {t.workers.min}/{t.workers.max}
           </div>
           <div style={{ ...meta, marginTop: 4 }}>

@@ -27,9 +27,10 @@ vi.mock("./hooks/useTasks", () => ({
 }));
 
 const run1 = { id: "R-1", pipeline: "pl", project_id: "p", generator_dry: false, completed: false, created_at: 0 };
+let mockActiveRun: typeof run1 | null = run1;
 vi.mock("./hooks/useRuns", () => ({
   useRuns: () => ({
-    runs: [run1], loading: false, selectedRun: run1, activeRun: run1, select: vi.fn(), reload: vi.fn(),
+    runs: [run1], loading: false, selectedRun: run1, activeRun: mockActiveRun, select: vi.fn(), reload: vi.fn(),
   }),
 }));
 vi.mock("./hooks/useStoreOccupancy", () => ({
@@ -57,6 +58,7 @@ const approveMock = vi.fn();
 const listInvocationsMock = vi.fn();
 const retryTaskMock = vi.fn();
 const acceptTaskMock = vi.fn();
+const startRunMock = vi.fn();
 vi.mock("./ipc/runtime", async (orig) => {
   const actual = await (orig as any)();
   return {
@@ -65,6 +67,7 @@ vi.mock("./ipc/runtime", async (orig) => {
     listInvocations: (...a: unknown[]) => listInvocationsMock(...a),
     retryTask: (...a: unknown[]) => retryTaskMock(...a),
     acceptTask: (...a: unknown[]) => acceptTaskMock(...a),
+    startRun: (...a: unknown[]) => startRunMock(...a),
   };
 });
 vi.mock("./ipc/review", () => ({
@@ -138,6 +141,22 @@ describe("App board integration", () => {
     // dismissible
     fireEvent.click(screen.getByLabelText("dismiss action error"));
     await waitFor(() => expect(screen.queryByText(/downstream is full/i)).not.toBeInTheDocument());
+  });
+
+  it("a blocked run start names the offending team in an alert", async () => {
+    mockActiveRun = null;
+    startRunMock.mockReset().mockRejectedValueOnce(
+      "cannot start the run: Review: effort 'xhigh' is not supported by claude-opus-4-6",
+    );
+    try {
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start run" }));
+      await waitFor(() =>
+        expect(screen.getByRole("alert").textContent).toMatch(/Review: effort 'xhigh' is not supported by claude-opus-4-6/),
+      );
+    } finally {
+      mockActiveRun = run1;
+    }
   });
 
   it("docks the god terminal at the bottom", async () => {

@@ -1,9 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 
-const testModelMock = vi.fn();
-vi.mock("../../ipc/runner", () => ({ testModel: (m: string) => testModelMock(m) }));
+const LIST = {
+  source: "live" as const,
+  cli_version: "2.1.292",
+  models: [
+    { value: "default", resolved_model: "claude-opus-5-5", display_name: "Default", description: null, effort_levels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "opus", resolved_model: "claude-opus-5-5", display_name: "Opus 5.5", description: null, effort_levels: ["low", "high", "xhigh"] },
+    { value: "claude-opus-4-6", resolved_model: "claude-opus-4-6", display_name: "Opus 4.6", description: null, effort_levels: ["low", "high"] },
+    { value: "haiku", resolved_model: "claude-haiku-4-5-20251001", display_name: "Haiku 4.5", description: null, effort_levels: [] },
+  ],
+};
+const refreshMock = vi.fn(async () => LIST);
+vi.mock("../../ipc/models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../ipc/models")>()),
+  getModelList: vi.fn(async () => LIST),
+  refreshModelList: () => refreshMock(),
+  onModelListUpdated: vi.fn(async () => () => {}),
+}));
 const listDirMock = vi.fn();
 vi.mock("../../ipc/workspace", () => ({ listDir: (p: string) => listDirMock(p) }));
 // G5 — mock only regenerateTeamPrompt (the chat seam); keep the rest of the
@@ -15,13 +30,17 @@ vi.mock("../../ipc/pipeline", async (importOriginal) => ({
 }));
 
 import { NodeDrawer } from "./NodeDrawer";
-import { emptyDraft, addTeam } from "../draft";
+import { emptyDraft, addTeam, setTeamEffort } from "../draft";
 import type { DraftPipeline } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
-import { DEFAULT_MODEL } from "../../ipc/models";
 
 function teamDraft(): DraftPipeline {
   return addTeam(emptyDraft(), "research", "Research");
+}
+
+function withModel(model: string): DraftPipeline {
+  const d = teamDraft();
+  return { ...d, teams: d.teams.map((t) => ({ ...t, runner: { ...t.runner, model } })) };
 }
 
 describe("NodeDrawer — team editor round-trips", () => {
@@ -87,11 +106,12 @@ describe("NodeDrawer — team editor round-trips", () => {
     expect(onChange.mock.calls.at(-1)?.[0].teams[0].store).toEqual({ capacity: 16 });
   });
 
-  it("selecting a known model flows through setTeamModel (G6 selector)", () => {
+  it("selecting a model flows through setTeamModel", async () => {
     const onChange = vi.fn();
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
-    fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "claude-haiku-4-5" } });
-    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("claude-haiku-4-5");
+    await screen.findByRole("option", { name: "haiku → claude-haiku-4-5-20251001" });
+    fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "haiku" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("haiku");
   });
 });
 
@@ -132,22 +152,82 @@ describe("NodeDrawer — A4 skill autocomplete on the prompt field", () => {
   });
 });
 
-describe("NodeDrawer — G6 model selector + Test probe", () => {
-  it("custom-id toggle reveals a free-text override flagged unverified", () => {
-    const onChange = vi.fn();
-    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
-    fireEvent.click(screen.getByLabelText("model override toggle for research"));
-    fireEvent.change(screen.getByLabelText("model override for research"), { target: { value: "claude-experimental" } });
-    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.model).toBe("claude-experimental");
-    expect(screen.getByText("unverified")).toBeInTheDocument();
+describe("NodeDrawer — model and effort pickers", () => {
+  it("lists the CLI's models with alias rows showing their resolved model", async () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    await screen.findByRole("option", { name: "opus → claude-opus-5-5" });
+    expect(screen.getByRole("option", { name: "claude-opus-4-6" })).toBeInTheDocument();
+    expect((screen.getByLabelText("model for research") as HTMLSelectElement).value).toBe("default");
+    expect(screen.queryByLabelText(/model override/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/test model/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/budget for/)).not.toBeInTheDocument();
   });
 
-  it("Test button fires test_model and surfaces the result", async () => {
-    testModelMock.mockResolvedValueOnce({ status: "unavailable", message: "model not found" });
+  it("offers Default plus the selected model's levels", async () => {
+    render(<NodeDrawer draft={withModel("claude-opus-4-6")} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    await screen.findByRole("option", { name: "claude-opus-4-6" });
+    const effort = screen.getByLabelText("effort for research");
+    expect(within(effort).getAllByRole("option").map((o) => o.textContent)).toEqual(["Default", "low", "high"]);
+  });
+
+  it("a model without effort support offers only Default", async () => {
+    render(<NodeDrawer draft={withModel("haiku")} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    await screen.findByRole("option", { name: "haiku → claude-haiku-4-5-20251001" });
+    const effort = screen.getByLabelText("effort for research");
+    expect(within(effort).getAllByRole("option").map((o) => o.textContent)).toEqual(["Default"]);
+  });
+
+  it("choosing a level saves it; choosing Default removes it", async () => {
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={withModel("opus")} selectedId="research" onChange={onChange} onClose={() => {}} />);
+    await screen.findByRole("option", { name: "xhigh" });
+    fireEvent.change(screen.getByLabelText("effort for research"), { target: { value: "xhigh" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].runner.effort).toBe("xhigh");
+    fireEvent.change(screen.getByLabelText("effort for research"), { target: { value: "" } });
+    expect("effort" in onChange.mock.calls.at(-1)?.[0].teams[0].runner).toBe(false);
+  });
+
+  it("switching to a model without the saved level snaps to Default and says so", async () => {
+    function Host() {
+      const [d, setD] = useState(() => setTeamEffort(withModel("opus"), "research", "xhigh"));
+      return <NodeDrawer draft={d} selectedId="research" onChange={setD} onClose={() => {}} />;
+    }
+    render(<Host />);
+    await screen.findByRole("option", { name: "claude-opus-4-6" });
+    fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "claude-opus-4-6" } });
+    expect((screen.getByLabelText("effort for research") as HTMLSelectElement).value).toBe("");
+    expect(screen.getByRole("status")).toHaveTextContent(/xhigh.*claude-opus-4-6.*Default/);
+  });
+
+  it("switching to a model that supports the level keeps it with no note", async () => {
+    function Host() {
+      const [d, setD] = useState(() => setTeamEffort(withModel("opus"), "research", "high"));
+      return <NodeDrawer draft={d} selectedId="research" onChange={setD} onClose={() => {}} />;
+    }
+    render(<Host />);
+    await screen.findByRole("option", { name: "claude-opus-4-6" });
+    fireEvent.change(screen.getByLabelText("model for research"), { target: { value: "claude-opus-4-6" } });
+    expect((screen.getByLabelText("effort for research") as HTMLSelectElement).value).toBe("high");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("a saved model missing from the list shows as not available", async () => {
+    render(<NodeDrawer draft={withModel("claude-gone")} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    await screen.findByRole("option", { name: "claude-gone — not available" });
+    expect((screen.getByLabelText("model for research") as HTMLSelectElement).value).toBe("claude-gone");
+  });
+
+  it("a saved level the model lacks shows as not supported", async () => {
+    render(<NodeDrawer draft={setTeamEffort(withModel("haiku"), "research", "high")} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    await screen.findByRole("option", { name: "high — not supported" });
+    expect((screen.getByLabelText("effort for research") as HTMLSelectElement).value).toBe("high");
+  });
+
+  it("the refresh button refetches and shows the list's source", async () => {
     render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
-    fireEvent.click(screen.getByLabelText("test model for research"));
-    await waitFor(() => expect(screen.getByText(/unavailable, pick another/i)).toBeInTheDocument());
-    expect(testModelMock).toHaveBeenCalledWith(DEFAULT_MODEL);
+    expect(await screen.findByText("live")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("refresh model list"));
+    await waitFor(() => expect(refreshMock).toHaveBeenCalled());
   });
 });
 

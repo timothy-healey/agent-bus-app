@@ -90,8 +90,10 @@ export default function App() {
       const run = await startRunCmd();
       // land on the new run immediately; the run-changed event also refetches.
       selectRun(run.id);
-    } catch {
-      /* a start failure surfaces via the absence of a new run; keep the UI calm */
+    } catch (e) {
+      // e.g. the pre-flight check naming each team whose model or effort the
+      // CLI's model list does not support.
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setStarting(false);
     }
