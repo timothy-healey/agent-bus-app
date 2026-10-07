@@ -57,6 +57,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (15, include_str!("../migrations/015_usage_budget_recalibrate.sql")),
         (16, include_str!("../migrations/016_utilization.sql")),
         (17, include_str!("../migrations/017_drop_cc_usage_log.sql")),
+        (18, include_str!("../migrations/018_invocation_effort.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -1564,6 +1565,12 @@ pub fn run() {
             sql: include_str!("../migrations/017_drop_cc_usage_log.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 18,
+            description: "invocation effort level",
+            sql: include_str!("../migrations/018_invocation_effort.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     // Live child process-group registry (LF20): the killable spawners register
@@ -2240,9 +2247,19 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 17, "all seventeen migrations recorded");
+        assert_eq!(version, 18, "all eighteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn migration_018_adds_a_nullable_effort_column() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(invocation_audit)").fetch_all(&pool).await.unwrap();
+        let effort = cols.iter().find(|c| c.1 == "effort").expect("effort column");
+        assert_eq!(effort.3, 0, "effort must be nullable");
     }
 
     // LF34: migration 015 bumps existing installs off the old input+output-only

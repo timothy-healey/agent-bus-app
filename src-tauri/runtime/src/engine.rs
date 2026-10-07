@@ -1373,7 +1373,7 @@ async fn invoke(
     // at invoke time (VET F2), not an invocation-local count.
     let audit_id = match &ctx.audit {
         Some(store) => store
-            .record_start(&task.id.0, &team.id, &effective.model, task.attempts, now)
+            .record_start(&task.id.0, &team.id, &effective.model, req.effort.level(), task.attempts, now)
             .await
             .map_err(|e| eprintln!("runtime: invocation audit start failed: {e}"))
             .ok(),
@@ -1575,6 +1575,7 @@ pub(crate) mod test_support {
         sqlx::query(include_str!("../../app/migrations/003_runtime.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/018_invocation_effort.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/008_nested_groups.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/014_task_worktree.sql")).execute(&pool).await.unwrap();
@@ -2972,6 +2973,7 @@ mod tests {
             include_str!("../../app/migrations/003_runtime.sql"),
             include_str!("../../app/migrations/006_fanout.sql"),
             include_str!("../../app/migrations/007_invocation_audit.sql"),
+            include_str!("../../app/migrations/018_invocation_effort.sql"),
             include_str!("../../app/migrations/008_nested_groups.sql"),
             include_str!("../../app/migrations/012_runtime_stores.sql"),
             include_str!("../../app/migrations/014_task_worktree.sql"),
@@ -3014,6 +3016,33 @@ mod tests {
         assert_eq!(row.usage.output_tokens, 20);
         assert_eq!(row.usage.cache_creation, 5);
         assert_eq!(row.usage.cache_read, 3);
+        // the fixture team runs at Default effort: no --effort flag, NULL column
+        assert_eq!(row.effort, None);
+    }
+
+    #[tokio::test]
+    async fn invoke_records_the_effort_level_it_ran_with() {
+        let (pool, audit) = pool_with_audit().await;
+        let mut t = team("research", None, Role::Producer, 8);
+        t.runner.as_mut().unwrap().effort = Some(agent_bus_core::Effort::Level("low".into()));
+        let p = pipeline(vec![t]);
+        let out = RunnerOutput {
+            verdict: agent_bus_core::Verdict::Approve,
+            artifact_path: None,
+            final_text: "KEY: alpha".into(),
+            usage: RunnerUsage { model: "m".into(), input_tokens: 1, output_tokens: 1, cache_creation: 0, cache_read: 0, cost_micros: None },
+        };
+        let mut ctx = ctx_with(pool, p.clone(), Arc::new(FakeRunner::always(out))).await;
+        ctx.audit = Some(audit.clone());
+        ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+
+        let rows = audit.list_for_task(&item.id.0).await.unwrap();
+        assert_eq!(rows[0].effort.as_deref(), Some("low"));
     }
 
     #[tokio::test]

@@ -952,6 +952,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/006_fanout.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/018_invocation_effort.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/014_task_worktree.sql")).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO projects (id,name,root_path,created_at,updated_at) VALUES ('proj','n','/p',0,0)")
             .execute(&pool).await.unwrap();
@@ -1157,7 +1158,7 @@ mod tests {
         // Record the failing invocation at `stage` (the audit team_id is what the
         // L2 commands read to find the stage that escalated the item).
         let audit = state.audit.as_ref().unwrap();
-        let inv = audit.record_start(&task.id.0, stage, "m", 3, 1000).await.unwrap();
+        let inv = audit.record_start(&task.id.0, stage, "m", None, 3, 1000).await.unwrap();
         audit.record_settle(&inv, &outcome, &AuditUsage::default(), 1100).await.unwrap();
         (run.id, task)
     }
