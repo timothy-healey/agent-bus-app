@@ -74,6 +74,41 @@ pub struct WorkerDeps {
     pub worktree_git: Option<Arc<dyn workspace::worktree::WorktreeGit>>,
     /// Wakes the utilization poller after a worker step settles.
     pub usage_poll: Option<Arc<tokio::sync::Notify>>,
+    /// The CLI's model list: a model with auto mode runs its workers in `auto`.
+    pub model_list: Option<Arc<std::sync::RwLock<agent_bus_core::ModelList>>>,
+    /// Resolves the plugins a team declares to `--plugin-dir` paths.
+    pub plugin_resolver: Option<Arc<workspace::plugins::PluginResolver>>,
+    /// Looks up a repo's visibility for the auto-mode classifier.
+    pub repo_visibility: Option<VisibilityLookup>,
+}
+
+/// Looks up a repo's visibility (`public` / `private` / `internal`).
+pub type VisibilityLookup = Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>;
+
+/// A repo's visibility, looked up once per run and remembered for the run's
+/// later invocations. A failed lookup is remembered too (as unknown).
+pub struct RunVisibility {
+    lookup: VisibilityLookup,
+    cache: std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+}
+
+impl RunVisibility {
+    pub fn new(lookup: VisibilityLookup) -> Self {
+        Self { lookup, cache: Default::default() }
+    }
+
+    /// The visibility of `repo` for `run_id`; `None` without a repo.
+    pub fn get(&self, run_id: &str, repo: Option<&std::path::Path>) -> Option<String> {
+        let repo = repo?;
+        if let Some(v) = self.cache.lock().ok()?.get(run_id) {
+            return v.clone();
+        }
+        let v = (self.lookup)(repo);
+        if let Ok(mut c) = self.cache.lock() {
+            c.insert(run_id.to_string(), v.clone());
+        }
+        v
+    }
 }
 
 /// Owns the runtime-activation lifecycle: swap the active pipeline + (re)spawn
@@ -392,11 +427,15 @@ impl PipelineActivator {
         let pipeline = active.pipeline.clone();
         let target_repo: Option<std::path::PathBuf> =
             active.project_target_repo.as_deref().map(std::path::PathBuf::from);
+        let model_list = self.deps.model_list.clone();
+        let plugin_resolver = self.deps.plugin_resolver.clone();
+        let visibility = self.deps.repo_visibility.clone().map(|l| Arc::new(RunVisibility::new(l)));
         let read_root = project_root.clone();
         let read_prompt: Arc<dyn Fn(&Team) -> String + Send + Sync> = Arc::new(move |t: &Team| {
             std::fs::read_to_string(std::path::Path::new(&read_root).join(&t.prompt)).unwrap_or_default()
         });
         move |run_id: String| EngineContext {
+            repo_visibility: visibility.as_ref().and_then(|v| v.get(&run_id, target_repo.as_deref())),
             run_id,
             pipeline: pipeline.clone(),
             stores: stores.clone(),
@@ -418,9 +457,8 @@ impl PipelineActivator {
             log_sink: log_sink.clone(),
             audit: audit.clone(),
             worktree_provider: worktree_provider.clone(),
-            model_list: None,
-            plugin_resolver: None,
-            repo_visibility: None,
+            model_list: model_list.clone(),
+            plugin_resolver: plugin_resolver.clone(),
         }
     }
 }
@@ -514,6 +552,43 @@ pub(crate) fn resolve_chat_key(keychain: &Arc<dyn secrets::KeychainStore>) -> Op
         }
     }
     std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty())
+}
+
+#[cfg(test)]
+mod run_visibility_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn the_lookup_runs_once_per_run_and_never_without_a_repo() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let vis = RunVisibility::new(Arc::new(move |_repo: &std::path::Path| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Some("public".to_string())
+        }));
+        let repo = std::path::Path::new("/repo");
+        assert_eq!(vis.get("R-1", Some(repo)).as_deref(), Some("public"));
+        assert_eq!(vis.get("R-1", Some(repo)).as_deref(), Some("public"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        vis.get("R-2", Some(repo));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(vis.get("R-3", None), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_lookup_is_remembered_as_unknown() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let vis = RunVisibility::new(Arc::new(move |_repo: &std::path::Path| {
+            c.fetch_add(1, Ordering::SeqCst);
+            None
+        }));
+        assert_eq!(vis.get("R-1", Some(std::path::Path::new("/r"))), None);
+        assert_eq!(vis.get("R-1", Some(std::path::Path::new("/r"))), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[cfg(test)]

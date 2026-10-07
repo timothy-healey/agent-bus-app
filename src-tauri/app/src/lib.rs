@@ -911,6 +911,16 @@ async fn refresh_model_list_inner(state: &ModelListState, app: &tauri::AppHandle
     }
 }
 
+/// The plugin resolver, as managed state for the editor's plugin list.
+struct PluginsState(Arc<workspace::plugins::PluginResolver>);
+
+/// OHS: the plugins a team can declare (installed plus directory
+/// marketplaces), read from the Claude config root.
+#[tauri::command(rename_all = "snake_case")]
+fn list_plugins(state: tauri::State<'_, PluginsState>) -> Vec<workspace::plugins::PluginInfo> {
+    state.0.list()
+}
+
 /// OHS: the current model list. Never calls the CLI.
 #[tauri::command(rename_all = "snake_case")]
 fn model_list(state: tauri::State<'_, ModelListState>) -> agent_bus_core::ModelList {
@@ -1825,6 +1835,12 @@ pub fn run() {
                     cache_path: data_dir.join(model_list_cache::CACHE_FILE),
                 };
 
+                // Plugins resolve from the Claude config root, read-only.
+                let plugin_resolver = Arc::new(workspace::plugins::PluginResolver::new(
+                    workspace::plugins::claude_config_root(),
+                ));
+                handle.manage(PluginsState(plugin_resolver.clone()));
+
                 let runtime_state_arc = Arc::new(RuntimeState::new(
                     tasks.clone(),
                     brake.clone(),
@@ -1840,7 +1856,8 @@ pub fn run() {
                         project_root: project_root.clone(),
                         project_target_repo: project_target_repo.clone(),
                     },
-                ).with_model_list(model_list.clone()));
+                ).with_model_list(model_list.clone())
+                .with_plugin_resolver(plugin_resolver.clone()));
                 handle.manage(runtime_state_arc.clone());
                 handle.manage(model_list_state);
                 {
@@ -1989,6 +2006,11 @@ pub fn run() {
                         app_data: data_dir.clone(),
                         worktree_git: Some(worktree_git.clone()),
                         usage_poll: Some(usage_poll.clone()),
+                        model_list: Some(model_list.clone()),
+                        plugin_resolver: Some(plugin_resolver.clone()),
+                        repo_visibility: Some(Arc::new(|repo: &std::path::Path| {
+                            workspace::visibility::repo_visibility(repo)
+                        })),
                     },
                 ));
                 handle.manage(activator.clone());
@@ -2089,6 +2111,8 @@ pub fn run() {
             runtime::api::revise_gate,
             runtime::api::list_tasks,
             runtime::api::list_invocations,
+            runtime::api::denial_counts,
+            list_plugins,
             runtime::api::retry_task,
             runtime::api::force_advance,
             runtime::api::abandon_task,
