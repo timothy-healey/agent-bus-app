@@ -46,8 +46,7 @@ export interface BrakeState {
 /// `InvocationRow` DTO — the sealed audit read shape. `outcome` is the single
 /// encoded string: `verdict:approve|revise|reject`, `error:<class>` (one of
 /// `rate_limited`/`model_unavailable`/`spawn`/`no_result`/`no_structured_output`/`other`),
-/// or `""` for an
-/// in-flight (not-yet-settled) invocation.
+/// or `""` for an in-flight (not-yet-settled) invocation.
 export interface InvocationRow {
   invocation_id: string;
   team_id: string;

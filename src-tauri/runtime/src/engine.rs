@@ -3721,6 +3721,53 @@ mod tests {
         assert!(second.user_message.contains("rev: revise. add a retry bound"), "{}", second.user_message);
     }
 
+    /// Live check against the installed `claude` (two paid haiku runs): a
+    /// producer writes an artifact, a reviewer told to revise returns a
+    /// Structured output verdict, the reason is stored as a review comment, and
+    /// the item goes back to the producer. Run with
+    /// `cargo test -p runtime live_ -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "spawns the real claude CLI and spends tokens"]
+    async fn live_producer_then_reviewer_round_trip_on_the_installed_cli() {
+        let mut p = review_pipeline(routes(Some("done"), None, None));
+        for t in p.teams.iter_mut() {
+            t.runner.as_mut().unwrap().model = Some("haiku".into());
+        }
+        let runner = Arc::new(runners::claude_cli::ClaudeCliRunner::new());
+        let mut ctx = ctx_with(fresh_pool().await, p, runner).await;
+        ctx.read_prompt = Arc::new(|t: &Team| match t.id.as_str() {
+            "prod" => "Write a two-line poem about tea into a new file in your artifact folder. Do nothing else.".into(),
+            _ => "Read the poem at the input path. Whatever it says, return the verdict revise with the reason: add a title line.".into(),
+        });
+        let comments = Arc::new(MemComments::default());
+        ctx.review_writer = Some(comments.clone());
+        ctx.revision_reader = Some(comments.clone());
+        for s in ["prod", "rev", "done"] {
+            ctx.stores.ensure(&ctx.run_id, s, 8).await.unwrap();
+        }
+        ctx.stores.reserve(&ctx.run_id, "prod").await.unwrap();
+        let mut item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "tea".into(), "prod".into(), None, None, 100);
+        item.topic = "A poem about tea".into();
+        ctx.tasks.insert(&item).await.unwrap();
+        let prod = ctx.pipeline.teams.iter().find(|t| t.id == "prod").unwrap().clone();
+
+        let o1 = transform_once(&ctx, &prod).await.unwrap();
+        eprintln!("producer: {o1:?}");
+        assert!(matches!(o1, StepOutcome::Advanced { .. }), "{o1:?}");
+        let reviewed = ctx.tasks.list_by_state(TaskState::Queued).await.unwrap().into_iter().find(|t| t.current_stage == "rev").unwrap();
+        eprintln!("artifact: {:?}", reviewed.parent_artifact);
+
+        let o2 = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
+        eprintln!("reviewer: {o2:?}");
+        assert_eq!(o2, StepOutcome::Revised { task_id: reviewed.id.0.clone(), producer: "prod".into() });
+        let written = comments.0.lock().unwrap().clone();
+        eprintln!("review comment: {written:?}");
+        assert_eq!(written.len(), 1);
+        assert!(written[0].2.starts_with("rev: revise. "), "{}", written[0].2);
+        let back = ctx.tasks.claim_next_for_stage("prod", 300).await.unwrap().unwrap();
+        assert_eq!(back.attempts, 2);
+    }
+
     #[tokio::test]
     async fn a_producer_keeps_its_parent_key_and_uses_its_artifact_and_description() {
         let p = pipeline(vec![team("research", Some("spec"), Role::Producer, 8), team("spec", None, Role::Producer, 8)]);
