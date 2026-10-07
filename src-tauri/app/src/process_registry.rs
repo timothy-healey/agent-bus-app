@@ -323,7 +323,9 @@ pub(crate) fn killable_spawn(registry: &Arc<ProcessRegistry>) -> runners::claude
             .split_first()
             .ok_or_else(|| RunnerError::Spawn("empty argv".into()))?;
         let mut cmd = std::process::Command::new(program);
-        cmd.args(rest).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // A worker never reads stdin; an inherited stdin makes the CLI wait
+        // for input before it starts.
+        cmd.args(rest).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -729,6 +731,21 @@ mod tests {
         );
         assert_eq!(out.unwrap(), "hello");
         assert!(reg.is_empty(), "registry drained after the child is waited on");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn killable_spawner_gives_the_child_a_null_stdin() {
+        let reg = Arc::new(ProcessRegistry::new());
+        let out = (super::killable_spawn(&reg))(
+            &[
+                "sh".into(),
+                "-c".into(),
+                r#"[ "$(stat -L -f %r /dev/stdin)" = "$(stat -f %r /dev/null)" ] && echo null || echo inherited"#.into(),
+            ],
+            None,
+        );
+        assert_eq!(out.unwrap().trim(), "null");
     }
 
     /// Run `f` on a thread and require it to finish within `timeout`, else fail —

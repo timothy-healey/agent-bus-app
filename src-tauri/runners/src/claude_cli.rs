@@ -51,13 +51,14 @@ impl ClaudeCliRunner {
     pub fn new() -> Self {
         Self {
             spawn: Box::new(|args: &[String], cwd: Option<&str>| {
-                // args[0] is the program (CLAUDE_BIN, or sandbox-exec when the
-                // S3 wrap is active). args[1..] are its arguments.
+                // args[0] is the program (CLAUDE_BIN); args[1..] are its arguments.
                 let (program, rest) = args
                     .split_first()
                     .ok_or_else(|| RunnerError::Spawn("empty argv".into()))?;
                 let mut cmd = std::process::Command::new(program);
-                cmd.args(rest);
+                // A worker never reads stdin; without a closed stdin the CLI
+                // waits for input before starting.
+                cmd.args(rest).stdin(std::process::Stdio::null());
                 if let Some(dir) = cwd {
                     cmd.current_dir(dir);
                 }
@@ -90,15 +91,8 @@ impl ClaudeCliRunner {
     ) -> Result<RunnerOutput, RunnerError> {
         let mut argv = vec![CLAUDE_BIN.to_string()];
         argv.extend(build_args(req));
-        // S3 (EXPERIMENTAL · macOS-only): when a sandbox profile is present, wrap
-        // the whole argv in `sandbox-exec -p <profile>`. Default (None) = the
-        // plain `claude` argv, unchanged. Live confinement is UNVERIFIED here —
-        // only the argv construction is exercised by tests.
-        if let Some(profile) = &req.sandbox_profile {
-            argv = crate::command::sandbox_wrap(profile, &argv);
-        }
         let stdout = (self.spawn)(&argv, req.working_dir.as_deref())?;
-        parse_stream_streaming(&stdout, &req.model, req.output_kind, forward)
+        parse_stream_streaming(&stdout, &req.model, req.output_kind, Some(req.permission_mode), forward)
     }
 }
 
@@ -141,7 +135,7 @@ mod tests {
             user_message: "go".into(),
             settings_path: "/tmp/s.json".into(),
             add_dirs: vec![],
-            sandbox_profile: None,
+            permission_mode: agent_bus_core::PermissionMode::AcceptEdits, disallowed_tools: vec![], plugin_dirs: vec![],
             working_dir: None,
             output_kind: OutputKind::Reviewer,
         }
@@ -181,32 +175,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_argv_starts_with_claude_bin_when_no_sandbox() {
+    async fn spawn_argv_starts_with_claude_bin() {
         let canned = APPROVE;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
-            // program name is now the first argv element handed to the SpawnFn
             assert_eq!(args[0], crate::command::CLAUDE_BIN);
             assert!(args.iter().any(|a| a == "--print"));
-            assert!(!args.iter().any(|a| a == "sandbox-exec"));
             Ok(canned.to_string())
         }));
         runner.invoke(&req()).await.unwrap();
     }
 
     #[tokio::test]
-    async fn spawn_argv_is_sandbox_wrapped_when_profile_present() {
-        let canned = APPROVE;
-        let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
-            assert_eq!(args[0], "sandbox-exec");
-            assert_eq!(args[1], "-p");
-            assert_eq!(args[2], "(version 1)(deny default)");
-            assert_eq!(args[3], crate::command::CLAUDE_BIN);
-            assert!(args.iter().any(|a| a == "--print"));
-            Ok(canned.to_string())
-        }));
+    async fn a_mode_fallback_fails_the_invocation() {
+        let canned = r#"{"type":"system","subtype":"init","permissionMode":"auto"}
+{"type":"system","subtype":"status","permissionMode":"default"}
+{"type":"result","subtype":"success","is_error":false,"result":"{}","structured_output":{"verdict":"approve","reason":"fine"},"usage":{"input_tokens":5,"output_tokens":7}}"#;
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_a, _c| Ok(canned.to_string())));
         let mut r = req();
-        r.sandbox_profile = Some("(version 1)(deny default)".into());
-        runner.invoke(&r).await.unwrap();
+        r.permission_mode = agent_bus_core::PermissionMode::Auto;
+        let err = runner.invoke(&r).await.unwrap_err();
+        assert!(matches!(err, RunnerError::PermissionModeMismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn the_default_spawner_closes_stdin() {
+        // `sh` stands in for `claude`: with a closed stdin `read` hits EOF at
+        // once and the shell prints its non-zero status instead of waiting.
+        let runner = ClaudeCliRunner::new();
+        let out = (runner.spawn)(&["sh".to_string(), "-c".to_string(), "read x; echo $?".to_string()], None).unwrap();
+        assert_eq!(out.trim(), "1");
     }
 
     #[tokio::test]

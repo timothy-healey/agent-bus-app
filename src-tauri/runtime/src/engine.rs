@@ -1485,9 +1485,25 @@ async fn invoke(
     // turns scope.writes into both). Create it so the agent can write there.
     let artifact_dir = ctx.artifact_dir(&team.id);
     let _ = std::fs::create_dir_all(&artifact_dir);
-    let mut scope = team.scope.clone();
-    scope.writes.push(artifact_dir);
-    let scope_settings = prepare(&ctx.project_root, &team.id, &task.id.0, now, &scope, &vars)?;
+    let resolve_all = |patterns: &[String]| -> Result<Vec<String>, EngineError> {
+        patterns
+            .iter()
+            .map(|p| {
+                workspace::paths::resolve_absolute(p, &vars)
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .map_err(|e| EngineError::Invoke(format!("scope path '{p}': {e}")))
+            })
+            .collect()
+    };
+    let mut writes = resolve_all(&team.scope.writes)?;
+    writes.push(artifact_dir);
+    let worker_scope = runners::scope::WorkerScope {
+        reads: resolve_all(&team.scope.reads)?,
+        writes,
+        grants: team.scope.grants.clone(),
+        repo_visibility: None,
+    };
+    let scope_settings = prepare(&ctx.project_root, &team.id, &task.id.0, now, &worker_scope)?;
 
     // Compose the user message: the topic on a fresh pass, the topic + the
     // persisted revise feedback bundle on a re-claim (attempts > 1) — the gate
@@ -1526,7 +1542,9 @@ async fn invoke(
         user_message,
         settings_path: scope_settings.settings_path.to_string_lossy().into_owned(),
         add_dirs: scope_settings.add_dirs.clone(),
-        sandbox_profile: None,
+        permission_mode: agent_bus_core::PermissionMode::AcceptEdits,
+        disallowed_tools: scope_settings.disallowed_tools.clone(),
+        plugin_dirs: vec![],
         working_dir,
         output_kind: kind,
     };
@@ -1565,6 +1583,7 @@ async fn invoke(
             Err(runners::output::RunnerError::NoStructuredOutput {
                 detail: format!("asked for {kind:?}, got {:?}", o.result.kind()),
                 usage: o.usage,
+                denials: o.permission_denials,
             })
         }
     });
@@ -1894,7 +1913,7 @@ mod tests {
     }
 
     fn out(result: WorkerResult) -> RunnerOutput {
-        RunnerOutput { result, final_text: String::new(), usage: RunnerUsage::default() }
+        RunnerOutput { result, final_text: String::new(), usage: RunnerUsage::default(), permission_denials: vec![] }
     }
 
     fn producer_out() -> RunnerOutput {
@@ -1919,7 +1938,7 @@ mod tests {
     }
 
     fn no_structured() -> RunnerError {
-        RunnerError::NoStructuredOutput { detail: "the run ended without a structured_output".into(), usage: RunnerUsage::default() }
+        RunnerError::NoStructuredOutput { detail: "the run ended without a structured_output".into(), usage: RunnerUsage::default(), denials: vec![] }
     }
 
     /// A runner that answers by the requested output kind, the way the real CLI
@@ -3222,6 +3241,7 @@ mod tests {
             result: WorkerResult::Reviewer(ReviewerOutput { verdict: Verdict::Revise, reason: "thin".into(), artifact: None }),
             final_text: String::new(),
             usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3, cost_micros: None },
+            permission_denials: vec![],
         };
         let mut ctx = ctx_with(pool, p.clone(), Arc::new(FakeRunner::always(out))).await;
         ctx.audit = Some(audit.clone());
@@ -3258,6 +3278,7 @@ mod tests {
             result: WorkerResult::Producer(ProducerOutput { artifact: None, description: None }),
             final_text: String::new(),
             usage: RunnerUsage { model: "m".into(), input_tokens: 1, output_tokens: 1, cache_creation: 0, cache_read: 0, cost_micros: None },
+            permission_denials: vec![],
         };
         let mut ctx = ctx_with(pool, p.clone(), Arc::new(FakeRunner::always(out))).await;
         ctx.audit = Some(audit.clone());
@@ -3311,6 +3332,7 @@ mod tests {
             result: WorkerResult::Producer(ProducerOutput { artifact: None, description: None }),
             final_text: String::new(),
             usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3, cost_micros: None },
+            permission_denials: vec![],
         };
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
         let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
@@ -3448,7 +3470,7 @@ mod tests {
         let (pool, audit) = pool_with_audit().await;
         let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
         let usage = RunnerUsage { model: "m".into(), input_tokens: 40, output_tokens: 9, cache_creation: 3, cache_read: 2, cost_micros: Some(70) };
-        let err = RunnerError::NoStructuredOutput { detail: "none".into(), usage };
+        let err = RunnerError::NoStructuredOutput { detail: "none".into(), usage, denials: vec![] };
         let mut ctx = ctx_with(pool, p, Arc::new(FakeRunner::new(vec![Err(err)]))).await;
         ctx.audit = Some(audit.clone());
         let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));

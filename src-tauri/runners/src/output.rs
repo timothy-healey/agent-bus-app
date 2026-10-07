@@ -2,7 +2,7 @@
 //! Nothing here mentions stream-json, CLI flags, or HTTP: those are sealed
 //! inside the concrete runners. Runtime sees only RunnerOutput/RunnerError.
 
-use agent_bus_core::{OutputKind, WorkerResult};
+use agent_bus_core::{OutputKind, PermissionDenial, PermissionMode, WorkerResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,6 +30,10 @@ pub struct RunnerOutput {
     pub final_text: String,
     /// Token usage recorded across the invocation.
     pub usage: RunnerUsage,
+    /// Actions the worker was refused, by a rule or by the auto-mode
+    /// classifier. Reported, never fatal.
+    #[serde(default)]
+    pub permission_denials: Vec<PermissionDenial>,
 }
 
 #[derive(Debug, Error)]
@@ -56,7 +60,12 @@ pub enum RunnerError {
     /// the missing object is the only signal. `usage` is what the run cost: the
     /// whole run, including the CLI's repair nudge, was paid for.
     #[error("no structured output: {detail}")]
-    NoStructuredOutput { detail: String, usage: RunnerUsage },
+    NoStructuredOutput { detail: String, usage: RunnerUsage, denials: Vec<PermissionDenial> },
+    /// The CLI ran the worker in a different permission mode than requested
+    /// (a model without auto mode silently falls back to `default`). `usage`
+    /// and `denials` are what the run cost and was refused.
+    #[error("permission mode mismatch: requested {requested}, got {actual}")]
+    PermissionModeMismatch { requested: String, actual: String, usage: RunnerUsage, denials: Vec<PermissionDenial> },
     /// Any other failure, with a message.
     #[error("runner failed: {0}")]
     Other(String),
@@ -67,6 +76,22 @@ impl RunnerError {
     /// specially (release the task, don't bump attempts).
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, RunnerError::RateLimited(_))
+    }
+
+    /// The usage a failed run still paid for, when the stream got that far.
+    pub fn paid_usage(&self) -> Option<&RunnerUsage> {
+        match self {
+            RunnerError::NoStructuredOutput { usage, .. } | RunnerError::PermissionModeMismatch { usage, .. } => Some(usage),
+            _ => None,
+        }
+    }
+
+    /// The denials a failed run collected before it failed.
+    pub fn denials(&self) -> &[PermissionDenial] {
+        match self {
+            RunnerError::NoStructuredOutput { denials, .. } | RunnerError::PermissionModeMismatch { denials, .. } => denials,
+            _ => &[],
+        }
     }
 
     /// True when the failure is a model-not-found/unavailable (G6) — surfaced as
@@ -130,14 +155,12 @@ pub struct InvocationRequest {
     pub settings_path: String,
     /// Directories the runner should grant via --add-dir.
     pub add_dirs: Vec<String>,
-    /// **EXPERIMENTAL (S3) · macOS-only · CLI-runner-only.** When `Some`, the CLI
-    /// runner wraps the `claude` subprocess in `sandbox-exec -p <profile>`.
-    /// CLI-shaped data owned by the Runners ACL — the SBPL idiom never crosses
-    /// the `Runner` trait outward: Runtime sets only the engine's `sandbox`
-    /// bool and never reads this string. `None` (the default) = unchanged
-    /// behavior. The AnthropicApiRunner ignores it (no subprocess to confine).
-    /// Live confinement is structural-only (unverified) — NOT a proven boundary.
-    pub sandbox_profile: Option<String>,
+    /// The permission mode the worker runs in.
+    pub permission_mode: PermissionMode,
+    /// Tools removed from the worker (`--disallowed-tools=`).
+    pub disallowed_tools: Vec<String>,
+    /// Plugin directories loaded explicitly (`--plugin-dir=`, one each).
+    pub plugin_dirs: Vec<String>,
     /// The directory the child `claude` process runs in (LF26). The composition
     /// root resolves this to the work-item's working dir (worktree for
     /// implementers, target repo otherwise). `None` = inherit the parent's cwd
@@ -228,6 +251,7 @@ mod tests {
                 cache_read: 5,
                 cost_micros: None,
             },
+            permission_denials: vec![],
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: RunnerOutput = serde_json::from_str(&s).unwrap();
@@ -236,7 +260,7 @@ mod tests {
 
     #[test]
     fn no_structured_output_carries_its_detail_and_is_not_a_rate_limit() {
-        let e = RunnerError::NoStructuredOutput { detail: "the result carried no structured_output".into(), usage: RunnerUsage::default() };
+        let e = RunnerError::NoStructuredOutput { detail: "the result carried no structured_output".into(), usage: RunnerUsage::default(), denials: vec![] };
         assert!(!e.is_rate_limited());
         assert!(e.to_string().contains("no structured output"));
         assert!(e.to_string().contains("the result carried no structured_output"));
@@ -296,13 +320,14 @@ mod tests {
             result: WorkerResult::Producer(ProducerOutput { artifact: Some("a.md".into()), description: None }),
             final_text: "x".into(),
             usage: RunnerUsage::default(),
+            permission_denials: vec![],
         };
         let fake = FakeRunner::always(out);
         let req = InvocationRequest {
             task_id: "T".into(), team_id: "t".into(), model: "m".into(),
             effort: agent_bus_core::Effort::Default, system_prompt: String::new(), user_message: String::new(),
             settings_path: String::new(), add_dirs: vec![],
-            sandbox_profile: None,
+            permission_mode: agent_bus_core::PermissionMode::AcceptEdits, disallowed_tools: vec![], plugin_dirs: vec![],
             working_dir: None,
             output_kind: OutputKind::Producer,
         };
