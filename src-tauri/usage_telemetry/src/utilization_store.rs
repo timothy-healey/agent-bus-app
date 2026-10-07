@@ -31,7 +31,23 @@ impl UtilizationStore {
     }
 
     pub async fn record_ok(&self, reading: &UtilizationReading, now: i64) {
-        let json = serde_json::to_string(reading).unwrap_or_default();
+        // Validate the reading for non-finite utilization_pct
+        for limit in &reading.limits {
+            if !limit.utilization_pct.is_finite() {
+                self.record_err("usage reading invalid: non-finite utilization", now).await;
+                return;
+            }
+        }
+
+        // Attempt to serialize the reading
+        let json = match serde_json::to_string(reading) {
+            Ok(j) => j,
+            Err(e) => {
+                self.record_err(&format!("usage reading could not be stored: {e}"), now).await;
+                return;
+            }
+        };
+
         if let Err(e) = sqlx::query(
             "UPDATE utilization_state SET reading_json = ?, last_ok_at = ?, last_attempt_at = ?, last_error = NULL WHERE id = 1",
         )
@@ -57,20 +73,52 @@ impl UtilizationStore {
     }
 
     pub async fn load(&self) -> StoredUtilization {
-        let row: Option<(Option<String>, Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+        let row: Result<Option<(Option<String>, Option<i64>, Option<i64>, Option<String>)>, _> = sqlx::query_as(
             "SELECT reading_json, last_ok_at, last_attempt_at, last_error FROM utilization_state WHERE id = 1",
         )
         .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten();
+        .await;
+
+        let row = match row {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("usage_telemetry: usage store unreadable: {e}");
+                return StoredUtilization {
+                    reading: None,
+                    last_ok_at: None,
+                    last_attempt_at: None,
+                    last_error: Some(format!("usage store unreadable: {e}")),
+                };
+            }
+        };
+
         match row {
-            Some((json, last_ok_at, last_attempt_at, last_error)) => StoredUtilization {
-                reading: json.and_then(|j| serde_json::from_str(&j).ok()),
-                last_ok_at,
-                last_attempt_at,
-                last_error,
-            },
+            Some((json, last_ok_at, last_attempt_at, last_error)) => {
+                let reading = match json {
+                    Some(ref j) if !j.is_empty() => {
+                        match serde_json::from_str::<UtilizationReading>(j) {
+                            Ok(r) => Some(r),
+                            Err(e) => {
+                                eprintln!("usage_telemetry: stored usage reading unreadable: {e}");
+                                return StoredUtilization {
+                                    reading: None,
+                                    last_ok_at,
+                                    last_attempt_at,
+                                    last_error: Some("stored usage reading unreadable".to_string()),
+                                };
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+
+                StoredUtilization {
+                    reading,
+                    last_ok_at,
+                    last_attempt_at,
+                    last_error,
+                }
+            }
             None => StoredUtilization::default(),
         }
     }
@@ -114,5 +162,70 @@ mod tests {
         assert_eq!(s.last_attempt_at, Some(20));
         assert_eq!(s.last_error.as_deref(), Some("usage query timed out"));
         assert!(!s.available());
+    }
+
+    #[tokio::test]
+    async fn db_error_surfaces_as_last_error() {
+        let st = store().await;
+        // Drop the utilization_state table to cause a query error
+        sqlx::query("DROP TABLE utilization_state").execute(&st.pool).await.unwrap();
+        let s = st.load().await;
+        assert!(s.reading.is_none());
+        assert!(s.last_error.is_some());
+        assert!(s.last_error.as_ref().unwrap().starts_with("usage store unreadable:"));
+        assert!(!s.available());
+    }
+
+    #[tokio::test]
+    async fn corrupt_stored_reading_surfaces_as_error() {
+        let st = store().await;
+        // Store a good reading first
+        st.record_ok(&reading(50.0), 10).await;
+        // Corrupt the stored JSON
+        sqlx::query("UPDATE utilization_state SET reading_json = 'garbage' WHERE id = 1")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let s = st.load().await;
+        assert!(s.reading.is_none());
+        assert_eq!(s.last_error.as_deref(), Some("stored usage reading unreadable"));
+        assert!(!s.available());
+    }
+
+    #[tokio::test]
+    async fn nan_reading_is_rejected() {
+        let st = store().await;
+        // Store a good reading first
+        st.record_ok(&reading(50.0), 10).await;
+        assert!(st.load().await.available());
+
+        // Try to store a reading with NaN utilization_pct
+        st.record_ok(&reading(f64::NAN), 20).await;
+
+        let s = st.load().await;
+        // The good reading should still be there
+        assert_eq!(s.reading, Some(reading(50.0)));
+        assert_eq!(s.last_ok_at, Some(10));
+        // But the store should now be unavailable with an error
+        assert_eq!(s.last_error.as_deref(), Some("usage reading invalid: non-finite utilization"));
+        assert!(!s.available());
+    }
+
+    #[tokio::test]
+    async fn recovery_from_error() {
+        let st = store().await;
+        // Record an error
+        st.record_err("temporary failure", 10).await;
+        let s = st.load().await;
+        assert!(!s.available());
+
+        // Recover with a good reading
+        st.record_ok(&reading(35.0), 20).await;
+        let s = st.load().await;
+        assert_eq!(s.reading, Some(reading(35.0)));
+        assert_eq!(s.last_ok_at, Some(20));
+        assert_eq!(s.last_attempt_at, Some(20));
+        assert!(s.last_error.is_none());
+        assert!(s.available());
     }
 }
