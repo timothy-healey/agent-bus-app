@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Distinguishes an inline anchored comment from the optional overall-direction
-/// note bundled with a revise.
+/// note bundled with a revise, and from a reviewer team's verdict and reason
+/// (written by Runtime, anchored to the reviewed artifact rather than a span).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommentKind {
     Inline,
     Direction,
+    Review,
 }
 
 impl CommentKind {
@@ -14,6 +16,7 @@ impl CommentKind {
         match self {
             CommentKind::Inline => "inline",
             CommentKind::Direction => "direction",
+            CommentKind::Review => "review",
         }
     }
 
@@ -21,6 +24,7 @@ impl CommentKind {
         match s {
             "inline" => Some(CommentKind::Inline),
             "direction" => Some(CommentKind::Direction),
+            "review" => Some(CommentKind::Review),
             _ => None,
         }
     }
@@ -94,6 +98,8 @@ mod tests {
     fn comment_kind_parses_from_str() {
         assert_eq!(CommentKind::parse("inline"), Some(CommentKind::Inline));
         assert_eq!(CommentKind::parse("direction"), Some(CommentKind::Direction));
+        assert_eq!(CommentKind::parse("review"), Some(CommentKind::Review));
+        assert_eq!(CommentKind::Review.as_str(), "review");
         assert_eq!(CommentKind::parse("nope"), None);
     }
 }

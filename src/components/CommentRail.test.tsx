@@ -58,6 +58,44 @@ describe("CommentRail", () => {
     expect(onSelect).toHaveBeenCalledWith("c1");
   });
 
+  it("labels a review comment with the reviewing team and keeps it out of the count", () => {
+    render(
+      <CommentRail
+        comments={[
+          comment({
+            id: "r1",
+            kind: "review",
+            anchor_text: null,
+            anchor_offset: null,
+            effective_offset: null,
+            note: "spec-review: revise. error handling is thin",
+          }),
+          comment(),
+        ]}
+        onSelect={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const entry = screen.getByText("revise. error handling is thin").closest("[data-kind]");
+    expect(entry).toHaveAttribute("data-kind", "review");
+    expect(entry).toHaveTextContent("review");
+    expect(entry).toHaveTextContent("spec-review");
+    expect(screen.getByTestId("rail-count")).toHaveTextContent("1 comment");
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+  });
+
+  it("shows review comments even when there are no inline comments", () => {
+    render(
+      <CommentRail
+        comments={[comment({ id: "r1", kind: "review", anchor_text: null, note: "qa: approve. fine" })]}
+        onSelect={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect(screen.getByText("approve. fine")).toBeInTheDocument();
+    expect(screen.queryByText(/select text to comment/i)).not.toBeInTheDocument();
+  });
+
   it("calls onDelete when the delete affordance is clicked", () => {
     const onDelete = vi.fn();
     render(<CommentRail comments={[comment()]} onSelect={() => {}} onDelete={onDelete} />);

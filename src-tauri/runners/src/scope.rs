@@ -12,6 +12,11 @@ use workspace::paths::{resolve, PathResolveError, PathVars};
 /// never fetch from inside a worker).
 pub const ALWAYS_DENY: &[&str] = &["Bash(git push:*)", "Bash(git fetch:*)"];
 
+/// Tools always allowed regardless of team scope. `StructuredOutput` is how a
+/// worker returns its result; blocking it would turn every result into a
+/// missing Structured output.
+pub const ALWAYS_ALLOW: &[&str] = &["StructuredOutput"];
+
 #[derive(Debug, Error)]
 pub enum ScopeError {
     #[error("path resolution failed: {0}")]
@@ -54,7 +59,12 @@ pub fn build_settings(scope: &Scope, vars: &PathVars) -> Result<(SettingsFile, V
     add_dirs.sort();
     add_dirs.dedup();
 
-    let allow = scope.tools.clone();
+    let mut allow = scope.tools.clone();
+    for tool in ALWAYS_ALLOW {
+        if !allow.iter().any(|t| t == tool) {
+            allow.push(tool.to_string());
+        }
+    }
     let deny = ALWAYS_DENY.iter().map(|s| s.to_string()).collect();
 
     Ok((SettingsFile { permissions: Permissions { allow, deny } }, add_dirs))
@@ -207,6 +217,24 @@ mod tests {
         assert!(settings.permissions.allow.contains(&"Bash(git commit:*)".to_string()));
         assert!(settings.permissions.deny.contains(&"Bash(git push:*)".to_string()));
         assert!(settings.permissions.deny.contains(&"Bash(git fetch:*)".to_string()));
+    }
+
+    #[test]
+    fn build_settings_always_allows_structured_output() {
+        let vars = PathVars::new("/proj");
+        let empty = Scope { reads: vec![], writes: vec![], tools: vec![] };
+        let (settings, _) = build_settings(&empty, &vars).unwrap();
+        assert_eq!(settings.permissions.allow, vec!["StructuredOutput".to_string()]);
+        let (settings, _) = build_settings(&demo_scope(), &PathVars::new("/proj").with_target_repo("/repo")).unwrap();
+        assert!(settings.permissions.allow.contains(&"StructuredOutput".to_string()));
+    }
+
+    #[test]
+    fn build_settings_does_not_duplicate_a_listed_structured_output() {
+        let vars = PathVars::new("/proj");
+        let scope = Scope { reads: vec![], writes: vec![], tools: vec!["StructuredOutput".into(), "Read".into()] };
+        let (settings, _) = build_settings(&scope, &vars).unwrap();
+        assert_eq!(settings.permissions.allow.iter().filter(|t| *t == "StructuredOutput").count(), 1);
     }
 
     #[test]

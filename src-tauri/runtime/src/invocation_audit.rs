@@ -36,6 +36,8 @@ pub enum ErrorClass {
     ModelUnavailable,
     Spawn,
     NoResult,
+    /// The run ended without a Structured output, or with one of the wrong shape.
+    NoStructuredOutput,
     Other,
 }
 
@@ -47,6 +49,7 @@ impl ErrorClass {
             RunnerError::ModelUnavailable(_) => ErrorClass::ModelUnavailable,
             RunnerError::Spawn(_) => ErrorClass::Spawn,
             RunnerError::NoResult => ErrorClass::NoResult,
+            RunnerError::NoStructuredOutput { .. } => ErrorClass::NoStructuredOutput,
             RunnerError::Other(_) => ErrorClass::Other,
         }
     }
@@ -57,6 +60,7 @@ impl ErrorClass {
             ErrorClass::ModelUnavailable => "model_unavailable",
             ErrorClass::Spawn => "spawn",
             ErrorClass::NoResult => "no_result",
+            ErrorClass::NoStructuredOutput => "no_structured_output",
             ErrorClass::Other => "other",
         }
     }
@@ -456,6 +460,10 @@ mod tests {
         assert_eq!(ErrorClass::of(&RunnerError::RateLimited("x".into())).as_str(), "rate_limited");
         assert_eq!(ErrorClass::of(&RunnerError::Spawn("x".into())).as_str(), "spawn");
         assert_eq!(ErrorClass::of(&RunnerError::NoResult).as_str(), "no_result");
+        assert_eq!(
+            ErrorClass::of(&RunnerError::NoStructuredOutput { detail: "x".into(), usage: Default::default() }).as_str(),
+            "no_structured_output"
+        );
         assert_eq!(ErrorClass::of(&RunnerError::Other("x".into())).as_str(), "other");
         assert_eq!(ErrorClass::of(&RunnerError::ModelUnavailable("x".into())).as_str(), "model_unavailable");
     }

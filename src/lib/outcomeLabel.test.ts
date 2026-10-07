@@ -13,6 +13,7 @@ describe("outcomeLabel", () => {
     expect(outcomeLabel("error:model_unavailable")).toBe("model unavailable");
     expect(outcomeLabel("error:spawn")).toBe("could not start");
     expect(outcomeLabel("error:no_result")).toBe("no result");
+    expect(outcomeLabel("error:no_structured_output")).toBe("no structured output");
     expect(outcomeLabel("error:other")).toBe("failed");
   });
 

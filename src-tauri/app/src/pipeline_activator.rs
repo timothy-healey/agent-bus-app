@@ -46,6 +46,8 @@ pub struct WorkerDeps {
     // `EngineContext` (see `ctx_builder`), so a live run is observable.
     pub usage_sink: Option<Arc<dyn agent_bus_core::UsageSink>>,
     pub revision_reader: Option<Arc<dyn runtime::revision::RevisionBundleReader>>,
+    /// Stores each reviewer verdict's reason as a `review` comment.
+    pub review_writer: Option<Arc<dyn runtime::revision::ReviewCommentWriter>>,
     #[allow(dead_code)]
     pub pool: sqlx::SqlitePool,
     pub log_sink: Option<Arc<LogSinkFactory>>,
@@ -326,8 +328,7 @@ impl PipelineActivator {
                             StepOutcome::Advanced { .. }
                                 | StepOutcome::Failed { .. }
                                 | StepOutcome::Revised { .. }
-                                | StepOutcome::Escalated { .. }
-                        );
+                                | StepOutcome::Escalated { .. }                        );
                         if settled {
                             let _ = handle.emit(crate::events::TASK_CHANGED, "settled");
                             let _ = handle.emit(crate::events::USAGE_CHANGED, ());
@@ -379,6 +380,7 @@ impl PipelineActivator {
         let tasks = self.tasks.clone();
         let brake = self.brake.clone();
         let revision_reader = self.deps.revision_reader.clone();
+        let review_writer = self.deps.review_writer.clone();
         let usage_sink = self.deps.usage_sink.clone();
         let log_sink = self.deps.log_sink.clone();
         let audit = self.deps.audit.clone();
@@ -411,6 +413,7 @@ impl PipelineActivator {
             artifact_base: workspace::api::artifact_base_for(&app_data, &project_id_for_base),
             read_prompt: read_prompt.clone(),
             revision_reader: revision_reader.clone(),
+            review_writer: review_writer.clone(),
             usage_sink: usage_sink.clone(),
             log_sink: log_sink.clone(),
             audit: audit.clone(),

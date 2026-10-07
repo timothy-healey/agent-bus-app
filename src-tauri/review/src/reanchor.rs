@@ -94,13 +94,13 @@ pub fn reanchor_comments(comments: &[Comment], version_markdown: &str) -> Vec<Re
         .map(|c| {
             let marker = markers.iter().find(|m| m.comment_id == c.id);
             match (marker, c.kind) {
-                // Direction comments have no inline anchor; never re-anchored.
+                // Direction and review comments have no inline anchor; never re-anchored.
                 (Some(m), CommentKind::Inline) => ReanchoredComment {
                     comment: c.clone(),
                     status: CommentStatus::Addressed,
                     effective_offset: Some(m.offset as i64),
                 },
-                (Some(_), CommentKind::Direction) | (None, _) => ReanchoredComment {
+                (Some(_), CommentKind::Direction | CommentKind::Review) | (None, _) => ReanchoredComment {
                     comment: c.clone(),
                     status: CommentStatus::Open,
                     effective_offset: c.anchor_offset,

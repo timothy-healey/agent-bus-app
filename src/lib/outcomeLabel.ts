@@ -20,6 +20,7 @@ export function outcomeLabel(outcome: string): string {
       case "model_unavailable": return "model unavailable";
       case "spawn": return "could not start";
       case "no_result": return "no result";
+      case "no_structured_output": return "no structured output";
       case "other": return "failed";
       default: return c.replace(/_/g, " ");
     }

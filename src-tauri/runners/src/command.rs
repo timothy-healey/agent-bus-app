@@ -35,6 +35,12 @@ pub fn build_args(req: &InvocationRequest) -> Vec<String> {
         args.push("--effort".into());
         args.push(level.to_string());
     }
+    // The Structured output schema for this stage kind, as ONE argv element in
+    // the `=` form so the flag can never swallow the positional prompt.
+    args.push(format!(
+        "--json-schema={}",
+        serde_json::to_string(&req.output_kind.schema()).expect("a schema serialises")
+    ));
     // The user message is the final positional argument.
     args.push(req.user_message.clone());
     args
@@ -59,7 +65,7 @@ pub fn sandbox_wrap(profile: &str, argv: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_bus_core::Effort;
+    use agent_bus_core::{Effort, OutputKind};
 
     fn req() -> InvocationRequest {
         InvocationRequest {
@@ -73,6 +79,32 @@ mod tests {
             add_dirs: vec!["/repo".into(), "/p/artifacts/analyses".into()],
             sandbox_profile: None,
             working_dir: None,
+            output_kind: OutputKind::Reviewer,
+        }
+    }
+
+    #[test]
+    fn json_schema_is_one_equals_form_element_carrying_the_kind_schema() {
+        let r = req();
+        let args = build_args(&r);
+        let flags: Vec<&String> = args.iter().filter(|a| a.starts_with("--json-schema")).collect();
+        assert_eq!(flags.len(), 1, "exactly one --json-schema element");
+        let tail = flags[0].strip_prefix("--json-schema=").expect("the = form, one argv element");
+        assert!(!tail.contains('\n'), "compact JSON");
+        let schema: serde_json::Value = serde_json::from_str(tail).unwrap();
+        assert_eq!(schema, r.output_kind.schema());
+        // the positional prompt survives
+        assert_eq!(args.last().unwrap(), "Investigate topic X");
+    }
+
+    #[test]
+    fn each_output_kind_passes_its_own_schema() {
+        for kind in [OutputKind::Generator, OutputKind::Producer, OutputKind::Reviewer] {
+            let mut r = req();
+            r.output_kind = kind;
+            let args = build_args(&r);
+            let tail = args.iter().find_map(|a| a.strip_prefix("--json-schema=")).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(tail).unwrap(), kind.schema());
         }
     }
 

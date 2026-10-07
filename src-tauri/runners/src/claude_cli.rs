@@ -98,7 +98,7 @@ impl ClaudeCliRunner {
             argv = crate::command::sandbox_wrap(profile, &argv);
         }
         let stdout = (self.spawn)(&argv, req.working_dir.as_deref())?;
-        parse_stream_streaming(&stdout, &req.model, forward)
+        parse_stream_streaming(&stdout, &req.model, req.output_kind, forward)
     }
 }
 
@@ -127,7 +127,9 @@ impl Runner for ClaudeCliRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_bus_core::Verdict;
+    use agent_bus_core::{OutputKind, ReviewerOutput, Verdict, WorkerResult};
+
+    const APPROVE: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"{}","structured_output":{"verdict":"approve","reason":"fine","artifact":"a.md"},"usage":{"input_tokens":5,"output_tokens":7}}"#;
 
     fn req() -> InvocationRequest {
         InvocationRequest {
@@ -141,6 +143,7 @@ mod tests {
             add_dirs: vec![],
             sandbox_profile: None,
             working_dir: None,
+            output_kind: OutputKind::Reviewer,
         }
     }
 
@@ -149,7 +152,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let s = seen.clone();
-        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let canned = APPROVE;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, cwd| {
             *s.lock().unwrap() = cwd.map(|c| c.to_string());
             Ok(canned.to_string())
@@ -162,21 +165,24 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_parses_canned_stdout_without_a_real_binary() {
-        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve\nARTIFACT: a.md","usage":{"input_tokens":5,"output_tokens":7}}"#;
+        let canned = APPROVE;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
             // confirm the args were built (spec command line) before "spawning"
             assert!(args.contains(&"--print".to_string()));
+            assert!(args.iter().any(|a| a.starts_with("--json-schema=")));
             Ok(canned.to_string())
         }));
         let out = runner.invoke(&req()).await.unwrap();
-        assert_eq!(out.verdict, Verdict::Approve);
-        assert_eq!(out.artifact_path.as_deref(), Some("a.md"));
+        assert_eq!(
+            out.result,
+            WorkerResult::Reviewer(ReviewerOutput { verdict: Verdict::Approve, reason: "fine".into(), artifact: Some("a.md".into()) })
+        );
         assert_eq!(out.usage.input_tokens, 5);
     }
 
     #[tokio::test]
     async fn spawn_argv_starts_with_claude_bin_when_no_sandbox() {
-        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let canned = APPROVE;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
             // program name is now the first argv element handed to the SpawnFn
             assert_eq!(args[0], crate::command::CLAUDE_BIN);
@@ -189,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_argv_is_sandbox_wrapped_when_profile_present() {
-        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let canned = APPROVE;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |args, _cwd| {
             assert_eq!(args[0], "sandbox-exec");
             assert_eq!(args[1], "-p");
@@ -201,6 +207,14 @@ mod tests {
         let mut r = req();
         r.sandbox_profile = Some("(version 1)(deny default)".into());
         runner.invoke(&r).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_without_structured_output_is_an_error_even_with_a_verdict_line() {
+        let canned = r#"{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: approve","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let runner = ClaudeCliRunner::with_spawner(Box::new(move |_a, _c| Ok(canned.to_string())));
+        let err = runner.invoke(&req()).await.unwrap_err();
+        assert!(matches!(err, RunnerError::NoStructuredOutput { .. }), "got {err:?}");
     }
 
     #[tokio::test]
@@ -231,21 +245,21 @@ mod tests {
         // stream-json sample); the result line is authoritative but is NOT streamed.
         let canned = r#"{"type":"system","model":"claude-opus-4-7"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Analysing.\nVERDICT: approve"}]}}
-{"type":"result","subtype":"success","is_error":false,"result":"Analysing.\nVERDICT: approve","usage":{"input_tokens":5,"output_tokens":7}}"#;
+{"type":"result","subtype":"success","is_error":false,"result":"{}","structured_output":{"verdict":"approve","reason":"fine"},"usage":{"input_tokens":5,"output_tokens":7}}"#;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, _cwd| Ok(canned.to_string())));
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
         let sink: LogSink = Box::new(move |d: &LogDelta| s.lock().unwrap().push(d.text.clone()));
         let out = runner.invoke_stream(&req(), &sink).await.unwrap();
-        // final output identical to the non-streaming path
-        assert_eq!(out.verdict, Verdict::Approve);
+        // the verdict comes from structured_output, not the prose
+        assert!(matches!(out.result, WorkerResult::Reviewer(ref r) if r.verdict == Verdict::Approve));
         // the assistant prose was streamed (result line is not a delta)
         assert_eq!(*seen.lock().unwrap(), vec!["Analysing.\nVERDICT: approve".to_string()]);
     }
 
     #[tokio::test]
     async fn invoke_and_invoke_stream_produce_identical_output() {
-        let canned = r#"{"type":"result","is_error":false,"result":"VERDICT: approve\nARTIFACT: a.md","usage":{"input_tokens":5,"output_tokens":7}}"#;
+        let canned = APPROVE;
         let runner = ClaudeCliRunner::with_spawner(Box::new(move |_args, _cwd| Ok(canned.to_string())));
         let plain = runner.invoke(&req()).await.unwrap();
         let noop: crate::output::LogSink = Box::new(|_d: &crate::output::LogDelta| {});

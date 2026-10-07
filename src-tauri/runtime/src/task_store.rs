@@ -163,6 +163,26 @@ impl TaskStore {
         Ok(())
     }
 
+    /// The highest attempt count among run `run_id`'s tasks for `item_key` at
+    /// `stage`: how many times that stage has worked the item. `None` when it
+    /// never has.
+    pub async fn max_attempts_at_stage(
+        &self,
+        run_id: &str,
+        item_key: &str,
+        stage: &str,
+    ) -> Result<Option<u32>, TaskStoreError> {
+        let (max,): (Option<i64>,) = sqlx::query_as(
+            "SELECT MAX(attempts) FROM tasks WHERE run_id = ? AND item_key = ? AND current_stage = ?",
+        )
+        .bind(run_id)
+        .bind(item_key)
+        .bind(stage)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(max.map(|m| m as u32))
+    }
+
     /// Persist just the work-item's resolved worktree path (worktree isolation).
     /// Single-column UPDATE so it does not race the broader `update`.
     pub async fn set_worktree_path(&self, task_id: &str, path: &str) -> Result<(), TaskStoreError> {
@@ -301,6 +321,27 @@ mod tests {
         store.set_worktree_path(&task.id.0, "/p/worktrees/R-1/alpha").await.unwrap();
         let back = store.get(&task.id).await.unwrap();
         assert_eq!(back.worktree_path.as_deref(), Some("/p/worktrees/R-1/alpha"));
+    }
+
+    #[tokio::test]
+    async fn max_attempts_at_stage_reads_only_that_items_tasks_at_that_stage() {
+        let store = TaskStore::new(fresh_pool().await);
+        let put = |run: &str, key: &str, stage: &str, attempts: u32| {
+            let mut t = Task::work_item("p".into(), "pl".into(), run.into(), key.into(), stage.into(), None, None, 100);
+            t.attempts = attempts;
+            t
+        };
+        for t in [
+            put("R-1", "alpha", "prod", 1),
+            put("R-1", "alpha", "prod", 2),
+            put("R-1", "alpha", "review", 3), // another stage
+            put("R-1", "beta", "prod", 3),    // another item
+            put("R-2", "alpha", "prod", 3),   // another run
+        ] {
+            store.insert(&t).await.unwrap();
+        }
+        assert_eq!(store.max_attempts_at_stage("R-1", "alpha", "prod").await.unwrap(), Some(2));
+        assert_eq!(store.max_attempts_at_stage("R-1", "gamma", "prod").await.unwrap(), None);
     }
 
     #[tokio::test]

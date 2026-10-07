@@ -45,8 +45,8 @@ export interface BrakeState {
 /// One invocation as the L3 history panel surfaces it (plan H). Mirrors the Rust
 /// `InvocationRow` DTO — the sealed audit read shape. `outcome` is the single
 /// encoded string: `verdict:approve|revise|reject`, `error:<class>` (one of
-/// `rate_limited`/`model_unavailable`/`spawn`/`no_result`/`other`), or `""` for an
-/// in-flight (not-yet-settled) invocation.
+/// `rate_limited`/`model_unavailable`/`spawn`/`no_result`/`no_structured_output`/`other`),
+/// or `""` for an in-flight (not-yet-settled) invocation.
 export interface InvocationRow {
   invocation_id: string;
   team_id: string;
