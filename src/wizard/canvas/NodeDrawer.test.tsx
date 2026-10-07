@@ -6,10 +6,10 @@ const LIST = {
   source: "live" as const,
   cli_version: "2.1.292",
   models: [
-    { value: "default", resolved_model: "claude-opus-5-5", display_name: "Default", description: null, effort_levels: ["low", "medium", "high", "xhigh", "max"] },
-    { value: "opus", resolved_model: "claude-opus-5-5", display_name: "Opus 5.5", description: null, effort_levels: ["low", "high", "xhigh"] },
-    { value: "claude-opus-4-6", resolved_model: "claude-opus-4-6", display_name: "Opus 4.6", description: null, effort_levels: ["low", "high"] },
-    { value: "haiku", resolved_model: "claude-haiku-4-5-20251001", display_name: "Haiku 4.5", description: null, effort_levels: [] },
+    { value: "default", resolved_model: "claude-opus-5-5", display_name: "Default", description: null, effort_levels: ["low", "medium", "high", "xhigh", "max"], supports_auto_mode: true },
+    { value: "opus", resolved_model: "claude-opus-5-5", display_name: "Opus 5.5", description: null, effort_levels: ["low", "high", "xhigh"], supports_auto_mode: true },
+    { value: "claude-opus-4-6", resolved_model: "claude-opus-4-6", display_name: "Opus 4.6", description: null, effort_levels: ["low", "high"], supports_auto_mode: true },
+    { value: "haiku", resolved_model: "claude-haiku-4-5-20251001", display_name: "Haiku 4.5", description: null, effort_levels: [], supports_auto_mode: false },
   ],
 };
 const refreshMock = vi.fn(async () => LIST);
@@ -18,6 +18,14 @@ vi.mock("../../ipc/models", async (importOriginal) => ({
   getModelList: vi.fn(async () => LIST),
   refreshModelList: () => refreshMock(),
   onModelListUpdated: vi.fn(async () => () => {}),
+}));
+const listPluginsMock = vi.fn(async () => [
+  { name: "ddd-council", marketplace: "ddd-council", path: "/plugins/ddd-council" },
+  { name: "superpowers", marketplace: "official", path: "/plugins/superpowers" },
+]);
+vi.mock("../../ipc/plugins", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../ipc/plugins")>()),
+  listPlugins: () => listPluginsMock(),
 }));
 const listDirMock = vi.fn();
 vi.mock("../../ipc/workspace", () => ({ listDir: (p: string) => listDirMock(p) }));
@@ -144,6 +152,27 @@ describe("NodeDrawer — A4 skill autocomplete on the prompt field", () => {
     vi.unstubAllGlobals();
   });
 
+  it("picking a plugin's skill in the prompt adds that plugin to the team", async () => {
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    let latest: DraftPipeline | null = null;
+    function Spy() {
+      const [draft, setDraft] = useState<DraftPipeline>(teamDraft);
+      latest = draft;
+      return <NodeDrawer draft={draft} selectedId="research" onChange={setDraft} onClose={() => {}} skills={skills} />;
+    }
+    render(<Spy />);
+    const ta = screen.getByLabelText("prompt for research") as HTMLTextAreaElement;
+    fireEvent.change(ta, { target: { value: "/bra" } });
+    ta.setSelectionRange(4, 4);
+    fireEvent.click(ta);
+    await waitFor(() => expect(screen.getByRole("listbox")).toBeInTheDocument());
+    const option = screen.getAllByRole("option").find((o) => o.textContent?.includes("/brainstorming"))!;
+    fireEvent.mouseDown(option);
+    await waitFor(() => expect(latest!.teams[0].scope.plugins).toEqual(["superpowers"]));
+    expect(latest!.teams[0].prompt_body).toBe("/brainstorming ");
+    vi.unstubAllGlobals();
+  });
+
   it("recognized tokens get the highlight class in the mirror overlay", () => {
     render(<ControlledDrawer initial="run /brainstorming and /nope" />);
     const tinted = document.querySelectorAll('.abp-skill-token[data-recognized="true"]');
@@ -260,6 +289,86 @@ describe("NodeDrawer — G8 tooltips", () => {
     const help = screen.getByRole("button", { name: /help for Role/i });
     fireEvent.click(help);
     expect(screen.getByRole("tooltip")).toBeInTheDocument();
+  });
+});
+
+describe("NodeDrawer — scope grants and plugins", () => {
+  it("each grant checkbox toggles its grant", () => {
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
+    for (const [label, grant] of [
+      ["Bash (all commands)", "bash"],
+      ["Agent", "agent"],
+      ["WebFetch", "web-fetch"],
+      ["WebSearch", "web-search"],
+      ["Remote git", "remote-git"],
+    ]) {
+      const box = screen.getByRole("checkbox", { name: `${label} for research` });
+      expect(box).not.toBeChecked();
+      fireEvent.click(box);
+      expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.grants).toEqual([grant]);
+    }
+  });
+
+  it("a granted grant shows checked and unchecking removes it", () => {
+    const onChange = vi.fn();
+    const d = teamDraft();
+    const draft = { ...d, teams: d.teams.map((t) => ({ ...t, scope: { ...t.scope, grants: ["agent", "bash(git diff:*)"] } })) };
+    render(<NodeDrawer draft={draft} selectedId="research" onChange={onChange} onClose={() => {}} />);
+    const box = screen.getByRole("checkbox", { name: "Agent for research" });
+    expect(box).toBeChecked();
+    fireEvent.click(box);
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.grants).toEqual(["bash(git diff:*)"]);
+    expect(screen.getByLabelText("bash patterns for research")).toHaveValue("git diff:*");
+  });
+
+  it("bash patterns flow through as pattern grants", () => {
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText("bash patterns for research"), { target: { value: "git diff:*, git log:*" } });
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.grants).toEqual(["bash(git diff:*)", "bash(git log:*)"]);
+  });
+
+  it("lists the installed plugins and toggles one onto the team", async () => {
+    const onChange = vi.fn();
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={onChange} onClose={() => {}} />);
+    const box = await screen.findByRole("checkbox", { name: "plugin superpowers for research" });
+    fireEvent.click(box);
+    expect(onChange.mock.calls.at(-1)?.[0].teams[0].scope.plugins).toEqual(["superpowers"]);
+  });
+
+  it("a declared plugin that is not installed still shows, marked", async () => {
+    const d = teamDraft();
+    const draft = { ...d, teams: d.teams.map((t) => ({ ...t, scope: { ...t.scope, plugins: ["ghost"] } })) };
+    render(<NodeDrawer draft={draft} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    await screen.findByRole("checkbox", { name: "plugin superpowers for research" });
+    const ghost = screen.getByRole("checkbox", { name: "plugin ghost for research" });
+    expect(ghost).toBeChecked();
+    expect(screen.getByText(/not installed/)).toBeInTheDocument();
+  });
+
+  it("warns when Remote git is granted on a model without auto mode", async () => {
+    const draft = withModel("haiku");
+    const withGrant = { ...draft, teams: draft.teams.map((t) => ({ ...t, scope: { ...t.scope, grants: ["remote-git"] } })) };
+    render(<NodeDrawer draft={withGrant} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    expect(await screen.findByText(/Remote git needs a model with auto mode/)).toBeInTheDocument();
+  });
+
+  it("does not warn on a model with auto mode", async () => {
+    const draft = withModel("opus");
+    const withGrant = { ...draft, teams: draft.teams.map((t) => ({ ...t, scope: { ...t.scope, grants: ["remote-git"] } })) };
+    render(<NodeDrawer draft={withGrant} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    await screen.findByRole("option", { name: "haiku → claude-haiku-4-5-20251001" });
+    expect(screen.queryByText(/Remote git needs a model with auto mode/)).not.toBeInTheDocument();
+  });
+
+  it("the scope help explains removed versus denied without an em dash", () => {
+    render(<NodeDrawer draft={teamDraft()} selectedId="research" onChange={() => {}} onClose={() => {}} />);
+    const tip = screen.getByRole("button", { name: /help for Grants/i });
+    fireEvent.click(tip);
+    const text = document.body.textContent ?? "";
+    expect(text).toMatch(/removed/);
+    expect(text).toMatch(/denied/);
   });
 });
 

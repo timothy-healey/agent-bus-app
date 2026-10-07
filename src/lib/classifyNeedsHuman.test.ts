@@ -7,7 +7,7 @@ function row(outcome: string, over: Partial<InvocationRow> = {}): InvocationRow 
   return {
     invocation_id: "I-1", team_id: "spec", model: "m", attempts: 1,
     started_at: 10, settled_at: 20, outcome, input_tokens: 0, output_tokens: 0,
-    ...over,
+    permission_denials: [], ...over,
   };
 }
 

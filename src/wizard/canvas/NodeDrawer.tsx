@@ -1,9 +1,10 @@
 import type React from "react";
 import type { CSSProperties } from "react";
-import type { DraftPipeline, DraftTeam } from "../../ipc/pipeline";
+import type { DraftPipeline, DraftTeam, SimpleGrant } from "../../ipc/pipeline";
 import { regenerateTeamPrompt } from "../../ipc/pipeline";
 import type { SkillEntry } from "../../ipc/skills";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { listPlugins, type PluginInfo } from "../../ipc/plugins";
 import { Drawer } from "../../components/ui/Drawer";
 import { Button } from "../../components/ui/Button";
 import { SkillAutocomplete } from "./SkillAutocomplete";
@@ -17,7 +18,11 @@ import {
   setPromptBody,
   setTeamModel,
   setTeamEffort,
-  setTeamTools,
+  setTeamGrant,
+  setTeamBashPatterns,
+  bashPatterns,
+  setTeamPlugin,
+  addTeamPlugin,
   setTeamReads,
   setTeamWrites,
   setTeamRole,
@@ -154,7 +159,9 @@ function Field({ label, children }: { label: React.ReactNode; children: React.Re
 const HELP = {
   reads: "Paths the agent may READ (relative to the project's target repo). Add an artifacts path so it can see upstream work. Leave empty to read nothing extra.",
   writes: "Paths the agent may WRITE. A producer needs its artifacts dir; a reviewer that only judges can have none.",
-  tools: "Allowed tool names (e.g. Read, Edit, Bash, WebFetch). WebFetch/WebSearch also open network access under the sandbox profile.",
+  grants: "Every worker can read, search, edit and use skills. A tool you don't grant here is removed, so the worker never sees it. Limits inside a granted tool are denied by rule, and each denial shows on the task. Remote git lets the worker push, fetch and use gh when the task asks for it; it needs a model with auto mode. Force pushes, pushes to main or master, merging PRs and creating or deleting repos stay forbidden.",
+  bashPatterns: "Shell commands this team may run without the full Bash grant, as CLI patterns, e.g. git diff:*",
+  plugins: "Claude Code plugins loaded for this team's workers. Workers never load your own plugins, so a skill works only if its plugin is listed here. Picking a skill in the prompt adds its plugin.",
   role: "producer = does work and hands off on approve. reviewer = judges upstream work and emits approve / revise / reject.",
   runner: "Which Claude runs this team and how hard it reasons. Models and effort levels come from your installed Claude CLI. An API-key env var name is only used by the anthropic-api runner.",
   scale: "Worker concurrency for this team: minimum kept warm and maximum it can burst to.",
@@ -242,6 +249,97 @@ function RunnerPickers({ draft, team, onChange }: { draft: DraftPipeline; team: 
         {list && <span style={{ fontSize: "var(--ts-xs)", color: "var(--text-3)" }}>{sourceLabel(list.source)}</span>}
       </div>
     </>
+  );
+}
+
+const GRANTS: { grant: SimpleGrant; label: string }[] = [
+  { grant: "bash", label: "Bash (all commands)" },
+  { grant: "agent", label: "Agent" },
+  { grant: "web-fetch", label: "WebFetch" },
+  { grant: "web-search", label: "WebSearch" },
+  { grant: "remote-git", label: "Remote git" },
+];
+
+/// The grant checkboxes and the Bash pattern list. Warns when Remote git is
+/// granted on a model the model list says has no auto mode.
+function ScopeGrants({ draft, team, onChange }: { draft: DraftPipeline; team: DraftTeam; onChange: (d: DraftPipeline) => void }) {
+  const { list } = useModelList();
+  const id = team.id;
+  const grants = team.scope.grants;
+  const model = findModel(list, team.runner.model);
+  const remoteWithoutAuto = grants.includes("remote-git") && model != null && !model.supports_auto_mode;
+  return (
+    <>
+      <fieldset style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: "var(--sp-1)" }}>
+        <TipLegend text={HELP.grants}>Grants</TipLegend>
+        {GRANTS.map(({ grant, label }) => (
+          <label key={grant} style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--ts-sm)", color: "var(--text-2)" }}>
+            <input
+              type="checkbox"
+              aria-label={`${label} for ${id}`}
+              checked={grants.includes(grant)}
+              onChange={(e) => onChange(setTeamGrant(draft, id, grant, e.target.checked))}
+            />
+            {label}
+          </label>
+        ))}
+        {remoteWithoutAuto && (
+          <span role="status" style={{ fontSize: "var(--ts-xs)", color: "var(--warn)" }}>
+            Remote git needs a model with auto mode. {team.runner.model} has none, so the run will not start.
+          </span>
+        )}
+      </fieldset>
+      <Field label={<LabelTip text={HELP.bashPatterns}>Bash patterns (comma-separated)</LabelTip>}>
+        <input
+          aria-label={`bash patterns for ${id}`}
+          value={bashPatterns(team.scope).join(", ")}
+          placeholder="e.g. git diff:*, npm test"
+          onChange={(e) => onChange(setTeamBashPatterns(draft, id, e.target.value))}
+          style={inp}
+        />
+      </Field>
+    </>
+  );
+}
+
+/// The plugins a team can declare: the installed ones, plus any the team
+/// declares that are not installed (marked, so the problem is visible).
+function ScopePlugins({ draft, team, onChange }: { draft: DraftPipeline; team: DraftTeam; onChange: (d: DraftPipeline) => void }) {
+  const [installed, setInstalled] = useState<PluginInfo[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => listPlugins())
+      .then((p) => { if (live) setInstalled(p ?? []); })
+      .catch(() => { if (live) setInstalled([]); });
+    return () => { live = false; };
+  }, []);
+  const id = team.id;
+  const declared = team.scope.plugins;
+  const names = Array.from(new Set((installed ?? []).map((p) => p.name)));
+  const missing = declared.filter((d) => !names.includes(d.split("@")[0]) && !names.includes(d));
+  const rows = [...names.map((n) => ({ name: n, missing: false })), ...missing.map((n) => ({ name: n, missing: installed != null }))];
+  return (
+    <fieldset style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: "var(--sp-1)" }}>
+      <TipLegend text={HELP.plugins}>Plugins</TipLegend>
+      {rows.length === 0 && (
+        <span style={{ fontSize: "var(--ts-xs)", color: "var(--text-3)" }}>
+          {installed == null ? "Loading plugins..." : "No plugins installed."}
+        </span>
+      )}
+      {rows.map(({ name, missing: isMissing }) => (
+        <label key={name} style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--ts-sm)", color: "var(--text-2)" }}>
+          <input
+            type="checkbox"
+            aria-label={`plugin ${name} for ${id}`}
+            checked={declared.includes(name)}
+            onChange={(e) => onChange(setTeamPlugin(draft, id, name, e.target.checked))}
+          />
+          {name}
+          {isMissing && <span style={{ color: "var(--warn)", fontSize: "var(--ts-xs)" }}>not installed</span>}
+        </label>
+      ))}
+    </fieldset>
   );
 }
 
@@ -350,7 +448,10 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { dr
         <SkillAutocomplete
           aria-label={`prompt for ${id}`}
           value={t.prompt_body}
-          onChange={(v) => onChange(setPromptBody(draft, id, v))}
+          onChange={(v, picked) => {
+            const next = setPromptBody(draft, id, v);
+            onChange(picked?.namespace ? addTeamPlugin(next, id, picked.namespace) : next);
+          }}
           skills={skills}
           rows={6}
         />
@@ -410,9 +511,8 @@ function TeamEditor({ draft, id, onChange, skills, targetRepo, sessionId }: { dr
             targetRepo={targetRepo}
             onChange={(e) => onChange(setTeamWrites(draft, id, e))}
           />
-          <Field label={<LabelTip text={HELP.tools}>Tools (comma-separated)</LabelTip>}>
-            <input aria-label={`tools for ${id}`} value={t.scope.tools.join(", ")} onChange={(e) => onChange(setTeamTools(draft, id, e.target.value))} style={inp} />
-          </Field>
+          <ScopeGrants key={`grants-${t.id}`} draft={draft} team={t} onChange={onChange} />
+          <ScopePlugins key={`plugins-${t.id}`} draft={draft} team={t} onChange={onChange} />
         </div>
       </fieldset>
 

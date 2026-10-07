@@ -26,7 +26,9 @@ import {
 
 export interface SkillAutocompleteProps {
   value: string;
-  onChange: (value: string) => void;
+  /// The new text; `picked` is the entry just inserted from the popover, if
+  /// any, so the host can bring along what the entry needs (its plugin).
+  onChange: (value: string, picked?: SkillEntry) => void;
   skills: SkillEntry[];
   rows?: number;
   "aria-label"?: string;
@@ -100,7 +102,7 @@ export function SkillAutocomplete({
     const ta = taRef.current;
     const caret = ta?.selectionStart ?? value.length;
     const result = applyInsertion(value, caret, trigger, entry, verb);
-    onChange(result.text);
+    onChange(result.text, entry);
     close();
     requestAnimationFrame(() => {
       const el = taRef.current;

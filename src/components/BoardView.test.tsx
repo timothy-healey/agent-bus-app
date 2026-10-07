@@ -159,6 +159,20 @@ describe("BoardView", () => {
     expect(screen.getByText("pool 2/3")).toBeInTheDocument();
   });
 
+  it("puts each task's denial count on its card", () => {
+    render(
+      <BoardView
+        pipeline={pipeline()}
+        tasks={[task("T-1", "research", "running"), task("T-2", "research", "running")]}
+        denialsByTask={{ "T-1": 2 }}
+        hasRun
+        onOpenCard={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText("2 permission denials")).toBeInTheDocument();
+    expect(screen.getAllByLabelText(/permission denial/)).toHaveLength(1);
+  });
+
   it("shows a run-scoped empty hint when no run is scoped", () => {
     render(<BoardView pipeline={pipeline()} tasks={[]} hasRun={false} onOpenCard={() => {}} />);
     expect(screen.getByText(/no run scoped/i)).toBeInTheDocument();

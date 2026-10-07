@@ -14,7 +14,7 @@ const pipeline: Pipeline = {
       name: "Research",
       prompt: "prompts/research.md",
       runner: { kind: "claude-cli", model: "claude-opus-4-7", effort: "high" },
-      scope: { reads: ["${target_repo}"], writes: ["${project}/artifacts/analyses"], tools: ["Read"] },
+      scope: { reads: ["${target_repo}"], writes: ["${project}/artifacts/analyses"], grants: [], plugins: [] },
       outputs: { on_approve: "spec-writers", on_revise: null, on_reject: null },
       workers: { min: 1, max: 3 },
       role: "producer",
@@ -71,7 +71,7 @@ describe("PipelineView", () => {
     const p: Pipeline = {
       id: "p", name: "Flow", description: "", schema_version: 1,
       teams: [
-        { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+        { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
       ],
       gates: [{ id: "gate-1", label: "Gate 1", downstream: "writer" }],
       escalations: [], forks: [], joins: [],
@@ -109,7 +109,7 @@ describe("PipelineView", () => {
 
   it("renders a nested fork distinctly with a depth-labelled containment box (AU2)", () => {
     const tm = (id: string, on_approve?: string): Pipeline["teams"][number] => ({
-      id, name: id, prompt: "", scope: { reads: [], writes: [], tools: [] },
+      id, name: id, prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] },
       outputs: on_approve ? { on_approve } : {}, workers: { min: 1, max: 1 },
       role: "producer", store: { capacity: 8 },
     });

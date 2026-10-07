@@ -16,6 +16,8 @@ export interface ModelOption {
   description: string | null;
   /// Empty when the model takes no effort level (only Default).
   effort_levels: string[];
+  /// Whether workers on this model run in auto mode (needed for Remote git).
+  supports_auto_mode: boolean;
 }
 
 export interface ModelList {

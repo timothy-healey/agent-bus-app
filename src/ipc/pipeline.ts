@@ -29,10 +29,19 @@ export interface PipelineDefaults {
   default_effort?: Effort;
 }
 
+/** A grant on top of the always-on tools: `bash`, `bash(<pattern>)`, `agent`,
+ *  `web-fetch`, `web-search` or `remote-git`. Mirrors `agent_bus_core::ToolGrant`. */
+export type Grant = string;
+
+/** The grants that are simple on/off switches (everything but Bash patterns). */
+export type SimpleGrant = "bash" | "agent" | "web-fetch" | "web-search" | "remote-git";
+
 export interface Scope {
   reads: string[];
   writes: string[];
-  tools: string[];
+  grants: Grant[];
+  /** Plugin names (or `name@marketplace`) loaded explicitly for the team's workers. */
+  plugins: string[];
 }
 
 export interface Routes {

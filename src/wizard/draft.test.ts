@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emptyDraft, WIZARD_STEPS, renameTeam, setPromptBody, setTeamModel, addTeam, removeTeam } from "./draft";
-import { setTeamEffort, setTeamTools, setTeamReads, setTeamWrites } from "./draft";
+import { setTeamEffort, setTeamReads, setTeamWrites } from "./draft";
+import { setTeamGrant, setTeamBashPatterns, bashPatterns, setTeamPlugin, addTeamPlugin } from "./draft";
 import { addGate, removeGate, setTeamApprove } from "./draft";
 import { addForkJoin, removeForkJoin } from "./draft";
 import { setJoinQuorum, setJoinCancelOnReject } from "./draft";
@@ -12,9 +13,9 @@ const LIST: ModelList = {
   source: "live",
   cli_version: null,
   models: [
-    { value: "opus", resolved_model: "claude-opus-5-5", display_name: "Opus 5.5", description: null, effort_levels: ["low", "high", "xhigh"] },
-    { value: "claude-opus-4-6", resolved_model: "claude-opus-4-6", display_name: "Opus 4.6", description: null, effort_levels: ["low", "high"] },
-    { value: "haiku", resolved_model: "claude-haiku-4-5-20251001", display_name: "Haiku 4.5", description: null, effort_levels: [] },
+    { value: "opus", resolved_model: "claude-opus-5-5", display_name: "Opus 5.5", description: null, effort_levels: ["low", "high", "xhigh"], supports_auto_mode: true },
+    { value: "claude-opus-4-6", resolved_model: "claude-opus-4-6", display_name: "Opus 4.6", description: null, effort_levels: ["low", "high"], supports_auto_mode: true },
+    { value: "haiku", resolved_model: "claude-haiku-4-5-20251001", display_name: "Haiku 4.5", description: null, effort_levels: [], supports_auto_mode: false },
   ],
 };
 
@@ -111,14 +112,36 @@ describe("advanced team config helpers (W2)", () => {
     expect(JSON.stringify(d.teams[0].runner)).not.toContain("effort");
   });
 
-  it("setTeamTools parses a comma list into a trimmed string array", () => {
-    const d = setTeamTools(base, "research", "Read, Grep ,  Bash ");
-    expect(d.teams[0].scope.tools).toEqual(["Read", "Grep", "Bash"]);
+  it("a new team starts with no grants and no plugins", () => {
+    expect(base.teams[0].scope.grants).toEqual([]);
+    expect(base.teams[0].scope.plugins).toEqual([]);
   });
 
-  it("setTeamTools drops empty entries", () => {
-    const d = setTeamTools(base, "research", "Read,,");
-    expect(d.teams[0].scope.tools).toEqual(["Read"]);
+  it("setTeamGrant toggles one grant without duplicating it", () => {
+    let d = setTeamGrant(base, "research", "remote-git", true);
+    d = setTeamGrant(d, "research", "remote-git", true);
+    d = setTeamGrant(d, "research", "agent", true);
+    expect(d.teams[0].scope.grants).toEqual(["remote-git", "agent"]);
+    d = setTeamGrant(d, "research", "remote-git", false);
+    expect(d.teams[0].scope.grants).toEqual(["agent"]);
+  });
+
+  it("setTeamBashPatterns replaces the pattern grants and keeps the others", () => {
+    let d = setTeamGrant(base, "research", "agent", true);
+    d = setTeamBashPatterns(d, "research", "git diff:*, Bash(git log:*) ,, ");
+    expect(d.teams[0].scope.grants).toEqual(["agent", "bash(git diff:*)", "bash(git log:*)"]);
+    expect(bashPatterns(d.teams[0].scope)).toEqual(["git diff:*", "git log:*"]);
+    d = setTeamBashPatterns(d, "research", "");
+    expect(d.teams[0].scope.grants).toEqual(["agent"]);
+  });
+
+  it("setTeamPlugin and addTeamPlugin add each plugin once", () => {
+    let d = addTeamPlugin(base, "research", "superpowers");
+    d = addTeamPlugin(d, "research", "superpowers");
+    d = setTeamPlugin(d, "research", "ddd-council", true);
+    expect(d.teams[0].scope.plugins).toEqual(["superpowers", "ddd-council"]);
+    d = setTeamPlugin(d, "research", "superpowers", false);
+    expect(d.teams[0].scope.plugins).toEqual(["ddd-council"]);
   });
 
   it("setTeamReads / setTeamWrites set scope.reads / scope.writes", () => {

@@ -45,8 +45,8 @@ export interface BrakeState {
 /// One invocation as the L3 history panel surfaces it (plan H). Mirrors the Rust
 /// `InvocationRow` DTO — the sealed audit read shape. `outcome` is the single
 /// encoded string: `verdict:approve|revise|reject`, `error:<class>` (one of
-/// `rate_limited`/`model_unavailable`/`spawn`/`no_result`/`no_structured_output`/`other`),
-/// or `""` for an in-flight (not-yet-settled) invocation.
+/// `rate_limited`/`model_unavailable`/`spawn`/`no_result`/`no_structured_output`/
+/// `permission_mode_mismatch`/`other`), or `""` for an in-flight invocation.
 export interface InvocationRow {
   invocation_id: string;
   team_id: string;
@@ -57,6 +57,22 @@ export interface InvocationRow {
   outcome: string;
   input_tokens: number;
   output_tokens: number;
+  /// What the invocation was refused, by a rule or the auto-mode classifier.
+  permission_denials: PermissionDenial[];
+}
+
+/// An action a worker attempted and was refused. Mirrors
+/// `agent_bus_core::PermissionDenial`.
+export interface PermissionDenial {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  source: "rule" | "classifier";
+}
+
+/// How many denials each task's invocations recorded (the card badge). Tasks
+/// without any are absent.
+export async function denialCounts(): Promise<Record<string, number>> {
+  return await invoke<Record<string, number>>("denial_counts");
 }
 
 /// One execution of a pipeline — the unit the board scopes to (Runtime redesign
@@ -166,8 +182,9 @@ export async function scaleTeam(teamId: string): Promise<number> {
 export interface TaskLog {
   task_id: string;
   delta: string;
-  /// Which channel the fragment belongs to (A): visible prose vs dimmed reasoning.
-  kind: "output" | "thinking";
+  /// Which channel the fragment belongs to: visible prose, dimmed reasoning,
+  /// or one permission denial line.
+  kind: "output" | "thinking" | "denial";
 }
 
 /// Subscribe to backend display-only worker log fragments (R4).

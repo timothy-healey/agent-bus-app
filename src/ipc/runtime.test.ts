@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { injectTopic, listTasks, approveGate, reviseGate, rejectGate, brakeOn, brakeOff, brakeState, startRun, listRuns, runStoreOccupancy, listInvocations, retryTask, forceAdvance, abandonTask, acceptTask, type Run, type StoreOccupancy, type InvocationRow } from "./runtime";
+import { injectTopic, listTasks, approveGate, reviseGate, rejectGate, brakeOn, brakeOff, brakeState, startRun, listRuns, runStoreOccupancy, listInvocations, denialCounts, retryTask, forceAdvance, abandonTask, acceptTask, type Run, type StoreOccupancy, type InvocationRow } from "./runtime";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
@@ -71,12 +71,19 @@ describe("runtime ipc", () => {
     expect(got).toEqual(occ);
   });
 
+  it("denialCounts calls denial_counts", async () => {
+    invokeMock.mockResolvedValueOnce({ "T-1": 2 });
+    expect(await denialCounts()).toEqual({ "T-1": 2 });
+    expect(invokeMock).toHaveBeenCalledWith("denial_counts");
+  });
+
   it("listInvocations calls list_invocations and returns InvocationRow[] intact", async () => {
     const rows: InvocationRow[] = [
       {
         invocation_id: "I-1", team_id: "spec", model: "claude-opus-4-8", attempts: 3,
         started_at: 100, settled_at: 110, outcome: "error:model_unavailable",
         input_tokens: 50, output_tokens: 12,
+        permission_denials: [{ tool_name: "Bash", tool_input: { command: "gh pr merge 1" }, source: "rule" }],
       },
     ];
     invokeMock.mockResolvedValueOnce(rows);

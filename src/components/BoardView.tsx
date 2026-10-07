@@ -10,6 +10,8 @@ export interface BoardViewProps {
   onOpenCard: (taskId: string) => void;
   /// token cost per task id (from Usage Telemetry in Plan 5; defaults to 0).
   tokensByTask?: Record<string, number>;
+  /// Permission denials per task id; a card shows a badge when above zero.
+  denialsByTask?: Record<string, number>;
   /// Per-stage store occupancy + capacity for the selected run (④e). Team lane
   /// headers render "n/cap" from this. Empty when no run is scoped.
   occupancy?: StoreOccupancy[];
@@ -52,6 +54,7 @@ export function BoardView({
   tasks,
   onOpenCard,
   tokensByTask = {},
+  denialsByTask = {},
   occupancy = [],
   hasRun = false,
   activeGenerators = [],
@@ -169,6 +172,7 @@ export function BoardView({
                 task={t}
                 label={cardLabel(t)}
                 tokens={tokensByTask[t.id] ?? 0}
+                denials={denialsByTask[t.id] ?? 0}
                 onClick={onOpenCard}
               />
             ))}

@@ -5,7 +5,7 @@ import type { Pipeline } from "../ipc/pipeline";
 // A team builder local to these tests (same shape as the existing one above).
 function tm(id: string, on_approve?: string): Pipeline["teams"][number] {
   return {
-    id, name: id, prompt: "", scope: { reads: [], writes: [], tools: [] },
+    id, name: id, prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] },
     outputs: on_approve ? { on_approve } : {}, workers: { min: 1, max: 1 },
     role: "producer", store: { capacity: 8 },
   };
@@ -22,7 +22,7 @@ describe("buildPipelineGraph", () => {
   it("creates a node per team, gate, fork, join and escalation", () => {
     const g = buildPipelineGraph(
       pipe({
-        teams: [{ id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } }],
+        teams: [{ id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } }],
         gates: [{ id: "gate-1", label: "Gate 1", downstream: "impl" }],
         escalations: [{ id: "needs-human", triggers: [] }],
         forks: [{ id: "fork-1", lanes: ["a", "b"] }],
@@ -37,7 +37,7 @@ describe("buildPipelineGraph", () => {
     const g = buildPipelineGraph(
       pipe({
         teams: [
-          { id: "a", name: "A", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "a", name: "A", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: { on_approve: "gate-1" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
         ],
         gates: [{ id: "gate-1", label: "G", downstream: "b" }],
       }),
@@ -49,7 +49,7 @@ describe("buildPipelineGraph", () => {
 
   it("a reviewer source emits the approve · revise · reject verdict triple", () => {
     const team = (id: string, name: string, role: "producer" | "reviewer", outputs: Record<string, string> = {}) => ({
-      id, name, prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs, workers: { min: 1, max: 1 }, role, store: { capacity: 8 },
+      id, name, prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs, workers: { min: 1, max: 1 }, role, store: { capacity: 8 },
     });
     const g = buildPipelineGraph(
       pipe({
@@ -71,8 +71,8 @@ describe("buildPipelineGraph", () => {
     const g = buildPipelineGraph(
       pipe({
         teams: [
-          { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: { on_approve: "next" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
-          { id: "next", name: "Next", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "writer", name: "Writer", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: { on_approve: "next" }, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "next", name: "Next", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
         ],
       }),
     );
@@ -94,9 +94,9 @@ describe("buildPipelineGraph", () => {
     const g = buildPipelineGraph(
       pipe({
         teams: [
-          { id: "spec-review", name: "Spec Review", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
-          { id: "impl", name: "Implementer", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
-          { id: "plan", name: "Planner", prompt: "", scope: { reads: [], writes: [], tools: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "spec-review", name: "Spec Review", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "impl", name: "Implementer", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
+          { id: "plan", name: "Planner", prompt: "", scope: { reads: [], writes: [], grants: [], plugins: [] }, outputs: {}, workers: { min: 1, max: 1 }, role: "producer", store: { capacity: 8 } },
         ],
       }),
     );

@@ -25,6 +25,7 @@ import { setAutoMeter } from "./ipc/usage";
 import { Terminal } from "./components/Terminal";
 import { useConversation } from "./hooks/useConversation";
 import { useTaskLog } from "./hooks/useTaskLog";
+import { useDenialCounts } from "./hooks/useDenialCounts";
 import { useActiveGenerators } from "./hooks/useActiveGenerators";
 
 export default function App() {
@@ -100,6 +101,7 @@ export default function App() {
   }
 
   const liveLog = useTaskLog();
+  const denialsByTask = useDenialCounts();
   const activeGenerators = useActiveGenerators(selectedRun?.id ?? null);
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   // A lineage click overrides which artifact the pane shows (D5: single pane).
@@ -432,6 +434,7 @@ export default function App() {
             occupancy={occupancy}
             hasRun={selectedRun != null}
             tokensByTask={usage?.tokens_by_task ?? {}}
+            denialsByTask={denialsByTask}
             activeGenerators={activeGenerators}
             onOpenCard={setOpenTaskId}
           />
