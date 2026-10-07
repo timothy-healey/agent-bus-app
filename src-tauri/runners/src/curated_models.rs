@@ -14,6 +14,8 @@ fn m(value: &str, resolved: &str, display: &str, description: &str, levels: &[&s
         display_name: display.into(),
         description: Some(description.into()),
         effort_levels: levels.iter().map(|l| l.to_string()).collect(),
+        // Every curated model but Haiku supports auto mode, as the capture shows.
+        supports_auto_mode: value != "haiku",
     }
 }
 

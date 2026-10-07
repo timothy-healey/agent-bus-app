@@ -10,6 +10,9 @@ export interface CardProps {
   /// Optional title override (④e: the board labels work-item cards by their
   /// `item_key`). Falls back to the task's topic when absent.
   label?: string;
+  /// How many permission denials the task's invocations recorded. A badge
+  /// shows the count when it is above zero.
+  denials?: number;
 }
 
 /// Per-state border + background treatment (DESIGN.md §Card). Status comes from
@@ -33,7 +36,7 @@ function shell(state: Task["state"]): CSSProperties {
   }
 }
 
-export function Card({ task, tokens, onClick, label }: CardProps) {
+export function Card({ task, tokens, onClick, label, denials = 0 }: CardProps) {
   const root: CSSProperties = {
     border: "1px solid",
     borderRadius: "var(--r-md)",
@@ -80,6 +83,21 @@ export function Card({ task, tokens, onClick, label }: CardProps) {
       <div style={title}>{label ?? task.topic}</div>
       <div style={meta}>
         <span style={cost}>{formatTokens(tokens)} tok</span>
+        {denials > 0 && (
+          <span
+            aria-label={`${denials} permission ${denials === 1 ? "denial" : "denials"}`}
+            title="actions this task's worker was refused"
+            style={{
+              marginLeft: "auto",
+              padding: "0 6px",
+              borderRadius: "var(--r-pill)",
+              border: "1px solid var(--danger)",
+              color: "var(--danger)",
+            }}
+          >
+            {denials} denied
+          </span>
+        )}
         <span>a{task.attempts}</span>
       </div>
     </div>

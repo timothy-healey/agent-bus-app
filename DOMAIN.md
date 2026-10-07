@@ -11,7 +11,7 @@ A local Tauri app for orchestrating multi-team Claude Code agent pipelines, with
 - **SQLite** via `tauri-plugin-sql` — runtime state (tasks, queue, usage)
 - **YAML on disk** — pipeline definitions (`pipelines/*.yaml`)
 - **Markdown on disk** — artifacts (specs, plans, critiques)
-- **Two runner kinds** — `claude-cli` (wraps `claude --print`, inherits Claude Code plugins + subscription) and `anthropic-api` (direct SDK calls, per-team API key)
+- **Two runner kinds** — `claude-cli` (wraps `claude --print` on the user's subscription; loads only the plugins its team's scope declares) and `anthropic-api` (direct SDK calls, per-team API key)
 
 ## Bounded contexts
 

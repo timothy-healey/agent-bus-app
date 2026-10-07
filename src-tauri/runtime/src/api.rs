@@ -124,6 +124,8 @@ pub struct RuntimeState {
     /// The current model list, shared with the composition root, which keeps
     /// it fresh. `None` = no list wired (runtime-only tests) → no pre-flight.
     model_list: Option<Arc<std::sync::RwLock<agent_bus_core::ModelList>>>,
+    /// Resolves the plugins teams declare. `None` = plugins are not checked.
+    plugin_resolver: Option<Arc<workspace::plugins::PluginResolver>>,
     active: ArcSwap<ActivePipeline>,
 }
 
@@ -150,6 +152,7 @@ impl RuntimeState {
             revision_reader,
             audit,
             model_list: None,
+            plugin_resolver: None,
             active: ArcSwap::from_pointee(active),
         }
     }
@@ -161,12 +164,33 @@ impl RuntimeState {
         self
     }
 
-    /// The pre-flight check over the active pipeline against the current list.
+    pub fn with_plugin_resolver(mut self, resolver: Arc<workspace::plugins::PluginResolver>) -> Self {
+        self.plugin_resolver = Some(resolver);
+        self
+    }
+
+    /// The current model list, when one is wired.
+    pub fn model_list(&self) -> Option<Arc<std::sync::RwLock<agent_bus_core::ModelList>>> {
+        self.model_list.clone()
+    }
+
+    /// The pre-flight check over the active pipeline against the current list
+    /// and the project's scope context.
     pub fn preflight(&self) -> Result<(), String> {
         let Some(list) = &self.model_list else { return Ok(()) };
         let Ok(list) = list.read() else { return Ok(()) };
         let active = self.active();
-        crate::preflight::check_pipeline(&active.pipeline, &list).map_err(|f| f.describe(&active.pipeline))
+        let project_root = std::path::PathBuf::from(&active.project_root);
+        let target_repo = active.project_target_repo.as_deref().map(std::path::PathBuf::from);
+        let resolver = self.plugin_resolver.clone();
+        let exists = move |name: &str| resolver.as_ref().is_some_and(|r| r.resolve(name).is_ok());
+        let env = crate::preflight::PreflightEnv {
+            project_root: &project_root,
+            target_repo: target_repo.as_deref(),
+            plugin_exists: self.plugin_resolver.as_ref().map(|_| &exists as &dyn Fn(&str) -> bool),
+        };
+        crate::preflight::check_pipeline(&active.pipeline, &list, &env)
+            .map_err(|f| f.describe_with(&active.pipeline, target_repo.is_some()))
     }
 
     pub fn active(&self) -> Arc<ActivePipeline> {
@@ -217,6 +241,9 @@ impl RuntimeState {
             // The gate-verdict context never invokes the runner / resolves a
             // working dir, so it carries no worktree seam (worktree isolation).
             worktree_provider: None,
+            model_list: None,
+            plugin_resolver: None,
+            repo_visibility: None,
         }
     }
 }
@@ -679,6 +706,23 @@ pub async fn list_invocations_inner(
     }
 }
 
+/// How many permission denials each task's invocations recorded (the task
+/// card badge). Tasks without any are absent; no audit store gives an empty map.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn denial_counts(
+    state: tauri::State<'_, Arc<RuntimeState>>,
+) -> Result<std::collections::HashMap<String, u32>, String> {
+    denial_counts_inner(state.as_ref()).await
+}
+
+/// Reusable inner body for `denial_counts`.
+pub async fn denial_counts_inner(state: &RuntimeState) -> Result<std::collections::HashMap<String, u32>, String> {
+    match &state.audit {
+        Some(audit) => audit.denial_counts().await.map_err(|e| e.to_string()),
+        None => Ok(Default::default()),
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_tasks(
     state: tauri::State<'_, Arc<RuntimeState>>,
@@ -975,6 +1019,7 @@ mod tests {
         sqlx::query(include_str!("../../app/migrations/012_runtime_stores.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/007_invocation_audit.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/018_invocation_effort.sql")).execute(&pool).await.unwrap();
+        sqlx::query(include_str!("../../app/migrations/019_invocation_denials.sql")).execute(&pool).await.unwrap();
         sqlx::query(include_str!("../../app/migrations/014_task_worktree.sql")).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO projects (id,name,root_path,created_at,updated_at) VALUES ('proj','n','/p',0,0)")
             .execute(&pool).await.unwrap();
@@ -1253,6 +1298,24 @@ mod tests {
         assert_eq!(rows[0].team_id, "spec");
         assert_eq!(rows[0].outcome, "error:no_result");
         assert_eq!(rows[0].attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn denial_counts_sum_each_tasks_denials() {
+        let state = state_with_two_team_pipeline().await;
+        let (_run, task) = seed_escalated(&state, "spec", InvocationOutcome::Error(ErrorClass::NoResult)).await;
+        let audit = state.audit.as_ref().unwrap();
+        let inv = audit.list_for_task(&task.id.0).await.unwrap()[0].invocation_id.clone();
+        let d = agent_bus_core::PermissionDenial {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "gh pr merge 1"}),
+            source: agent_bus_core::DenialSource::Rule,
+        };
+        audit.record_denials(&inv, &[d.clone(), d]).await.unwrap();
+        let counts = denial_counts_inner(&state).await.unwrap();
+        assert_eq!(counts.get(&task.id.0), Some(&2));
+        let rows = list_invocations_inner(&state, &task.id.0).await.unwrap();
+        assert_eq!(rows[0].permission_denials.len(), 2);
     }
 
     #[tokio::test]

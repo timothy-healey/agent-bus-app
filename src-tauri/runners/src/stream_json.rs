@@ -5,7 +5,7 @@
 //! is kept for the live log and never parsed for a result.
 
 use crate::output::{RunnerError, RunnerOutput, RunnerUsage};
-use agent_bus_core::OutputKind;
+use agent_bus_core::{DenialSource, OutputKind, PermissionDenial, PermissionMode};
 use serde_json::Value;
 
 /// Accumulator fed one parsed JSON line at a time.
@@ -16,11 +16,44 @@ pub struct StreamAccumulator {
     saw_result: bool,
     /// The `result` event's `structured_output`, when it carried one.
     structured: Option<Value>,
+    /// The permission mode the invocation asked for; `None` skips the check.
+    requested_mode: Option<PermissionMode>,
+    /// The last `permissionMode` any `system` event reported. `init` reports
+    /// the requested mode; a following `system/status` reports a fallback.
+    reported_mode: Option<String>,
+    /// `tool_use_id` → `decision_reason_type` from `system/permission_denied`.
+    denial_reasons: Vec<(String, String)>,
+    /// The `result` event's `permission_denials`, as given.
+    raw_denials: Vec<Value>,
 }
 
 impl StreamAccumulator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An accumulator that fails the run when the CLI reports a different
+    /// permission mode than `mode`.
+    pub fn expecting_mode(mode: PermissionMode) -> Self {
+        Self { requested_mode: Some(mode), ..Self::default() }
+    }
+
+    /// The denials seen so far: every `result.permission_denials` entry, tagged
+    /// `classifier` when its `system/permission_denied` event says so and
+    /// `rule` otherwise (a denied file edit emits no system event at all).
+    pub fn denials(&self) -> Vec<PermissionDenial> {
+        self.raw_denials
+            .iter()
+            .map(|d| {
+                let id = d.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                let classifier = self.denial_reasons.iter().any(|(i, r)| i == id && r == "classifier");
+                PermissionDenial {
+                    tool_name: d.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string(),
+                    tool_input: d.get("tool_input").cloned().unwrap_or(Value::Null),
+                    source: if classifier { DenialSource::Classifier } else { DenialSource::Rule },
+                }
+            })
+            .collect()
     }
 
     /// Feed one stream-json line (already a parsed Value). Returns the tagged
@@ -96,6 +129,9 @@ impl StreamAccumulator {
                 if let Some(c) = v.get("total_cost_usd").and_then(|c| c.as_f64()) {
                     self.usage.cost_micros = Some((c * 1_000_000.0).round() as u64);
                 }
+                if let Some(d) = v.get("permission_denials").and_then(Value::as_array) {
+                    self.raw_denials = d.clone();
+                }
                 // An absent key and an explicit null both mean "no structured output".
                 self.structured = v.get("structured_output").filter(|s| !s.is_null()).cloned();
                 if self.text.is_empty() {
@@ -107,6 +143,14 @@ impl StreamAccumulator {
             "system" => {
                 if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
                     self.usage.model = model.to_string();
+                }
+                if let Some(mode) = v.get("permissionMode").and_then(Value::as_str) {
+                    self.reported_mode = Some(mode.to_string());
+                }
+                if v.get("subtype").and_then(Value::as_str) == Some("permission_denied") {
+                    let id = v.get("tool_use_id").and_then(Value::as_str).unwrap_or("").to_string();
+                    let reason = v.get("decision_reason_type").and_then(Value::as_str).unwrap_or("").to_string();
+                    self.denial_reasons.push((id, reason));
                 }
             }
             _ => {}
@@ -123,29 +167,43 @@ impl StreamAccumulator {
     }
 
     /// Finish: produce a RunnerOutput whose result is the `structured_output`
-    /// read as `kind`. An empty stream is `NoResult`; a run that ended without a
-    /// structured output, or with one of the wrong shape, is `NoStructuredOutput`.
+    /// read as `kind`, with the run's denials. An empty stream is `NoResult`; a
+    /// run in a different permission mode than requested is
+    /// `PermissionModeMismatch`; a run that ended without a structured output,
+    /// or with one of the wrong shape, is `NoStructuredOutput`.
     pub fn finish(self, model: &str, kind: OutputKind) -> Result<RunnerOutput, RunnerError> {
         if !self.saw_result && self.text.is_empty() {
             return Err(RunnerError::NoResult);
         }
+        let denials = self.denials();
         let mut usage = self.usage;
         if usage.model.is_empty() {
             usage.model = model.to_string();
+        }
+        if let (Some(requested), Some(actual)) = (self.requested_mode, &self.reported_mode) {
+            if requested.as_cli() != actual {
+                return Err(RunnerError::PermissionModeMismatch {
+                    requested: requested.as_cli().to_string(),
+                    actual: actual.clone(),
+                    usage,
+                    denials,
+                });
+            }
         }
         let Some(structured) = &self.structured else {
             return Err(RunnerError::NoStructuredOutput {
                 detail: "the run ended without a structured_output".into(),
                 usage,
+                denials,
             });
         };
         let result = match kind.parse(structured) {
             Ok(r) => r,
             Err(e) => {
-                return Err(RunnerError::NoStructuredOutput { detail: format!("{kind:?} shape: {e}"), usage })
+                return Err(RunnerError::NoStructuredOutput { detail: format!("{kind:?} shape: {e}"), usage, denials })
             }
         };
-        Ok(RunnerOutput { result, final_text: self.text, usage })
+        Ok(RunnerOutput { result, final_text: self.text, usage, permission_denials: denials })
     }
 }
 
@@ -222,9 +280,13 @@ pub fn parse_stream_streaming(
     raw: &str,
     model: &str,
     kind: OutputKind,
+    requested_mode: Option<PermissionMode>,
     on_delta: &mut dyn FnMut(&crate::output::LogDelta),
 ) -> Result<RunnerOutput, RunnerError> {
-    let mut acc = StreamAccumulator::new();
+    let mut acc = match requested_mode {
+        Some(m) => StreamAccumulator::expecting_mode(m),
+        None => StreamAccumulator::new(),
+    };
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -252,6 +314,91 @@ mod tests {
     // The model could not satisfy the schema, was nudged once, and gave up in
     // prose: `subtype: success`, exit 0, and no `structured_output` key.
     const MISSING: &str = include_str!("fixtures/structured-missing.jsonl");
+    // Real sonnet runs under `--permission-mode auto`: a Write into a denied
+    // read path plus a force push (both refused by rule), and a push refused by
+    // the classifier. Neither passed `--json-schema`.
+    const DENIED_RULE: &str = include_str!("fixtures/permission-denied-rule.jsonl");
+    const DENIED_CLASSIFIER: &str = include_str!("fixtures/permission-denied-classifier.jsonl");
+    // A real haiku run asked for auto: `init` says auto, the following
+    // `system/status` says default.
+    const MODE_FALLBACK: &str = include_str!("fixtures/permission-mode-fallback.jsonl");
+
+    fn finish_with(raw: &str, mode: Option<PermissionMode>) -> Result<RunnerOutput, RunnerError> {
+        parse_stream_streaming(raw, "m", OutputKind::Producer, mode, &mut |_d| {})
+    }
+
+    #[test]
+    fn rule_denials_are_tagged_rule_with_their_input() {
+        let err = finish_with(DENIED_RULE, Some(PermissionMode::Auto)).unwrap_err();
+        let d = err.denials();
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert_eq!(d[0].tool_name, "Write");
+        assert_eq!(d[0].source, DenialSource::Rule);
+        assert!(d[0].tool_input["file_path"].as_str().unwrap().ends_with("/readonly/out.txt"));
+        assert_eq!(d[1].tool_name, "Bash");
+        assert_eq!(d[1].source, DenialSource::Rule);
+        assert_eq!(d[1].tool_input["command"], "git push --force origin feature-x");
+        assert!(matches!(err, RunnerError::NoStructuredOutput { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_classifier_block_is_tagged_classifier() {
+        let err = finish_with(DENIED_CLASSIFIER, Some(PermissionMode::Auto)).unwrap_err();
+        let d = err.denials();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].source, DenialSource::Classifier);
+        assert_eq!(d[0].tool_input["command"], "git push origin feature-x");
+    }
+
+    #[test]
+    fn a_fallback_to_default_when_auto_was_requested_is_a_mismatch() {
+        match finish_with(MODE_FALLBACK, Some(PermissionMode::Auto)).unwrap_err() {
+            RunnerError::PermissionModeMismatch { requested, actual, usage, denials } => {
+                assert_eq!(requested, "auto");
+                assert_eq!(actual, "default");
+                assert!(usage.output_tokens > 0);
+                assert!(denials.is_empty());
+            }
+            other => panic!("expected PermissionModeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_in_the_requested_mode_is_not_a_mismatch() {
+        let err = finish_with(DENIED_CLASSIFIER, Some(PermissionMode::Auto)).unwrap_err();
+        assert!(!matches!(err, RunnerError::PermissionModeMismatch { .. }));
+        let err = finish_with(DENIED_CLASSIFIER, Some(PermissionMode::AcceptEdits)).unwrap_err();
+        assert!(matches!(err, RunnerError::PermissionModeMismatch { .. }), "{err:?}");
+        // No requested mode: no check.
+        let err = finish_with(MODE_FALLBACK, None).unwrap_err();
+        assert!(matches!(err, RunnerError::NoStructuredOutput { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn denials_ride_on_a_successful_output() {
+        let raw = r#"{"type":"system","subtype":"init","permissionMode":"acceptEdits"}
+{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"t1","decision_reason_type":"classifier"}
+{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"artifact":"a.md"},"permission_denials":[{"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"gh pr create"}},{"tool_name":"Edit","tool_use_id":"t2","tool_input":{"file_path":"/r/x"}}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let out = finish_with(raw, Some(PermissionMode::AcceptEdits)).unwrap();
+        assert_eq!(out.permission_denials.len(), 2);
+        assert_eq!(out.permission_denials[0].source, DenialSource::Classifier);
+        assert_eq!(out.permission_denials[1].source, DenialSource::Rule);
+    }
+
+    #[test]
+    fn denial_fixtures_are_redacted() {
+        for f in [DENIED_RULE, DENIED_CLASSIFIER, MODE_FALLBACK] {
+            assert!(!f.contains("/Users/"), "home path in a fixture");
+            assert!(!f.contains("\"email\""), "an account email in a fixture");
+            assert!(!f.contains("messaging_socket_path") && !f.contains("memory_paths"));
+            for line in f.lines() {
+                let v: Value = serde_json::from_str(line).unwrap();
+                if let Some(id) = v.get("session_id").and_then(Value::as_str) {
+                    assert_eq!(id, "00000000-0000-0000-0000-000000000000");
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_real_reviewer_run_gives_its_verdict_and_reason() {
@@ -382,7 +529,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"{}","structured_output":{"verdict":"approve","reason":"fine"},"usage":{"input_tokens":1,"output_tokens":1}}"#
         );
         let mut seen: Vec<LogDelta> = vec![];
-        let out = parse_stream_streaming(raw, "m", OutputKind::Reviewer, &mut |d: &LogDelta| seen.push(d.clone())).unwrap();
+        let out = parse_stream_streaming(raw, "m", OutputKind::Reviewer, None, &mut |d: &LogDelta| seen.push(d.clone())).unwrap();
         assert_eq!(seen, vec![
             LogDelta { kind: LogKind::Thinking, text: "let me reason".into() },
             LogDelta { kind: LogKind::Output, text: "Looks right.".into() },
@@ -394,7 +541,7 @@ mod tests {
     #[test]
     fn streaming_parse_returns_the_same_output_as_the_whole_buffer_parse() {
         let mut n = 0;
-        let streamed = parse_stream_streaming(REVIEWER, "m", OutputKind::Reviewer, &mut |_d| n += 1).unwrap();
+        let streamed = parse_stream_streaming(REVIEWER, "m", OutputKind::Reviewer, None, &mut |_d| n += 1).unwrap();
         assert_eq!(streamed, parse_stream(REVIEWER, "m", OutputKind::Reviewer).unwrap());
         assert!(n > 0, "the run's prose was forwarded");
     }

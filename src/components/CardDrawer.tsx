@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import type { InvocationRow, Task } from "../ipc/runtime";
+import type { InvocationRow, PermissionDenial, Task } from "../ipc/runtime";
 import type { Pipeline } from "../ipc/pipeline";
 import { useComments } from "../hooks/useComments";
 import { ArtifactView } from "./ArtifactView";
@@ -24,7 +24,7 @@ export interface CardDrawerProps {
   logText?: string;
   /// Ordered tagged live-log segments (B). Output renders as prose, thinking
   /// dimmed/italic with a marker. When omitted, the drawer falls back to `logText`.
-  logSegments?: { kind: "output" | "thinking"; text: string }[];
+  logSegments?: { kind: "output" | "thinking" | "denial"; text: string }[];
   /// upstream writer the revise routes back to (for the panel summary).
   reviseTarget?: string;
   /// Open an upstream artifact from the lineage tab (D5). When omitted, clicking
@@ -61,6 +61,16 @@ export interface CardDrawerProps {
   /// The tab to open on (C6). A `gen:` generator card opens on `"live log"`;
   /// otherwise the drawer defaults to the artifact tab.
   initialTab?: Tab;
+}
+
+/// What a denied action was: its command, file path or URL, else its input JSON.
+export function denialInput(d: PermissionDenial): string {
+  const i = d.tool_input ?? {};
+  for (const k of ["command", "file_path", "url"]) {
+    const v = (i as Record<string, unknown>)[k];
+    if (typeof v === "string") return v;
+  }
+  return JSON.stringify(i);
 }
 
 export function CardDrawer({
@@ -300,7 +310,11 @@ export function CardDrawer({
               <pre ref={logRef} style={logBlock} data-testid="live-log-body">
                 {logSegments.length
                   ? logSegments.map((s, i) =>
-                      s.kind === "thinking" ? (
+                      s.kind === "denial" ? (
+                        <span key={i} data-log-kind="denial" style={{ color: "var(--danger)" }}>
+                          {s.text}
+                        </span>
+                      ) : s.kind === "thinking" ? (
                         <span
                           key={i}
                           data-log-kind="thinking"
@@ -404,6 +418,24 @@ export function CardDrawer({
                         {tokens > 0 ? `${tokens.toLocaleString()} tokens · ` : ""}
                         {formatAge(inv.started_at, now)} ago
                       </span>
+                      {inv.permission_denials?.length > 0 && (
+                        <ul
+                          aria-label="permission denials"
+                          style={{ flexBasis: "100%", listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 2 }}
+                        >
+                          {inv.permission_denials.map((d, i) => (
+                            <li
+                              key={i}
+                              style={{ display: "flex", gap: "var(--sp-2)", alignItems: "baseline", fontSize: "var(--ts-sm)", color: "var(--text-2)" }}
+                            >
+                              <span style={{ color: "var(--danger)", fontWeight: 500 }}>denied</span>
+                              <span>{d.tool_name}</span>
+                              <code style={{ fontFamily: "var(--font-mono)", color: "var(--text-2)", overflowWrap: "anywhere" }}>{denialInput(d)}</code>
+                              <span style={{ marginLeft: "auto", color: "var(--text-3)" }}>{d.source}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </li>
                   );
                 })}

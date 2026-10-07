@@ -37,7 +37,7 @@ fn full_team() -> Team {
         name: "Research".into(),
         prompt: "prompts/research.md".into(),
         runner: Some(crate::model::TeamRunnerConfig::from_full(full_runner())),
-        scope: Scope { reads: vec!["src".into()], writes: vec!["artifacts".into()], tools: vec!["bash".into()] },
+        scope: Scope { reads: vec!["src".into()], writes: vec!["artifacts".into()], grants: vec![agent_bus_core::ToolGrant::Bash], plugins: vec![] },
         // All routes Some so the skip_serializing_if fields appear (TS: on_*?).
         outputs: Routes {
             on_approve: Some("gate-1".into()),
@@ -113,11 +113,11 @@ fn runner_config_omits_api_key_env_when_none() {
     assert!(!v.as_object().unwrap().contains_key("api_key_env"));
 }
 
-/// Locks `src/ipc/pipeline.ts:19-23` `interface Scope { reads; writes; tools }`.
+/// Locks `src/ipc/pipeline.ts` `interface Scope { reads; writes; grants; plugins }`.
 #[test]
 fn scope_key_set_matches_ts() {
-    let v = serde_json::to_value(Scope { reads: vec![], writes: vec![], tools: vec![] }).unwrap();
-    assert_eq!(keys(&v), set(&["reads", "writes", "tools"]));
+    let v = serde_json::to_value(Scope::default()).unwrap();
+    assert_eq!(keys(&v), set(&["reads", "writes", "grants", "plugins"]));
 }
 
 /// Locks `src/ipc/pipeline.ts:25-29` `interface Routes`: all three keys optional

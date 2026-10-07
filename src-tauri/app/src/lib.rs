@@ -59,6 +59,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (16, include_str!("../migrations/016_utilization.sql")),
         (17, include_str!("../migrations/017_drop_cc_usage_log.sql")),
         (18, include_str!("../migrations/018_invocation_effort.sql")),
+        (19, include_str!("../migrations/019_invocation_denials.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -398,6 +399,7 @@ fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::log_sink::LogSin
         use std::sync::Mutex;
         // One coalescing buffer per kind so output and thinking never interleave
         // within a single emitted fragment; each emit carries its kind.
+        let task_id_owned = task_id.to_string();
         let out_buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
         let think_buf = Arc::new(Mutex::new(TaskLogBuffer::new(task_id.to_string())));
         let handle = handle.clone();
@@ -405,6 +407,14 @@ fn make_task_log_sink(handle: tauri::AppHandle) -> Arc<runtime::log_sink::LogSin
             let (buf, kind_str) = match d.kind {
                 LogKind::Output => (&out_buf, "output"),
                 LogKind::Thinking => (&think_buf, "thinking"),
+                // A denial is one whole line; it is emitted at once, unthrottled.
+                LogKind::Denial => {
+                    let _ = handle.emit(
+                        crate::events::TASK_LOG,
+                        serde_json::json!({ "task_id": task_id_owned, "delta": d.text, "kind": "denial" }),
+                    );
+                    return;
+                }
             };
             let mut b = buf.lock().unwrap();
             b.push(&d.text);
@@ -899,6 +909,16 @@ async fn refresh_model_list_inner(state: &ModelListState, app: &tauri::AppHandle
     if changed {
         let _ = app.emit(crate::events::MODEL_LIST_UPDATED, ());
     }
+}
+
+/// The plugin resolver, as managed state for the editor's plugin list.
+struct PluginsState(Arc<workspace::plugins::PluginResolver>);
+
+/// OHS: the plugins a team can declare (installed plus directory
+/// marketplaces), read from the Claude config root.
+#[tauri::command(rename_all = "snake_case")]
+fn list_plugins(state: tauri::State<'_, PluginsState>) -> Vec<workspace::plugins::PluginInfo> {
+    state.0.list()
 }
 
 /// OHS: the current model list. Never calls the CLI.
@@ -1638,6 +1658,12 @@ pub fn run() {
             sql: include_str!("../migrations/018_invocation_effort.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 19,
+            description: "invocation permission denials",
+            sql: include_str!("../migrations/019_invocation_denials.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     // Live child process-group registry (LF20): the killable spawners register
@@ -1809,6 +1835,12 @@ pub fn run() {
                     cache_path: data_dir.join(model_list_cache::CACHE_FILE),
                 };
 
+                // Plugins resolve from the Claude config root, read-only.
+                let plugin_resolver = Arc::new(workspace::plugins::PluginResolver::new(
+                    workspace::plugins::claude_config_root(),
+                ));
+                handle.manage(PluginsState(plugin_resolver.clone()));
+
                 let runtime_state_arc = Arc::new(RuntimeState::new(
                     tasks.clone(),
                     brake.clone(),
@@ -1824,7 +1856,8 @@ pub fn run() {
                         project_root: project_root.clone(),
                         project_target_repo: project_target_repo.clone(),
                     },
-                ).with_model_list(model_list.clone()));
+                ).with_model_list(model_list.clone())
+                .with_plugin_resolver(plugin_resolver.clone()));
                 handle.manage(runtime_state_arc.clone());
                 handle.manage(model_list_state);
                 {
@@ -1973,6 +2006,11 @@ pub fn run() {
                         app_data: data_dir.clone(),
                         worktree_git: Some(worktree_git.clone()),
                         usage_poll: Some(usage_poll.clone()),
+                        model_list: Some(model_list.clone()),
+                        plugin_resolver: Some(plugin_resolver.clone()),
+                        repo_visibility: Some(Arc::new(|repo: &std::path::Path| {
+                            workspace::visibility::repo_visibility(repo)
+                        })),
                     },
                 ));
                 handle.manage(activator.clone());
@@ -2073,6 +2111,8 @@ pub fn run() {
             runtime::api::revise_gate,
             runtime::api::list_tasks,
             runtime::api::list_invocations,
+            runtime::api::denial_counts,
+            list_plugins,
             runtime::api::retry_task,
             runtime::api::force_advance,
             runtime::api::abandon_task,
@@ -2124,6 +2164,7 @@ mod task_log_tests {
             match d.kind {
                 LogKind::Output => out_buf.push(&d.text),
                 LogKind::Thinking => think_buf.push(&d.text),
+                LogKind::Denial => unreachable!("no denial in this test"),
             }
         }
         let emitted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
@@ -2379,9 +2420,20 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 18, "all eighteen migrations recorded");
+        assert_eq!(version, 19, "all nineteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn migration_019_adds_a_nullable_permission_denials_column() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(invocation_audit)").fetch_all(&pool).await.unwrap();
+        let d = cols.iter().find(|c| c.1 == "permission_denials").expect("permission_denials column");
+        assert_eq!(d.2, "TEXT");
+        assert_eq!(d.3, 0, "permission_denials must be nullable");
     }
 
     #[tokio::test]

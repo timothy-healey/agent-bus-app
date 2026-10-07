@@ -14,7 +14,7 @@
 //! enforce this named contract for the DDD seed.
 
 use crate::draft::{DraftPipeline, DraftTeam};
-use crate::model::{Escalation, Gate, Role, Routes, Store, SCHEMA_VERSION};
+use crate::model::{Escalation, Gate, Role, Routes, Scope, Store, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 
 /// A light summary of a bundled seed template, for the kickoff picker.
@@ -195,6 +195,31 @@ fn ddd_seed() -> DraftPipeline {
         }
     }
 
+    // Scopes: every team reads the target repo (the implementers' worktree for
+    // implementers and code reviewers, which work on one); the engine adds the
+    // run artifacts (read) and the team's own artifact folder (write).
+    for t in d.teams.iter_mut() {
+        use agent_bus_core::ToolGrant::*;
+        let repo = || vec!["${target_repo}".to_string()];
+        let plugin = |p: &str| vec![p.to_string()];
+        t.scope = match t.id.as_str() {
+            "spec-writers" | "plan-writers" => Scope { reads: repo(), plugins: plugin("superpowers"), ..Scope::default() },
+            "plan-reviewers" => Scope { reads: repo(), plugins: plugin("ddd-council"), ..Scope::default() },
+            "implementers" => Scope {
+                writes: repo(),
+                grants: vec![Bash, Agent, RemoteGit],
+                plugins: plugin("superpowers"),
+                ..Scope::default()
+            },
+            "code-reviewers" => Scope {
+                reads: repo(),
+                grants: vec![BashPattern("git diff:*".into()), BashPattern("git log:*".into()), RemoteGit],
+                ..Scope::default()
+            },
+            _ => Scope { reads: repo(), ..Scope::default() },
+        };
+    }
+
     // The spec-approval human gate (G15): approved specs route on to the planners.
     d.gates = vec![Gate {
         id: "gate-spec".into(),
@@ -285,6 +310,41 @@ mod tests {
         assert_eq!(research.role, Role::Producer);
         let cr = d.teams.iter().find(|t| t.id == "code-reviewers").unwrap();
         assert_eq!(cr.role, Role::Reviewer);
+    }
+
+    #[test]
+    fn ddd_seed_scopes_match_the_template_table() {
+        use agent_bus_core::ToolGrant::*;
+        let d = seed_template("ddd-spec-plan-impl").unwrap();
+        let repo = vec!["${target_repo}".to_string()];
+        let none: Vec<String> = vec![];
+        let sp = vec!["superpowers".to_string()];
+        let expect: Vec<(&str, Vec<String>, Vec<String>, Vec<agent_bus_core::ToolGrant>, Vec<String>)> = vec![
+            ("research", repo.clone(), none.clone(), vec![], none.clone()),
+            ("spec-writers", repo.clone(), none.clone(), vec![], sp.clone()),
+            ("spec-reviewers", repo.clone(), none.clone(), vec![], none.clone()),
+            ("plan-writers", repo.clone(), none.clone(), vec![], sp.clone()),
+            ("plan-reviewers", repo.clone(), none.clone(), vec![], vec!["ddd-council".to_string()]),
+            ("implementers", none.clone(), repo.clone(), vec![Bash, Agent, RemoteGit], sp.clone()),
+            (
+                "code-reviewers",
+                repo.clone(),
+                none.clone(),
+                vec![BashPattern("git diff:*".into()), BashPattern("git log:*".into()), RemoteGit],
+                none.clone(),
+            ),
+        ];
+        for (id, reads, writes, grants, plugins) in expect {
+            let t = d.teams.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(t.scope.reads, reads, "{id} reads");
+            assert_eq!(t.scope.writes, writes, "{id} writes");
+            assert_eq!(t.scope.grants, grants, "{id} grants");
+            assert_eq!(t.scope.plugins, plugins, "{id} plugins");
+        }
+        // No team gets web access by default.
+        for t in &d.teams {
+            assert!(!t.scope.grants.iter().any(|g| matches!(g, WebFetch | WebSearch)), "{}", t.id);
+        }
     }
 
     #[test]

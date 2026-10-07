@@ -13,6 +13,10 @@ pub struct ModelOption {
     pub description: Option<String>,
     /// Empty when the model takes no effort level.
     pub effort_levels: Vec<String>,
+    /// Whether `--permission-mode auto` works on this model. A model without
+    /// it silently runs in `default` mode instead.
+    #[serde(default)]
+    pub supports_auto_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,11 +40,35 @@ pub struct ModelList {
 pub enum RunnerConfigProblem {
     ModelNotAvailable,
     EffortNotSupported { level: String },
+    /// A plugin the team declares cannot be found among the installed plugins
+    /// or the directory marketplaces.
+    PluginNotFound { name: String },
+    /// A scope path cannot be made absolute (an unknown or unbound variable,
+    /// or a relative path with no target repo).
+    PathUnresolvable { pattern: String },
+    /// The team holds the Remote git grant but its model has no auto mode, so
+    /// no classifier would judge whether the task asked for remote actions.
+    RemoteGitWithoutAutoMode,
 }
 
 impl ModelList {
     pub fn find(&self, value: &str) -> Option<&ModelOption> {
         self.models.iter().find(|m| m.value == value)
+    }
+
+    /// Whether the listed model supports auto mode. An unlisted model does not.
+    pub fn supports_auto_mode(&self, model: &str) -> bool {
+        self.find(model).is_some_and(|m| m.supports_auto_mode)
+    }
+
+    /// The permission mode a worker on `model` runs in: `auto` where the model
+    /// supports it, otherwise `acceptEdits`.
+    pub fn permission_mode(&self, model: &str) -> crate::PermissionMode {
+        if self.supports_auto_mode(model) {
+            crate::PermissionMode::Auto
+        } else {
+            crate::PermissionMode::AcceptEdits
+        }
     }
 
     /// A model is valid if the list has it; a level is valid if that model
@@ -76,6 +104,7 @@ mod tests {
                     display_name: "Opus 5.5".into(),
                     description: None,
                     effort_levels: vec!["low".into(), "high".into(), "xhigh".into()],
+                    supports_auto_mode: false,
                 },
                 ModelOption {
                     value: "haiku".into(),
@@ -83,6 +112,7 @@ mod tests {
                     display_name: "Haiku 4.5".into(),
                     description: None,
                     effort_levels: vec![],
+                    supports_auto_mode: false,
                 },
             ],
             source: ModelListSource::Curated,
@@ -124,12 +154,49 @@ mod tests {
         let m = &v["models"][0];
         let mut keys: Vec<_> = m.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["description", "display_name", "effort_levels", "resolved_model", "value"]);
+        assert_eq!(keys, ["description", "display_name", "effort_levels", "resolved_model", "supports_auto_mode", "value"]);
         assert!(v.as_object().unwrap().contains_key("cli_version"));
         assert_eq!(serde_json::to_value(ModelListSource::Live).unwrap(), "live");
         assert_eq!(serde_json::to_value(ModelListSource::Cached).unwrap(), "cached");
         let p = serde_json::to_value(RunnerConfigProblem::EffortNotSupported { level: "max".into() }).unwrap();
         assert_eq!(p, serde_json::json!({"kind": "effort_not_supported", "level": "max"}));
+    }
+
+    #[test]
+    fn the_permission_mode_follows_supports_auto_mode() {
+        let mut l = list();
+        l.models[0].supports_auto_mode = true;
+        assert!(l.supports_auto_mode("opus"));
+        assert!(!l.supports_auto_mode("haiku"));
+        assert!(!l.supports_auto_mode("claude-nope"));
+        assert_eq!(l.permission_mode("opus"), crate::PermissionMode::Auto);
+        assert_eq!(l.permission_mode("haiku"), crate::PermissionMode::AcceptEdits);
+        assert_eq!(l.permission_mode("claude-nope"), crate::PermissionMode::AcceptEdits);
+    }
+
+    #[test]
+    fn a_cached_option_without_the_flag_reads_as_unsupported() {
+        let m: ModelOption = serde_json::from_value(serde_json::json!({
+            "value": "opus", "resolved_model": null, "display_name": "Opus", "description": null, "effort_levels": []
+        }))
+        .unwrap();
+        assert!(!m.supports_auto_mode);
+    }
+
+    #[test]
+    fn scope_problems_serialise_in_snake_case() {
+        assert_eq!(
+            serde_json::to_value(RunnerConfigProblem::PluginNotFound { name: "x".into() }).unwrap(),
+            serde_json::json!({"kind": "plugin_not_found", "name": "x"})
+        );
+        assert_eq!(
+            serde_json::to_value(RunnerConfigProblem::PathUnresolvable { pattern: "p".into() }).unwrap(),
+            serde_json::json!({"kind": "path_unresolvable", "pattern": "p"})
+        );
+        assert_eq!(
+            serde_json::to_value(RunnerConfigProblem::RemoteGitWithoutAutoMode).unwrap(),
+            serde_json::json!({"kind": "remote_git_without_auto_mode"})
+        );
     }
 
     #[test]

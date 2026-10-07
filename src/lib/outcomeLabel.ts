@@ -21,6 +21,7 @@ export function outcomeLabel(outcome: string): string {
       case "spawn": return "could not start";
       case "no_result": return "no result";
       case "no_structured_output": return "no structured output";
+      case "permission_mode_mismatch": return "ran in the wrong permission mode";
       case "other": return "failed";
       default: return c.replace(/_/g, " ");
     }

@@ -128,7 +128,7 @@ export function demoPipeline(id = "demo"): Pipeline {
         name: "Writer",
         prompt: "Draft the deliverable.",
         runner: { kind: "claude-cli", model: "claude-opus-4-8", effort: { mode: "standard" } },
-        scope: { reads: [], writes: ["artifacts/"], tools: [] },
+        scope: { reads: [], writes: ["artifacts/"], grants: [], plugins: [] },
         outputs: { on_approve: "reviewer" },
         workers: { min: 1, max: 3 },
         role: "producer",
@@ -139,7 +139,7 @@ export function demoPipeline(id = "demo"): Pipeline {
         name: "Reviewer",
         prompt: "Review the draft and gate it.",
         runner: { kind: "claude-cli", model: "claude-opus-4-8", effort: { mode: "standard" } },
-        scope: { reads: ["artifacts/"], writes: [], tools: [] },
+        scope: { reads: ["artifacts/"], writes: [], grants: [], plugins: [] },
         outputs: { on_approve: "human-gate", on_revise: "writer", on_reject: "escalate" },
         workers: { min: 1, max: 2 },
         role: "reviewer",
@@ -167,7 +167,7 @@ export function demoDraft(): DraftPipeline {
         name: "Writer",
         prompt_body: "Draft the deliverable.",
         runner: { kind: "claude-cli", model: "claude-opus-4-8", effort: { mode: "standard" }, api_key_env: null },
-        scope: { reads: [], writes: ["artifacts/"], tools: [] },
+        scope: { reads: [], writes: ["artifacts/"], grants: [], plugins: [] },
         outputs: { on_approve: "reviewer" },
         workers: { min: 1, max: 3 },
         role: "producer",
@@ -178,7 +178,7 @@ export function demoDraft(): DraftPipeline {
         name: "Reviewer",
         prompt_body: "Review the draft and gate it.",
         runner: { kind: "claude-cli", model: "claude-opus-4-8", effort: { mode: "standard" }, api_key_env: null },
-        scope: { reads: ["artifacts/"], writes: [], tools: [] },
+        scope: { reads: ["artifacts/"], writes: [], grants: [], plugins: [] },
         outputs: { on_approve: "human-gate", on_revise: "writer", on_reject: "escalate" },
         workers: { min: 1, max: 2 },
         role: "reviewer",
@@ -329,6 +329,8 @@ const handlers: Record<string, Handler> = {
 
   // --- L2/L3 recovery ---------------------------------------------------------
   list_invocations: (a) => state.invocationsByTask[String(a?.task_id)] ?? [],
+  denial_counts: () => ({}),
+  list_plugins: () => [],
   retry_task: (a) => {
     const id = String(a?.task_id);
     const t = state.tasks.find((x) => x.id === id);

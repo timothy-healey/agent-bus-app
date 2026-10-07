@@ -29,7 +29,7 @@ function inv(over: Partial<InvocationRow> = {}): InvocationRow {
   return {
     invocation_id: "I-1", team_id: "spec", model: "claude-opus-4-8", attempts: 1,
     started_at: 100, settled_at: 200, outcome: "error:rate_limited",
-    input_tokens: 80, output_tokens: 20, ...over,
+    input_tokens: 80, output_tokens: 20, permission_denials: [], ...over,
   };
 }
 
@@ -360,6 +360,48 @@ describe("CardDrawer", () => {
     expect(within(panel).getByText("reviewers")).toBeInTheDocument();
     expect(within(panel).getByText(/rejected/i)).toBeInTheDocument();
     expect(within(panel).getByText(/tokens/i)).toBeInTheDocument();
+  });
+
+  it("lists each permission denial in the history panel with its tool, input and tag", () => {
+    render(
+      <CardDrawer task={task({ state: "needs_human" })} artifactMarkdown="# Plan"
+        invocations={[inv({
+          outcome: "verdict:approve",
+          permission_denials: [
+            { tool_name: "Bash", tool_input: { command: "git push --force origin x" }, source: "rule" },
+            { tool_name: "Write", tool_input: { file_path: "/repo/a.md" }, source: "classifier" },
+          ],
+        })]}
+        pipeline={escalationPipeline} now={500} {...base()} />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /history/i }));
+    const list = screen.getByRole("list", { name: /permission denials/i });
+    const items = within(list).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent("Bash");
+    expect(items[0]).toHaveTextContent("git push --force origin x");
+    expect(items[0]).toHaveTextContent("rule");
+    expect(items[1]).toHaveTextContent("/repo/a.md");
+    expect(items[1]).toHaveTextContent("classifier");
+  });
+
+  it("renders a denial line in the live log as its own flagged segment", () => {
+    render(
+      <CardDrawer
+        task={task({ state: "running" })}
+        artifactMarkdown=""
+        logSegments={[
+          { kind: "output", text: "working" },
+          { kind: "denial", text: "denied Bash (rule): git push --force origin x\n" },
+        ]}
+        onApprove={() => {}}
+        onRevise={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /live log/i }));
+    const line = screen.getByText(/git push --force origin x/);
+    expect(line.closest("[data-log-kind='denial']")).not.toBeNull();
   });
 
   it("shows an empty history hint when there are no invocations", () => {

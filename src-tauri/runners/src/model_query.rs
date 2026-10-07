@@ -42,6 +42,7 @@ pub fn parse_initialize(stdout: &str) -> Result<Vec<ModelOption>, String> {
                         .as_array()
                         .map(|a| a.iter().filter_map(opt_str).collect())
                         .unwrap_or_default(),
+                    supports_auto_mode: m["supportsAutoMode"].as_bool().unwrap_or(false),
                 })
             })
             .collect());
@@ -137,6 +138,19 @@ mod tests {
         assert_eq!(by("claude-opus-4-6").effort_levels, ["low", "medium", "high", "max"]);
         assert_eq!(by("opus").display_name, "Opus 5.5");
         assert!(by("sonnet").description.is_some());
+        assert!(by("sonnet").supports_auto_mode);
+        assert!(by("default").supports_auto_mode);
+        assert!(!by("haiku").supports_auto_mode);
+    }
+
+    #[test]
+    fn the_curated_list_agrees_with_the_capture_on_auto_mode() {
+        let live = parse_initialize(SAMPLE).unwrap();
+        let curated = crate::curated_models::curated();
+        for m in &live {
+            let c = curated.find(&m.value).unwrap_or_else(|| panic!("curated lacks {}", m.value));
+            assert_eq!(c.supports_auto_mode, m.supports_auto_mode, "{}", m.value);
+        }
     }
 
     #[test]

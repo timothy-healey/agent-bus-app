@@ -42,7 +42,7 @@ mod tests {
             user_message: "Investigate topic X".into(),
             settings_path: "/tmp/s.json".into(),
             add_dirs: vec![],
-            sandbox_profile: None,
+            permission_mode: agent_bus_core::PermissionMode::AcceptEdits, disallowed_tools: vec![], plugin_dirs: vec![],
             working_dir: None,
             output_kind: OutputKind::Producer,
         }

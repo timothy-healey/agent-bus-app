@@ -1,4 +1,4 @@
-import type { DraftPipeline, DraftTeam, Effort, Fork, Gate, Join, Workers } from "../ipc/pipeline";
+import type { DraftPipeline, DraftTeam, Effort, Fork, Gate, Join, Scope, SimpleGrant, Workers } from "../ipc/pipeline";
 import { DEFAULT_TEAM_MODEL, findModel, type ModelList } from "../ipc/models";
 
 /** Default WIP capacity for a new team's input store (mirrors the backend
@@ -33,7 +33,7 @@ function defaultTeam(id: string, name: string): DraftTeam {
     name,
     prompt_body: "",
     runner: { kind: "claude-cli", model: DEFAULT_TEAM_MODEL, api_key_env: null },
-    scope: { reads: [], writes: [], tools: [] },
+    scope: { reads: [], writes: [], grants: [], plugins: [] },
     outputs: {},
     workers: { min: 1, max: 1 },
     role: "producer",
@@ -86,7 +86,7 @@ export function setTeamModel(
 }
 
 /// Parse a comma-separated input into a trimmed, non-empty string list (the
-/// shape Scope.tools/reads/writes use).
+/// shape Scope.reads/writes use).
 function parseCsv(raw: string): string[] {
   return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
@@ -122,8 +122,48 @@ export function setTeamWorkers(d: DraftPipeline, id: string, workers: Workers): 
   return mapTeams(d, (t) => (t.id === id ? { ...t, workers: { min, max } } : t));
 }
 
-export function setTeamTools(d: DraftPipeline, id: string, raw: string): DraftPipeline {
-  return mapTeams(d, (t) => (t.id === id ? { ...t, scope: { ...t.scope, tools: parseCsv(raw) } } : t));
+/// Turn one simple grant on or off for a team (never duplicated).
+export function setTeamGrant(d: DraftPipeline, id: string, grant: SimpleGrant, on: boolean): DraftPipeline {
+  return mapTeams(d, (t) => {
+    if (t.id !== id) return t;
+    const rest = t.scope.grants.filter((g) => g !== grant);
+    return { ...t, scope: { ...t.scope, grants: on ? [...rest, grant] : rest } };
+  });
+}
+
+const PATTERN = /^bash\((.*)\)$/i;
+
+/// The Bash patterns a scope grants, without their `bash(...)` wrapper.
+export function bashPatterns(scope: Scope): string[] {
+  return scope.grants.map((g) => PATTERN.exec(g)?.[1]).filter((p): p is string => p !== undefined);
+}
+
+/// Replace a team's Bash pattern grants from a comma-separated list. Each
+/// entry may be written bare (`git diff:*`) or wrapped (`Bash(git diff:*)`).
+export function setTeamBashPatterns(d: DraftPipeline, id: string, raw: string): DraftPipeline {
+  const patterns = parseCsv(raw).map((p) => PATTERN.exec(p)?.[1]?.trim() ?? p).filter((p) => p.length > 0);
+  return mapTeams(d, (t) => {
+    if (t.id !== id) return t;
+    const simple = t.scope.grants.filter((g) => !PATTERN.test(g));
+    return { ...t, scope: { ...t.scope, grants: [...simple, ...patterns.map((p) => `bash(${p})`)] } };
+  });
+}
+
+/// Turn one plugin on or off for a team (never duplicated).
+export function setTeamPlugin(d: DraftPipeline, id: string, name: string, on: boolean): DraftPipeline {
+  return mapTeams(d, (t) => {
+    if (t.id !== id) return t;
+    const rest = t.scope.plugins.filter((p) => p !== name);
+    return { ...t, scope: { ...t.scope, plugins: on ? [...rest, name] : rest } };
+  });
+}
+
+/// Add a plugin to a team if it is not there yet (a skill picked in the prompt
+/// brings its plugin along).
+export function addTeamPlugin(d: DraftPipeline, id: string, name: string): DraftPipeline {
+  const team = d.teams.find((t) => t.id === id);
+  if (!team || team.scope.plugins.includes(name)) return d;
+  return setTeamPlugin(d, id, name, true);
 }
 
 export function setTeamReads(d: DraftPipeline, id: string, raw: string): DraftPipeline {

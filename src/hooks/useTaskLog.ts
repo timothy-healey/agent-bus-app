@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { onTaskLog } from "../ipc/runtime";
 
 /// One contiguous run of same-kind log text (B). An ordered list of these is what
-/// the CardDrawer renders — output as prose, thinking dimmed/italic.
+/// the CardDrawer renders: output as prose, thinking dimmed/italic, denials as
+/// flagged lines.
 export interface LogSegment {
-  kind: "output" | "thinking";
+  kind: "output" | "thinking" | "denial";
   text: string;
 }
 

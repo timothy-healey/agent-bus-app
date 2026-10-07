@@ -2,7 +2,7 @@
 //! design spec (Data model → Pipeline definition). Pure data + serde; parsing
 //! lives in parse.rs and invariant enforcement in validate.rs.
 
-use agent_bus_core::{Effort, RunnerKind};
+use agent_bus_core::{Effort, RunnerKind, ToolGrant};
 use serde::{Deserialize, Serialize};
 
 /// The current pipeline schema version. Pipeline Authoring ↔ Runtime is a
@@ -123,14 +123,52 @@ impl TeamRunnerConfig {
     }
 }
 
+/// What a team's worker may touch. `reads` are visible but never edited;
+/// `writes` are editable; `grants` add tools beyond the always-on ones (Read,
+/// Glob, Grep, Skill, Edit, Write); `plugins` are loaded explicitly for the
+/// team's workers. A legacy `tools:` list is read into `grants` when `grants`
+/// is absent, and never written back.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "ScopeWire")]
 pub struct Scope {
-    #[serde(default)]
     pub reads: Vec<String>,
-    #[serde(default)]
     pub writes: Vec<String>,
+    pub grants: Vec<ToolGrant>,
+    pub plugins: Vec<String>,
+}
+
+/// The accepted input shape of a Scope, including the legacy `tools:` list.
+#[derive(Deserialize)]
+struct ScopeWire {
     #[serde(default)]
-    pub tools: Vec<String>,
+    reads: Vec<String>,
+    #[serde(default)]
+    writes: Vec<String>,
+    #[serde(default)]
+    grants: Option<Vec<ToolGrant>>,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    #[serde(default)]
+    plugins: Vec<String>,
+}
+
+impl From<ScopeWire> for Scope {
+    fn from(w: ScopeWire) -> Self {
+        let grants = match (w.grants, w.tools) {
+            (Some(g), _) => g,
+            (None, Some(tools)) => {
+                let mut g: Vec<ToolGrant> = Vec::new();
+                for t in tools.iter().filter_map(|t| ToolGrant::from_legacy_tool(t)) {
+                    if !g.contains(&t) {
+                        g.push(t);
+                    }
+                }
+                g
+            }
+            (None, None) => Vec::new(),
+        };
+        Scope { reads: w.reads, writes: w.writes, grants, plugins: w.plugins }
+    }
 }
 
 /// A node's routing edges — the bundle of a node's three **Route**s
@@ -315,6 +353,49 @@ mod tests {
             role: Role::default(),
             store: Store::default(),
         }
+    }
+
+    #[test]
+    fn legacy_tools_read_as_grants() {
+        let yaml = "reads: [a]\nwrites: [b]\ntools: [Read, Write, Bash, \"Bash(git diff:*)\", WebFetch, Glob, Agent]\n";
+        let s: Scope = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(s.reads, vec!["a".to_string()]);
+        assert_eq!(s.writes, vec!["b".to_string()]);
+        assert_eq!(
+            s.grants,
+            vec![ToolGrant::Bash, ToolGrant::BashPattern("git diff:*".into()), ToolGrant::WebFetch, ToolGrant::Agent]
+        );
+        assert!(s.plugins.is_empty());
+    }
+
+    #[test]
+    fn grants_win_over_legacy_tools_when_both_are_present() {
+        let s: Scope = serde_yaml::from_str("grants: [agent]\ntools: [Bash]\n").unwrap();
+        assert_eq!(s.grants, vec![ToolGrant::Agent]);
+    }
+
+    #[test]
+    fn scope_writes_grants_and_plugins_never_tools() {
+        let s = Scope {
+            reads: vec![],
+            writes: vec![],
+            grants: vec![ToolGrant::Bash, ToolGrant::RemoteGit, ToolGrant::BashPattern("git diff:*".into())],
+            plugins: vec!["superpowers".into()],
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["grants"], serde_json::json!(["bash", "remote-git", "bash(git diff:*)"]));
+        assert_eq!(v["plugins"], serde_json::json!(["superpowers"]));
+        assert!(v.get("tools").is_none());
+        let back: Scope = serde_json::from_value(v).unwrap();
+        assert_eq!(back, s);
+        let yaml = serde_yaml::to_string(&s).unwrap();
+        assert!(yaml.contains("grants:") && !yaml.contains("tools:"), "{yaml}");
+    }
+
+    #[test]
+    fn an_empty_scope_reads_with_empty_lists() {
+        let s: Scope = serde_json::from_str("{}").unwrap();
+        assert_eq!(s, Scope::default());
     }
 
     #[test]

@@ -35,6 +35,24 @@ describe("Card", () => {
     expect(screen.getByText("a1")).toBeInTheDocument();
   });
 
+  it("shows a denial badge with the count when the task had denials", () => {
+    render(<Card task={task()} tokens={0} denials={3} />);
+    const badge = screen.getByLabelText("3 permission denials");
+    expect(badge).toHaveTextContent("3");
+  });
+
+  it("shows no denial badge at zero", () => {
+    render(<Card task={task()} tokens={0} denials={0} />);
+    expect(screen.queryByLabelText(/permission denial/)).not.toBeInTheDocument();
+    render(<Card task={task()} tokens={0} />);
+    expect(screen.queryByLabelText(/permission denial/)).not.toBeInTheDocument();
+  });
+
+  it("names a single denial in the singular", () => {
+    render(<Card task={task()} tokens={0} denials={1} />);
+    expect(screen.getByLabelText("1 permission denial")).toBeInTheDocument();
+  });
+
   it("shows the formatted token cost", () => {
     render(<Card task={task()} tokens={47_000} />);
     expect(screen.getByText(/47k/)).toBeInTheDocument();

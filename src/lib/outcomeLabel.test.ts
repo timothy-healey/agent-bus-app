@@ -14,6 +14,7 @@ describe("outcomeLabel", () => {
     expect(outcomeLabel("error:spawn")).toBe("could not start");
     expect(outcomeLabel("error:no_result")).toBe("no result");
     expect(outcomeLabel("error:no_structured_output")).toBe("no structured output");
+    expect(outcomeLabel("error:permission_mode_mismatch")).toBe("ran in the wrong permission mode");
     expect(outcomeLabel("error:other")).toBe("failed");
   });
 

@@ -84,9 +84,15 @@ fn clone_err(e: &RunnerError) -> RunnerError {
         RunnerError::ModelUnavailable(s) => RunnerError::ModelUnavailable(s.clone()),
         RunnerError::Spawn(s) => RunnerError::Spawn(s.clone()),
         RunnerError::NoResult => RunnerError::NoResult,
-        RunnerError::NoStructuredOutput { detail, usage } => {
-            RunnerError::NoStructuredOutput { detail: detail.clone(), usage: usage.clone() }
+        RunnerError::NoStructuredOutput { detail, usage, denials } => {
+            RunnerError::NoStructuredOutput { detail: detail.clone(), usage: usage.clone(), denials: denials.clone() }
         }
+        RunnerError::PermissionModeMismatch { requested, actual, usage, denials } => RunnerError::PermissionModeMismatch {
+            requested: requested.clone(),
+            actual: actual.clone(),
+            usage: usage.clone(),
+            denials: denials.clone(),
+        },
         RunnerError::Other(s) => RunnerError::Other(s.clone()),
     }
 }
@@ -101,6 +107,7 @@ mod tests {
             result: WorkerResult::Reviewer(ReviewerOutput { verdict: v, reason: "r".into(), artifact: Some("a.md".into()) }),
             final_text: "x".into(),
             usage: Default::default(),
+            permission_denials: vec![],
         }
     }
 
@@ -121,7 +128,7 @@ mod tests {
             user_message: String::new(),
             settings_path: String::new(),
             add_dirs: vec![],
-            sandbox_profile: None,
+            permission_mode: agent_bus_core::PermissionMode::AcceptEdits, disallowed_tools: vec![], plugin_dirs: vec![],
             working_dir: None,
             output_kind: OutputKind::Reviewer,
         }

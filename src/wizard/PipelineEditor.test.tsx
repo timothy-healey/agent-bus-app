@@ -27,7 +27,7 @@ function seedDraft(): DraftPipeline {
         name: "Research",
         prompt_body: "investigate",
         runner: { kind: "claude-cli", model: "claude-opus-4-8", effort: "high", api_key_env: null },
-        scope: { reads: [], writes: [], tools: [] },
+        scope: { reads: [], writes: [], grants: [], plugins: [] },
         outputs: {},
         workers: { min: 1, max: 1 },
         role: "producer",
