@@ -3,6 +3,7 @@ mod events;
 mod pipeline_activator;
 mod process_records;
 mod process_registry;
+mod usage_poller;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -1887,8 +1888,9 @@ pub fn run() {
 
                 // Utilization poller: reads the account's real plan usage from
                 // claude (no model call), stores it, and applies the auto-brake.
-                // Runs at boot, every 60s, and when a worker step settles (at
-                // most once per 10s).
+                // Runs at boot, every 60s, and when a worker step settles. Polls
+                // are at least 10s apart: a trigger that arrives sooner is
+                // deferred to the 10s mark, not dropped.
                 {
                     let util = util_store.clone();
                     let brake = brake.clone();
@@ -1903,19 +1905,13 @@ pub fn run() {
                         use usage_telemetry::brake_policy::{decide_utilization, BrakeDecision, AUTO_METER_REASON};
                         let mut last_attempt: Option<std::time::Instant> = None;
                         loop {
-                            if let Some(t) = last_attempt {
-                                if t.elapsed() < std::time::Duration::from_secs(10) {
-                                    tokio::time::sleep(std::time::Duration::from_secs(10) - t.elapsed()).await;
-                                }
+                            let delay = crate::usage_poller::next_poll_delay(last_attempt, std::time::Instant::now());
+                            if !delay.is_zero() {
+                                tokio::time::sleep(delay).await;
                             }
                             last_attempt = Some(std::time::Instant::now());
                             let now = now_unix();
-                            let src = source.clone();
-                            match tokio::task::spawn_blocking(move || src.fetch()).await {
-                                Ok(Ok(reading)) => util.record_ok(&reading, now).await,
-                                Ok(Err(e)) => util.record_err(&e, now).await,
-                                Err(e) => util.record_err(&format!("usage query failed: {e}"), now).await,
-                            }
+                            crate::usage_poller::poll_once(source.clone(), &util, now).await;
                             let cfg = load_config(&pool).await;
                             if cfg.auto_meter_enabled {
                                 let stored = util.load().await;
