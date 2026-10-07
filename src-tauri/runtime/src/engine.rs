@@ -15,9 +15,9 @@
 //!   * A **run completes** when the generator is dry AND all stores are empty AND
 //!     no workers are running — guarded exactly-once by `RunStore::try_complete`.
 //!
-//! The Runner trait is UNCHANGED: the engine calls `Runner::invoke`/`invoke_stream`
-//! and parses `final_text` with the new `parse_items`, composing `output_contract`
-//! into the system prompt (the L1 fix).
+//! The engine calls `Runner::invoke`/`invoke_stream` with the stage's output kind
+//! and acts on the returned Structured output (`WorkerResult`), composing
+//! `output_contract` into the system prompt.
 
 use crate::brake::Brake;
 use crate::fanout_group::FanOutGroup;
@@ -253,7 +253,8 @@ use crate::invocation_audit::{AuditUsage, ErrorClass, InvocationOutcome};
 use crate::task::{Task, TaskState, MAX_ATTEMPTS};
 use runners::output::InvocationRequest;
 use runners::scope::{cleanup, prepare};
-use runners::stream_json::{output_contract, parse_items, OutputItem};
+use agent_bus_core::{OutputKind, WorkerResult};
+use runners::stream_json::output_contract;
 use workspace::paths::PathVars;
 
 fn now_unix() -> i64 {
@@ -261,12 +262,13 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-/// The role string handed to `output_contract` for a team. Reviewer teams ask
-/// the agent for a per-item verdict; everything else is a producer.
-fn role_str(team: &Team) -> &'static str {
+/// The Structured output a transformer team returns: a reviewer gives a verdict,
+/// every other team a produced artifact. The source always returns Generator
+/// output (`generate_once`). PURE.
+pub fn output_kind_for(team: &Team) -> OutputKind {
     match team.role {
-        pipeline::model::Role::Reviewer => "reviewer",
-        pipeline::model::Role::Producer | pipeline::model::Role::Implementer => "producer",
+        pipeline::model::Role::Reviewer => OutputKind::Reviewer,
+        pipeline::model::Role::Producer | pipeline::model::Role::Implementer => OutputKind::Producer,
     }
 }
 
@@ -373,14 +375,14 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     // 4. BUILD invocation: system prompt = team prompt + output contract; scope
     //    grants write access to this stage's artifact dir (the L1 fix); invoke.
     let dir = ctx.artifact_dir(&team.id);
-    let already_found: Vec<String> = Vec::new(); // transformers don't dedup
+    let kind = output_kind_for(team);
     let system_prompt = format!(
         "{}\n\n{}",
         (ctx.read_prompt)(team),
-        output_contract(role_str(team), &dir, &already_found)
+        output_contract(kind, &dir, &[])
     );
 
-    let result = invoke(ctx, team, &task, system_prompt).await;
+    let result = invoke(ctx, team, &task, system_prompt, kind).await;
 
     // The implementer's worktree (if any) was just persisted inside `invoke`;
     // refresh it onto the in-memory parent so the child copies below inherit it.
@@ -390,12 +392,12 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
         }
     }
 
-    // 5a. FAILURE (invoke error OR no parseable items): release the downstream
-    //     reservation (none was taken for a join target), route onto the
-    //     operational-failure path.
-    let items: Vec<OutputItem> = match result {
-        Ok(items) if !items.is_empty() => items,
-        _ => {
+    // 5a. FAILURE (invoke error, including a missing Structured output): release
+    //     the downstream reservation (none was taken for a join target), route
+    //     onto the operational-failure path.
+    let worker_result: WorkerResult = match result {
+        Ok(r) => r,
+        Err(_) => {
             if let Some(ds) = &downstream {
                 if !downstream_is_join {
                     ctx.stores.release(&ctx.run_id, ds).await?;
@@ -406,33 +408,33 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
         }
     };
 
+    // The item's key is unchanged by a transformer (1→1 lineage).
+    let produced_key = task.item_key.clone().unwrap_or_default();
+    let (verdict, own_artifact, description) = match &worker_result {
+        WorkerResult::Reviewer(r) => (Some(r.verdict), r.artifact.clone(), None),
+        WorkerResult::Producer(p) => (None, p.artifact.clone(), p.description.clone()),
+        WorkerResult::Generator(_) => (None, None, None),
+    };
+
     // 5a-bis. JOIN target: this team is a fork lane. Settle the lane's barrier
-    //     with the item's reviewer verdict (default Approve when the agent emits
-    //     none), free this team's input slot, and return the barrier outcome.
-    //     The lane task carries group_id / lane / join_target (set at fork
-    //     expansion); the barrier owns the single continuation.
+    //     with the reviewer's verdict (a producer lane forwards: Approve), free
+    //     this team's input slot, and return the barrier outcome. The lane task
+    //     carries group_id / lane / join_target (set at fork expansion); the
+    //     barrier owns the single continuation.
     if downstream_is_join {
-        let verdict = items[0].verdict.unwrap_or(agent_bus_core::Verdict::Approve);
+        let verdict = verdict.unwrap_or(agent_bus_core::Verdict::Approve);
         let outcome = resolve_join_barrier(ctx, &mut task, verdict).await?;
         // The lane item left this team's input store (the barrier parked it Done).
         ctx.stores.release(&ctx.run_id, &team.id).await?;
         return Ok(outcome);
     }
 
-    // 5b. SUCCESS. A transformer is 1→1: take the first produced item. Commit it
-    //     into the reserved downstream slot as a child work-item (carrying the
-    //     run, the produced/inherited key, and the artifact). Then free THIS
-    //     team's own input slot (the claimed item has left this store).
-    let first = &items[0];
-    let produced_key = if first.key.is_empty() {
-        // No KEY emitted → inherit the parent item's key (1→1 lineage).
-        task.item_key.clone().unwrap_or_default()
-    } else {
-        first.key.clone()
-    };
-    let artifact = first
-        .artifact_path
-        .clone()
+    // 5b. SUCCESS. Commit the produced item into the reserved downstream slot as
+    //     a child work-item (carrying the run, the key, and the artifact). Then
+    //     free THIS team's own input slot (the claimed item has left this store).
+    //     A reviewer that wrote no file forwards the artifact it reviewed.
+    let artifact = own_artifact
+        .or_else(|| verdict.and(task.parent_artifact.clone()))
         .or_else(|| Some(ctx.artifact_path(&team.id, &produced_key, task.attempts)));
 
     if let Some(ds) = &downstream {
@@ -448,7 +450,12 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
             task.target_repo.clone(),
             now_unix(),
         );
-        child.topic = topic_for_item(first.description.as_deref(), &produced_key);
+        child.topic = match description.as_deref() {
+            Some(d) => topic_for_item(Some(d), &produced_key),
+            // No new description: the item keeps its topic downstream.
+            None if !task.topic.trim().is_empty() => task.topic.clone(),
+            None => topic_for_item(None, &produced_key),
+        };
         // Worktree isolation: the child inherits the item's worktree (so a
         // downstream reviewer / gate shares the implement tree). `None` upstream.
         child.worktree_path = task.worktree_path.clone();
@@ -968,7 +975,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     let system_prompt = format!(
         "{}\n\n{}",
         (ctx.read_prompt)(source_team),
-        output_contract("generator", &dir, &found_vec)
+        output_contract(OutputKind::Generator, &dir, &found_vec)
     );
     // The generator pass uses a transient source task purely to drive one invoke.
     let mut pass_task = Task::work_item(
@@ -984,7 +991,13 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
     // Run under the stable gen:<run>:<stage> id so the live-log sink keys on it and
     // the frontend's transient generator card opens the same stream (LF31).
     pass_task.id = agent_bus_core::TaskId(generator_task_id(&ctx.run_id, &source_team.id));
-    let items = invoke(ctx, source_team, &pass_task, system_prompt).await?;
+    let WorkerResult::Generator(generated) =
+        invoke(ctx, source_team, &pass_task, system_prompt, OutputKind::Generator).await?
+    else {
+        // `invoke` only returns the kind it asked for.
+        return Err(EngineError::Invoke("generator pass returned a non-generator result".into()));
+    };
+    let items = generated.items;
 
     // 4. Filter to NEW keys (not already found), de-duplicate within the batch,
     //    and cap at K (capacity-bounded pass).
@@ -1020,7 +1033,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
         }
         let emitted = items.iter().find(|i| &i.key == key);
         let artifact = emitted
-            .and_then(|i| i.artifact_path.clone())
+            .and_then(|i| i.artifact.clone())
             .or_else(|| Some(ctx.artifact_path(&source_team.id, key, 1)));
         let mut child = Task::work_item(
             run.project_id.clone(),
@@ -1032,7 +1045,7 @@ pub async fn generate_once(ctx: &EngineContext, source_team: &Team) -> Result<St
             ctx.target_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
             now_unix(),
         );
-        child.topic = topic_for_item(emitted.and_then(|i| i.description.as_deref()), key);
+        child.topic = topic_for_item(emitted.map(|i| i.description.as_str()), key);
         ctx.tasks.insert(&child).await?;
         // Record AFTER the commit so the ledger only ever holds keys that were
         // genuinely placed downstream.
@@ -1273,18 +1286,20 @@ pub fn fallback_user_message(task: &Task) -> String {
     }
 }
 
-/// Invoke the runner for a work-item and parse its emitted item list. Builds the
-/// scope (granting the artifact-dir write access), opens + settles the
+/// Invoke the runner for a work-item, asking for `kind` of Structured output.
+/// Builds the scope (granting the artifact-dir write access), opens + settles the
 /// per-invocation audit (R3), publishes usage to the kernel sink (R5), and streams
 /// live-log prose deltas when a log-sink factory is wired (R4) — all best-effort
 /// side channels that never fail the invocation. Cleans up the scope file and
-/// returns the parsed items. An invoke error or unparseable output maps to `Err`.
+/// returns the worker's result. An invoke error — including a missing or
+/// mis-shaped Structured output — maps to `Err`.
 async fn invoke(
     ctx: &EngineContext,
     team: &Team,
     task: &Task,
     system_prompt: String,
-) -> Result<Vec<OutputItem>, EngineError> {
+    kind: OutputKind,
+) -> Result<WorkerResult, EngineError> {
     let now = now_unix();
     let mut vars = PathVars::new(&ctx.project_root).with_task_id(&task.id.0);
     // `${target_repo}` binds to the task's own value, else the project-level
@@ -1365,6 +1380,7 @@ async fn invoke(
         add_dirs: scope_settings.add_dirs.clone(),
         sandbox_profile: None,
         working_dir,
+        output_kind: kind,
     };
 
     // R3: open an audit record for this invocation (outcome NULL = in-flight)
@@ -1392,6 +1408,17 @@ async fn invoke(
     };
     cleanup(&scope_settings.settings_path);
 
+    // A runner returns the kind it was asked for; anything else is treated as a
+    // Structured output of the wrong shape.
+    let result = result.and_then(|o| {
+        if o.result.kind() == kind {
+            Ok(o)
+        } else {
+            Err(runners::output::RunnerError::NoStructuredOutput {
+                detail: format!("asked for {kind:?}, got {:?}", o.result.kind()),
+            })
+        }
+    });
     let output = match result {
         Ok(o) => o,
         Err(e) => {
@@ -1408,8 +1435,6 @@ async fn invoke(
             return Err(EngineError::Invoke(e.to_string()));
         }
     };
-
-    let items = parse_items(&output.final_text);
 
     // R5: publish usage to Telemetry (Customer-Supplier via the kernel UsageSink
     // seam). Best-effort; a sink failure never blocks the invocation. The kernel
@@ -1429,16 +1454,15 @@ async fn invoke(
         });
     }
 
-    // R3: settle the audit with the invocation outcome — the verdict the engine
-    // derives from the parsed item list (the first item's verdict, defaulting to
-    // Approve when the model emits none, mirroring the lane-settle default) — plus
-    // the recorded usage. Best-effort. DELIBERATELY outside any Task transaction:
-    // this records the *invocation* outcome (one Claude call), independent of the
-    // subsequent store/route bookkeeping (D2 / VET F1).
-    let verdict = items
-        .first()
-        .and_then(|i| i.verdict)
-        .unwrap_or(agent_bus_core::Verdict::Approve);
+    // R3: settle the audit with the invocation outcome plus the recorded usage. A
+    // reviewer records its verdict; a producer or generator records approve,
+    // because its result always moves forward. Best-effort. DELIBERATELY outside
+    // any Task transaction: this records the *invocation* outcome (one Claude
+    // call), independent of the subsequent store/route bookkeeping (D2 / VET F1).
+    let verdict = match &output.result {
+        WorkerResult::Reviewer(r) => r.verdict,
+        WorkerResult::Producer(_) | WorkerResult::Generator(_) => agent_bus_core::Verdict::Approve,
+    };
     settle_audit(
         ctx,
         &audit_id,
@@ -1453,7 +1477,7 @@ async fn invoke(
     )
     .await;
 
-    Ok(items)
+    Ok(output.result)
 }
 
 /// Best-effort settle of an audit row (R3). No-op when audit is unwired or the
@@ -1675,7 +1699,8 @@ mod tests {
     use super::*;
     use pipeline::model::Role;
     use runners::fake::FakeRunner;
-    use runners::output::{RunnerOutput, RunnerUsage};
+    use agent_bus_core::{GeneratedItem, GeneratorOutput, OutputKind, ProducerOutput, ReviewerOutput, Verdict, WorkerResult};
+    use runners::output::{RunnerError, RunnerOutput, RunnerUsage};
 
     struct RecordingProvider {
         ensure_calls: std::sync::Mutex<Vec<(String, String, String)>>,
@@ -1707,8 +1732,64 @@ mod tests {
         assert_eq!(p.reset_calls.lock().unwrap()[0], "/proj/worktrees/R-1/alpha");
     }
 
-    fn approve_out() -> RunnerOutput {
-        RunnerOutput { verdict: agent_bus_core::Verdict::Approve, artifact_path: None, final_text: String::new(), usage: RunnerUsage::default() }
+    fn out(result: WorkerResult) -> RunnerOutput {
+        RunnerOutput { result, final_text: String::new(), usage: RunnerUsage::default() }
+    }
+
+    fn producer_out() -> RunnerOutput {
+        out(WorkerResult::Producer(ProducerOutput { artifact: None, description: None }))
+    }
+
+    fn producer_with_artifact(path: &str) -> RunnerOutput {
+        out(WorkerResult::Producer(ProducerOutput { artifact: Some(path.into()), description: None }))
+    }
+
+    fn reviewer_out(verdict: Verdict, reason: &str) -> RunnerOutput {
+        out(WorkerResult::Reviewer(ReviewerOutput { verdict, reason: reason.into(), artifact: None }))
+    }
+
+    fn gen_out(keys: &[&str]) -> RunnerOutput {
+        out(WorkerResult::Generator(GeneratorOutput {
+            items: keys
+                .iter()
+                .map(|k| GeneratedItem { key: k.to_string(), description: String::new(), artifact: None })
+                .collect(),
+        }))
+    }
+
+    fn no_structured() -> RunnerError {
+        RunnerError::NoStructuredOutput { detail: "the run ended without a structured_output".into() }
+    }
+
+    /// A runner that answers by the requested output kind, the way the real CLI
+    /// does: generator passes take the scripted batches in order (the last one
+    /// repeats); producers and reviewers get one fixed answer each.
+    struct KindRunner {
+        batches: std::sync::Mutex<Vec<RunnerOutput>>,
+        producer: RunnerOutput,
+        reviewer: RunnerOutput,
+        received: std::sync::Mutex<Vec<runners::output::InvocationRequest>>,
+    }
+
+    impl KindRunner {
+        fn new(batches: Vec<RunnerOutput>, producer: RunnerOutput, reviewer: RunnerOutput) -> Self {
+            Self { batches: std::sync::Mutex::new(batches), producer, reviewer, received: Default::default() }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for KindRunner {
+        async fn invoke(&self, req: &runners::output::InvocationRequest) -> Result<RunnerOutput, RunnerError> {
+            self.received.lock().unwrap().push(req.clone());
+            Ok(match req.output_kind {
+                OutputKind::Generator => {
+                    let mut b = self.batches.lock().unwrap();
+                    if b.len() > 1 { b.remove(0) } else { b[0].clone() }
+                }
+                OutputKind::Producer => self.producer.clone(),
+                OutputKind::Reviewer => self.reviewer.clone(),
+            })
+        }
     }
 
     #[test]
@@ -1740,7 +1821,7 @@ mod tests {
     async fn invoke_sets_working_dir_to_effective_target_repo() {
         // A single terminal producer team; one queued item to claim + invoke.
         let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
         ctx.target_repo = Some(std::path::PathBuf::from("/repo/here"));
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
@@ -1765,14 +1846,14 @@ mod tests {
             reset_calls: Default::default(),
             returns: "/proj/worktrees/R-1/alpha".into(),
         });
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
         ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
         ctx.worktree_provider = Some(provider.clone());
         let impl_team = team("implementers", None, Role::Implementer, 8);
         let item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "implementers".into(), None, None, 100);
         ctx.tasks.insert(&item).await.unwrap();
-        let _ = invoke(&ctx, &impl_team, &item, "sys".into()).await;
+        let _ = invoke(&ctx, &impl_team, &item, "sys".into(), OutputKind::Producer).await;
         assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/proj/worktrees/R-1/alpha"));
         assert_eq!(provider.ensure_calls.lock().unwrap().len(), 1);
         assert_eq!(provider.ensure_calls.lock().unwrap()[0], (ctx.run_id.clone(), "alpha".into(), "/repo".into()));
@@ -1783,7 +1864,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_uses_inherited_worktree_path_without_calling_ensure() {
         let provider = std::sync::Arc::new(RecordingProvider { ensure_calls: Default::default(), reset_calls: Default::default(), returns: "/should/not/be/used".into() });
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
         ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
         ctx.worktree_provider = Some(provider.clone());
@@ -1791,34 +1872,34 @@ mod tests {
         let mut item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "implementers".into(), None, None, 100);
         item.worktree_path = Some("/proj/worktrees/R-1/alpha".into());
         ctx.tasks.insert(&item).await.unwrap();
-        let _ = invoke(&ctx, &impl_team, &item, "sys".into()).await;
+        let _ = invoke(&ctx, &impl_team, &item, "sys".into(), OutputKind::Producer).await;
         assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/proj/worktrees/R-1/alpha"));
         assert!(provider.ensure_calls.lock().unwrap().is_empty(), "inherited path must not call ensure");
     }
 
     #[tokio::test]
     async fn invoke_producer_falls_back_to_target_repo() {
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
         ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
         ctx.worktree_provider = Some(std::sync::Arc::new(RecordingProvider { ensure_calls: Default::default(), reset_calls: Default::default(), returns: "/x".into() }));
         let prod = team("research", Some("spec"), Role::Producer, 8);
         let item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "research".into(), None, None, 100);
         ctx.tasks.insert(&item).await.unwrap();
-        let _ = invoke(&ctx, &prod, &item, "sys".into()).await;
+        let _ = invoke(&ctx, &prod, &item, "sys".into(), OutputKind::Producer).await;
         assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/repo"));
     }
 
     #[tokio::test]
     async fn invoke_implementer_with_no_provider_falls_back_to_target_repo() {
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: k")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let mut ctx = ctx_with(fresh_pool().await, pipeline(vec![team("research", None, Role::Producer, 8)]), recorder.clone()).await;
         ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
         ctx.worktree_provider = None;
         let impl_team = team("implementers", None, Role::Implementer, 8);
         let item = Task::work_item("proj".into(), "pl".into(), ctx.run_id.clone(), "alpha".into(), "implementers".into(), None, None, 100);
         ctx.tasks.insert(&item).await.unwrap();
-        let _ = invoke(&ctx, &impl_team, &item, "sys".into()).await;
+        let _ = invoke(&ctx, &impl_team, &item, "sys".into(), OutputKind::Producer).await;
         assert_eq!(recorder.received.lock().unwrap()[0].working_dir.as_deref(), Some("/repo"));
     }
 
@@ -1864,21 +1945,13 @@ mod tests {
             team("research", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(approve_out()))).await;
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(producer_out()))).await;
         assert_eq!(ctx.downstream_stage(&ctx.pipeline.teams[0]).as_deref(), Some("spec"));
         assert_eq!(ctx.downstream_stage(&ctx.pipeline.teams[1]), None);
         assert!(!ctx.is_terminal(&ctx.pipeline.teams[0]));
         assert!(ctx.is_terminal(&ctx.pipeline.teams[1]));
     }
 
-    fn items_out(items: &str) -> RunnerOutput {
-        RunnerOutput {
-            verdict: agent_bus_core::Verdict::Approve,
-            artifact_path: None,
-            final_text: items.to_string(),
-            usage: RunnerUsage::default(),
-        }
-    }
 
     // ---- Task 1: route-target resolution ----
 
@@ -1910,7 +1983,7 @@ mod tests {
             vec![gate("human-gate", "spec")],
             vec![], vec![],
         );
-        let out = items_out("KEY: alpha\nARTIFACT: artifacts/research/alpha.md");
+        let out = producer_with_artifact("artifacts/research/alpha.md");
         let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
         // gate store NOT pre-ensured — transform_once must ensure it.
@@ -1939,7 +2012,7 @@ mod tests {
             vec![gate("human-gate", "spec")],
             vec![], vec![],
         );
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: x")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
         // gate store ensured at capacity 1 and already full
@@ -1965,7 +2038,7 @@ mod tests {
             vec![gate("human-gate", "spec")],
             vec![], vec![],
         );
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.runs.set_generator_dry(&ctx.run_id).await.unwrap();
         // a gated item occupying the gate store
         ctx.stores.ensure(&ctx.run_id, "human-gate", 8).await.unwrap();
@@ -1987,7 +2060,7 @@ mod tests {
             vec![gate("human-gate", "spec")],
             vec![], vec![],
         );
-        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "human-gate", 8).await.unwrap();
         ctx.stores.reserve(&ctx.run_id, "human-gate").await.unwrap();
         let mut t = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "alpha".into(), "human-gate".into(), Some("art.md".into()), None, 100);
@@ -2066,7 +2139,7 @@ mod tests {
             team("research", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        let out = items_out("KEY: alpha\nARTIFACT: artifacts/spec/alpha.md");
+        let out = producer_with_artifact("artifacts/spec/alpha.md");
         let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
@@ -2110,7 +2183,7 @@ mod tests {
             reset_calls: Default::default(),
             returns: "/proj/worktrees/R-1/alpha".into(),
         });
-        let out = items_out("KEY: alpha\nARTIFACT: artifacts/impl/alpha.md");
+        let out = producer_with_artifact("artifacts/impl/alpha.md");
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
         ctx.target_repo = Some(std::path::PathBuf::from("/repo"));
         ctx.worktree_provider = Some(provider.clone());
@@ -2134,7 +2207,7 @@ mod tests {
             team("research", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 1),
         ]);
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: x")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
         ctx.stores.ensure(&ctx.run_id, "spec", 1).await.unwrap();
@@ -2161,7 +2234,7 @@ mod tests {
             team("research", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
 
         let outcome = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
@@ -2176,7 +2249,7 @@ mod tests {
         // not a genuine verdict — leave the task RE-RUNNABLE (re-queue, no attempts
         // bump, no escalation) so a resume recovers it.
         let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
-        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("")))).await;
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::new(vec![Err(no_structured())]))).await;
         let mut task = Task::work_item(
             "proj".into(), "p".into(), ctx.run_id.clone(), "z".into(),
             "research".into(), None, None, 100,
@@ -2198,7 +2271,7 @@ mod tests {
     #[tokio::test]
     async fn operational_failure_without_brake_bumps_attempts_as_before() {
         let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
-        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("")))).await;
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::new(vec![Err(no_structured())]))).await;
         let mut task = Task::work_item(
             "proj".into(), "p".into(), ctx.run_id.clone(), "z".into(),
             "research".into(), None, None, 100,
@@ -2218,8 +2291,8 @@ mod tests {
             team("research", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        // empty final_text → parse_items yields nothing → operational failure
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("")))).await;
+        // no structured output → operational failure
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::new(vec![Err(no_structured())]))).await;
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
         ctx.stores.reserve(&ctx.run_id, "research").await.unwrap();
@@ -2240,7 +2313,7 @@ mod tests {
     async fn transform_terminal_team_needs_no_reservation() {
         // a single terminal team: items leave the pipeline, no downstream store.
         let p = pipeline(vec![team("sink", None, Role::Producer, 8)]);
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: done")))).await;
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "sink", 8).await.unwrap();
         ctx.stores.reserve(&ctx.run_id, "sink").await.unwrap();
         let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), "done".into(), "sink".into(), None, None, 100);
@@ -2259,7 +2332,7 @@ mod tests {
             team("research", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
         ctx.brake.set_on("test");
         assert_eq!(transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap(), StepOutcome::Braked);
@@ -2288,7 +2361,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_expands_one_item_into_lane_siblings_sharing_a_group() {
-        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(producer_out()))).await;
         let fork = ctx.pipeline.forks[0].clone();
         // an item queued at the fork store, awaiting expansion
         ctx.stores.ensure(&ctx.run_id, "fan", 8).await.unwrap();
@@ -2320,7 +2393,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_is_all_or_none_a_full_lane_store_backpressures_without_partial_expansion() {
-        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(producer_out()))).await;
         let fork = ctx.pipeline.forks[0].clone();
         ctx.stores.ensure(&ctx.run_id, "fan", 8).await.unwrap();
         ctx.stores.reserve(&ctx.run_id, "fan").await.unwrap();
@@ -2346,7 +2419,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_with_no_input_is_idle() {
-        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(producer_out()))).await;
         let fork = ctx.pipeline.forks[0].clone();
         ctx.stores.ensure(&ctx.run_id, "fan", 8).await.unwrap();
         assert_eq!(fork_once(&ctx, &fork).await.unwrap(), StepOutcome::Idle);
@@ -2388,7 +2461,7 @@ mod tests {
 
     #[tokio::test]
     async fn join_all_approve_commits_continuation_downstream() {
-        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "ddd", 8).await.unwrap();
         ctx.stores.ensure(&ctx.run_id, "sec", 8).await.unwrap();
         let mut lanes = seed_group(&ctx, "rejoin", 1).await;
@@ -2406,7 +2479,7 @@ mod tests {
 
     #[tokio::test]
     async fn join_one_reject_default_routes_revise_once_back_to_producer() {
-        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(producer_out()))).await;
         let mut lanes = seed_group(&ctx, "rejoin", 1).await; // first attempt
         resolve_join_barrier(&ctx, &mut lanes[0], agent_bus_core::Verdict::Approve).await.unwrap();
         let o2 = resolve_join_barrier(&ctx, &mut lanes[1], agent_bus_core::Verdict::Reject).await.unwrap();
@@ -2425,7 +2498,7 @@ mod tests {
     async fn join_second_failure_escalates_revise_is_once_only() {
         // attempts already 2 -> the item was revised once -> a further failure
         // escalates to needs-human instead of revising again.
-        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, fork_pipeline(), Arc::new(FakeRunner::always(producer_out()))).await;
         let mut lanes = seed_group(&ctx, "rejoin", 2).await;
         resolve_join_barrier(&ctx, &mut lanes[0], agent_bus_core::Verdict::Approve).await.unwrap();
         let o2 = resolve_join_barrier(&ctx, &mut lanes[1], agent_bus_core::Verdict::Reject).await.unwrap();
@@ -2451,7 +2524,7 @@ mod tests {
             vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
             vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "spec".into(), cancel_on_reject: true, quorum: None }],
         );
-        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(producer_out()))).await;
         let mut lanes = seed_group(&ctx, "rejoin", 1).await;
         // lane[0] (ddd) rejects -> early-cancel completes immediately, escalates,
         // and cancels the still-running lane[1].
@@ -2481,7 +2554,7 @@ mod tests {
             vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
             vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "spec".into(), cancel_on_reject: false, quorum: Some(1) }],
         );
-        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(items_out("KEY: a")))).await;
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
         let mut lanes = seed_group(&ctx, "rejoin", 1).await;
         lanes[1].state = TaskState::Queued;
@@ -2505,9 +2578,9 @@ mod tests {
             team("spec", None, Role::Producer, 3),
         ]);
         let runner = Arc::new(FakeRunner::new(vec![
-            Ok(items_out("KEY: a\nKEY: b\nKEY: c\nKEY: d")),
-            Ok(items_out("KEY: c\nKEY: d\nKEY: e")),
-            Ok(items_out("(nothing new)")),
+            Ok(gen_out(&["a", "b", "c", "d"])),
+            Ok(gen_out(&["c", "d", "e"])),
+            Ok(gen_out(&[])),
         ]));
         let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 3).await.unwrap();
@@ -2552,7 +2625,7 @@ mod tests {
             team("source", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 1),
         ]);
-        let runner = Arc::new(FakeRunner::always(items_out("KEY: a")));
+        let runner = Arc::new(FakeRunner::always(gen_out(&["a"])));
         let ctx = ctx_with(fresh_pool().await, p.clone(), runner.clone()).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 1).await.unwrap();
         ctx.stores.reserve(&ctx.run_id, "spec").await.unwrap(); // full
@@ -2571,8 +2644,8 @@ mod tests {
         ]);
         // both passes emit the same key; the second must record 0 new -> dry
         let runner = Arc::new(FakeRunner::new(vec![
-            Ok(items_out("KEY: only")),
-            Ok(items_out("KEY: only")),
+            Ok(gen_out(&["only"])),
+            Ok(gen_out(&["only"])),
         ]));
         let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
@@ -2598,8 +2671,8 @@ mod tests {
             team("spec", None, Role::Producer, 3),
         ]);
         let runner = Arc::new(FakeRunner::new(vec![
-            Ok(items_out("KEY: a\nKEY: b\nKEY: c")),
-            Ok(items_out("KEY: c\nKEY: f")),
+            Ok(gen_out(&["a", "b", "c"])),
+            Ok(gen_out(&["c", "f"])),
         ]));
         let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 2).await.unwrap(); // only 2 real slots
@@ -2639,7 +2712,7 @@ mod tests {
             team("source", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        let runner = Arc::new(FakeRunner::always(items_out("KEY: a")));
+        let runner = Arc::new(FakeRunner::always(gen_out(&["a"])));
         let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
         let run = ctx.runs.get(&ctx.run_id).await.unwrap();
@@ -2664,9 +2737,13 @@ mod tests {
             team("source", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        let runner = Arc::new(FakeRunner::always(items_out(
-            "KEY: lwv-x\nDESCRIPTION: Investigate the seam\nARTIFACT: artifacts/research/lwv-x.md",
-        )));
+        let runner = Arc::new(FakeRunner::always(out(WorkerResult::Generator(GeneratorOutput {
+            items: vec![GeneratedItem {
+                key: "lwv-x".into(),
+                description: "Investigate the seam".into(),
+                artifact: Some("artifacts/research/lwv-x.md".into()),
+            }],
+        }))));
         let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
 
@@ -2691,7 +2768,7 @@ mod tests {
             team("source", Some("spec"), Role::Producer, 8),
             team("spec", None, Role::Producer, 8),
         ]);
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "source", 8).await.unwrap();
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
 
@@ -2723,7 +2800,7 @@ mod tests {
     #[tokio::test]
     async fn try_finish_ignores_running_items_of_other_runs() {
         let p = pipeline(vec![team("spec", None, Role::Producer, 8)]);
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out("KEY: x")))).await;
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(producer_out()))).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
         ctx.runs.set_generator_dry(&ctx.run_id).await.unwrap();
         // a running item belonging to a DIFFERENT run must not block this run
@@ -2749,16 +2826,8 @@ mod tests {
         ]);
         // Generator emits 5 candidates the first pass (capped to free slots each
         // call), keeps offering the same 5 (deduped by the ledger), then nothing.
-        let batch = "KEY: c1\nKEY: c2\nKEY: c3\nKEY: c4\nKEY: c5";
-        let runner = Arc::new(FakeRunner::new(vec![
-            Ok(items_out(batch)),
-            Ok(items_out(batch)),
-            Ok(items_out(batch)),
-            Ok(items_out(batch)),
-            // transformer outputs (spec/done) reuse the last response too: any
-            // non-empty KEY works for a 1->1 transform. Keep emitting a batch so
-            // both source passes AND transformer steps get a parseable item.
-        ]));
+        let batch = gen_out(&["c1", "c2", "c3", "c4", "c5"]);
+        let runner = Arc::new(KindRunner::new(vec![batch], producer_out(), reviewer_out(Verdict::Approve, "ok")));
         let ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
         ctx.stores.ensure(&ctx.run_id, "spec", 2).await.unwrap();
         ctx.stores.ensure(&ctx.run_id, "done", 16).await.unwrap();
@@ -2813,11 +2882,10 @@ mod tests {
             vec![Fork { id: "fan".into(), lanes: vec!["ddd".into(), "sec".into()] }],
             vec![Join { id: "rejoin".into(), waits_for: vec!["ddd".into(), "sec".into()], downstream: "human-gate".into(), cancel_on_reject: false, quorum: None }],
         );
-        // Every invoke returns two approving candidates. Generator emits c1,c2
-        // (then deduped -> dry); producers/reviewers read items[0] (verdict
-        // approve) — an all-approve fan.
-        let out = "KEY: c1\nVERDICT: approve\nKEY: c2\nVERDICT: approve";
-        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(items_out(out)))).await;
+        // The generator emits c1,c2 (then deduped -> dry); producers forward and
+        // reviewers approve — an all-approve fan.
+        let runner = KindRunner::new(vec![gen_out(&["c1", "c2"])], producer_out(), reviewer_out(Verdict::Approve, "ok"));
+        let ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(runner)).await;
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
 
         let source = ctx.pipeline.teams[0].clone();
@@ -2903,7 +2971,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_binds_task_target_repo_over_the_project_default() {
         let p = pipeline(vec![team_reading_target_repo("research")]);
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: alpha")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
         // Project default repo set on the context.
         ctx.target_repo = Some(PathBuf::from("/proj-repo"));
@@ -2934,7 +3002,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_falls_back_to_the_project_default_target_repo() {
         let p = pipeline(vec![team_reading_target_repo("research")]);
-        let recorder = Arc::new(FakeRunner::always(items_out("KEY: alpha")));
+        let recorder = Arc::new(FakeRunner::always(producer_out()));
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), recorder.clone()).await;
         ctx.target_repo = Some(PathBuf::from("/proj-repo"));
         ctx.stores.ensure(&ctx.run_id, "research", 8).await.unwrap();
@@ -2987,12 +3055,11 @@ mod tests {
     #[tokio::test]
     async fn invoke_records_a_started_then_settled_audit_with_the_verdict() {
         let (pool, audit) = pool_with_audit().await;
-        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
-        // The model emits an item carrying an explicit revise verdict.
+        let p = pipeline(vec![team("research", None, Role::Reviewer, 8)]);
+        // A reviewer returns an explicit revise verdict.
         let out = RunnerOutput {
-            verdict: agent_bus_core::Verdict::Revise,
-            artifact_path: None,
-            final_text: "KEY: alpha\nVERDICT: revise".into(),
+            result: WorkerResult::Reviewer(ReviewerOutput { verdict: Verdict::Revise, reason: "thin".into(), artifact: None }),
+            final_text: String::new(),
             usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3, cost_micros: None },
         };
         let mut ctx = ctx_with(pool, p.clone(), Arc::new(FakeRunner::always(out))).await;
@@ -3011,7 +3078,7 @@ mod tests {
         assert_eq!(row.attempts, 1);
         assert!(row.settled_at.is_some(), "the row must be settled");
         assert_eq!(row.outcome_kind.as_deref(), Some("verdict"));
-        assert_eq!(row.outcome.as_deref(), Some("revise"), "verdict derived from the parsed item");
+        assert_eq!(row.outcome.as_deref(), Some("revise"), "the reviewer's real verdict");
         assert_eq!(row.usage.input_tokens, 100);
         assert_eq!(row.usage.output_tokens, 20);
         assert_eq!(row.usage.cache_creation, 5);
@@ -3027,9 +3094,8 @@ mod tests {
         t.runner.as_mut().unwrap().effort = Some(agent_bus_core::Effort::Level("low".into()));
         let p = pipeline(vec![t]);
         let out = RunnerOutput {
-            verdict: agent_bus_core::Verdict::Approve,
-            artifact_path: None,
-            final_text: "KEY: alpha".into(),
+            result: WorkerResult::Producer(ProducerOutput { artifact: None, description: None }),
+            final_text: String::new(),
             usage: RunnerUsage { model: "m".into(), input_tokens: 1, output_tokens: 1, cache_creation: 0, cache_read: 0, cost_micros: None },
         };
         let mut ctx = ctx_with(pool, p.clone(), Arc::new(FakeRunner::always(out))).await;
@@ -3081,9 +3147,8 @@ mod tests {
     async fn invoke_publishes_a_usage_event_to_the_sink() {
         let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
         let out = RunnerOutput {
-            verdict: agent_bus_core::Verdict::Approve,
-            artifact_path: None,
-            final_text: "KEY: alpha".into(),
+            result: WorkerResult::Producer(ProducerOutput { artifact: None, description: None }),
+            final_text: String::new(),
             usage: RunnerUsage { model: "claude-opus-4-7".into(), input_tokens: 100, output_tokens: 20, cache_creation: 5, cache_read: 3, cost_micros: None },
         };
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), Arc::new(FakeRunner::always(out))).await;
@@ -3116,7 +3181,7 @@ mod tests {
         let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
         // A FakeRunner with scripted deltas forwarded on invoke_stream.
         let runner = Arc::new(FakeRunner::with_deltas(
-            vec![Ok(items_out("KEY: alpha"))],
+            vec![Ok(producer_out())],
             vec![vec!["Analy".into(), "sing.".into()]],
         ));
         let mut ctx = ctx_with(fresh_pool().await, p.clone(), runner).await;
@@ -3142,5 +3207,118 @@ mod tests {
         let deltas: Vec<&str> = captured.iter().map(|(_, d)| d.as_str()).collect();
         assert_eq!(deltas, vec!["Analy", "sing."], "the scripted deltas streamed to the sink");
         assert!(captured.iter().all(|(tid, _)| tid == &item.id.0), "deltas keyed by the task id");
+    }
+
+    // ---- Structured output: kinds, failures, audit ----
+
+    /// Seed one queued item at `stage` (occupying a slot there).
+    async fn seed_item(ctx: &EngineContext, stage: &str, key: &str) -> Task {
+        ctx.stores.ensure(&ctx.run_id, stage, 8).await.unwrap();
+        ctx.stores.reserve(&ctx.run_id, stage).await.unwrap();
+        let item = Task::work_item("proj".into(), "p".into(), ctx.run_id.clone(), key.into(), stage.into(), Some(format!("artifacts/{key}.md")), None, 100);
+        ctx.tasks.insert(&item).await.unwrap();
+        item
+    }
+
+    #[tokio::test]
+    async fn each_stage_asks_for_its_own_output_kind() {
+        let p = pipeline(vec![
+            team("source", Some("prod"), Role::Producer, 8),
+            team("prod", Some("rev"), Role::Producer, 8),
+            team("rev", None, Role::Reviewer, 8),
+        ]);
+        let runner = Arc::new(KindRunner::new(vec![gen_out(&["a"])], producer_out(), reviewer_out(Verdict::Approve, "ok")));
+        let ctx = ctx_with(fresh_pool().await, p, runner.clone()).await;
+        ctx.stores.ensure(&ctx.run_id, "prod", 8).await.unwrap();
+        ctx.stores.ensure(&ctx.run_id, "rev", 8).await.unwrap();
+        generate_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        transform_once(&ctx, &ctx.pipeline.teams[1]).await.unwrap();
+        transform_once(&ctx, &ctx.pipeline.teams[2]).await.unwrap();
+        let received = runner.received.lock().unwrap();
+        let kinds: Vec<OutputKind> = received.iter().map(|r| r.output_kind).collect();
+        assert_eq!(kinds, vec![OutputKind::Generator, OutputKind::Producer, OutputKind::Reviewer]);
+        for r in received.iter() {
+            assert!(r.system_prompt.contains("Report your result by calling the StructuredOutput tool."));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transformer_without_structured_output_reaches_needs_human_on_the_third_failure() {
+        let p = pipeline(vec![team("research", Some("spec"), Role::Producer, 8), team("spec", None, Role::Producer, 8)]);
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::new(vec![Err(no_structured())]))).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+        let item = seed_item(&ctx, "research", "z").await;
+        for expected_attempts in [2, 3] {
+            let o = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+            assert_eq!(o, StepOutcome::Failed { task_id: item.id.0.clone() });
+            let t = ctx.tasks.get(&item.id).await.unwrap();
+            assert_eq!((t.state, t.attempts), (TaskState::Queued, expected_attempts));
+        }
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let t = ctx.tasks.get(&item.id).await.unwrap();
+        assert_eq!(t.state, TaskState::NeedsHuman);
+        assert_eq!(t.current_stage, "needs-human");
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(0), "no reservation leaked");
+    }
+
+    #[tokio::test]
+    async fn a_result_of_the_wrong_kind_is_an_operational_failure() {
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(gen_out(&["x"])))).await;
+        let item = seed_item(&ctx, "research", "k").await;
+        let o = transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        assert_eq!(o, StepOutcome::Failed { task_id: item.id.0.clone() });
+    }
+
+    #[tokio::test]
+    async fn a_missing_structured_output_is_audited_as_its_own_error_class() {
+        let (pool, audit) = pool_with_audit().await;
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let mut ctx = ctx_with(pool, p, Arc::new(FakeRunner::new(vec![Err(no_structured())]))).await;
+        ctx.audit = Some(audit.clone());
+        let item = seed_item(&ctx, "research", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let rows = audit.list_for_task(&item.id.0).await.unwrap();
+        assert_eq!(rows[0].outcome.as_deref(), Some("error:no_structured_output"));
+    }
+
+    #[tokio::test]
+    async fn a_producer_result_is_audited_as_approve() {
+        let (pool, audit) = pool_with_audit().await;
+        let p = pipeline(vec![team("research", None, Role::Producer, 8)]);
+        let mut ctx = ctx_with(pool, p, Arc::new(FakeRunner::always(producer_out()))).await;
+        ctx.audit = Some(audit.clone());
+        let item = seed_item(&ctx, "research", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let rows = audit.list_for_task(&item.id.0).await.unwrap();
+        assert_eq!(rows[0].outcome.as_deref(), Some("approve"));
+    }
+
+    #[tokio::test]
+    async fn a_generator_without_structured_output_errors_and_records_nothing() {
+        let p = pipeline(vec![team("source", Some("spec"), Role::Producer, 8), team("spec", None, Role::Producer, 8)]);
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::new(vec![Err(no_structured())]))).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+        assert!(generate_once(&ctx, &ctx.pipeline.teams[0]).await.is_err());
+        assert!(ctx.ledger.found_keys(&ctx.run_id, "source").await.unwrap().is_empty());
+        assert!(!ctx.runs.get(&ctx.run_id).await.unwrap().generator_dry, "a failed pass is not dry");
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "spec").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_producer_keeps_its_parent_key_and_uses_its_artifact_and_description() {
+        let p = pipeline(vec![team("research", Some("spec"), Role::Producer, 8), team("spec", None, Role::Producer, 8)]);
+        let answer = out(WorkerResult::Producer(ProducerOutput {
+            artifact: Some("/abs/spec/alpha.md".into()),
+            description: Some("A plan for alpha".into()),
+        }));
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(FakeRunner::always(answer))).await;
+        ctx.stores.ensure(&ctx.run_id, "spec", 8).await.unwrap();
+        seed_item(&ctx, "research", "alpha").await;
+        transform_once(&ctx, &ctx.pipeline.teams[0]).await.unwrap();
+        let child = ctx.tasks.claim_next_for_stage("spec", 200).await.unwrap().unwrap();
+        assert_eq!(child.item_key.as_deref(), Some("alpha"));
+        assert_eq!(child.parent_artifact.as_deref(), Some("/abs/spec/alpha.md"));
+        assert_eq!(child.topic, "A plan for alpha");
     }
 }
