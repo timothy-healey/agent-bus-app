@@ -122,8 +122,6 @@ Initial entries — extracted per-context as `/ddd-council language` is run on e
 - **Cost** — the dollar figure Claude reports for one invocation. Informational on a subscription; never drives the brake.
 - **Token usage** — raw input/output/cache token counts. Informational; never drives the brake.
 - **Usage event** — one `(ts, team?, task?, model, input/output/cache tokens)` record
-- **Budget** *(retiring)* — the configured token threshold the meter used to divide by; replaced by Utilization.
-- **Burn rate** *(retiring)* — tokens per minute, 1-min average; meaningless once the meter reads Utilization.
 - **Threshold band** — `safe` (<60%), `warn` (60–85%), `hot` (≥85%), `braked`
 
 ### Runners (ACL)

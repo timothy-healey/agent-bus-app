@@ -5,16 +5,23 @@ import { SettingsView } from "./SettingsView";
 import type { UsageSnapshot } from "../ipc/usage";
 import type { WorktreeEntry } from "../ipc/workspace";
 
-const snap: UsageSnapshot = {
-  window_total: 66_500_000, window_budget: 190_000_000, window_pct: 0.35, band: "safe",
-  burn_per_min: 0, window_secs: 18000, reset_in_secs: null, est_brake_at: null,
-  by_team: [], tokens_by_task: {}, braked: false, auto_meter_enabled: false,
-};
+const snap = (over: Partial<UsageSnapshot> = {}): UsageSnapshot => ({
+  available: true,
+  observed_at: 1_000,
+  session: { label: "session (5h)", utilization_pct: 41, resets_in_secs: 3_600 },
+  weekly: { label: "weekly (7d)", utilization_pct: 2, resets_in_secs: 86_400 },
+  model_scoped: [{ label: "Fable weekly", utilization_pct: 0, resets_in_secs: 86_400 }],
+  band: "safe",
+  braked: false,
+  auto_meter_enabled: false,
+  by_team: [{ team_id: "research", tokens: 240, cost_usd: 0.25 }],
+  tokens_by_task: {},
+  ...over,
+});
 
 function baseProps(over: Partial<React.ComponentProps<typeof SettingsView>> = {}) {
   return {
-    usage: snap,
-    onSetBudget: vi.fn().mockResolvedValue(snap),
+    usage: snap(),
     onSetAutoMeter: vi.fn().mockResolvedValue(snap),
     apiKeyPresent: false,
     onSetApiKey: vi.fn().mockResolvedValue(undefined),
@@ -40,7 +47,7 @@ describe("SettingsView", () => {
   it("renders General and Usage section headings", () => {
     render(<SettingsView {...baseProps()} />);
     expect(screen.getByText(/general/i)).toBeInTheDocument();
-    expect(screen.getByText(/usage/i)).toBeInTheDocument();
+    expect(screen.getByText("usage")).toBeInTheDocument();
   });
 
   it("toggles the theme attribute when the theme control is used", () => {
@@ -49,28 +56,21 @@ describe("SettingsView", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
-  it("pre-fills the recalibrated default budget when usage is null", () => {
-    render(<SettingsView {...baseProps({ usage: null })} />);
-    expect((screen.getByLabelText(/window budget/i) as HTMLInputElement).value).toBe("190000000");
-  });
-
-  it("calls onSetBudget with the entered number", async () => {
-    const onSetBudget = vi.fn().mockResolvedValue(snap);
-    render(<SettingsView {...baseProps({ onSetBudget })} />);
-    fireEvent.change(screen.getByLabelText(/window budget/i), { target: { value: "5000000" } });
-    fireEvent.click(screen.getByRole("button", { name: /save budget/i }));
-    await waitFor(() => expect(onSetBudget).toHaveBeenCalledWith(5_000_000));
+  it("has no budget setting and describes the real-usage auto-brake", () => {
+    render(<SettingsView {...baseProps({})} />);
+    expect(screen.queryByLabelText(/window budget/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/brakes new work at 95% of the session or weekly limit/)).toBeInTheDocument();
   });
 
   it("renders the auto-brake toggle reflecting snapshot state", () => {
-    render(<SettingsView {...baseProps({ usage: { ...snap, auto_meter_enabled: false } })} />);
+    render(<SettingsView {...baseProps({ usage: { ...snap(), auto_meter_enabled: false } })} />);
     const toggle = screen.getByRole("checkbox", { name: /auto-brake/i });
     expect(toggle).not.toBeChecked();
   });
 
   it("calls onSetAutoMeter when the toggle is flipped", async () => {
-    const onSetAutoMeter = vi.fn().mockResolvedValue({ ...snap, auto_meter_enabled: true });
-    render(<SettingsView {...baseProps({ usage: { ...snap, auto_meter_enabled: false }, onSetAutoMeter })} />);
+    const onSetAutoMeter = vi.fn().mockResolvedValue({ ...snap(), auto_meter_enabled: true });
+    render(<SettingsView {...baseProps({ usage: { ...snap(), auto_meter_enabled: false }, onSetAutoMeter })} />);
     fireEvent.click(screen.getByRole("checkbox", { name: /auto-brake/i }));
     await waitFor(() => expect(onSetAutoMeter).toHaveBeenCalledWith(true));
   });
