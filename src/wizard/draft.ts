@@ -1,5 +1,5 @@
-import type { DraftPipeline, DraftTeam, EffortMode, Fork, Gate, Join, Workers } from "../ipc/pipeline";
-import { DEFAULT_MODEL } from "../ipc/models";
+import type { DraftPipeline, DraftTeam, Effort, Fork, Gate, Join, Workers } from "../ipc/pipeline";
+import { DEFAULT_TEAM_MODEL, findModel, type ModelList } from "../ipc/models";
 
 /** Default WIP capacity for a new team's input store (mirrors the backend
  *  default). */
@@ -32,7 +32,7 @@ function defaultTeam(id: string, name: string): DraftTeam {
     id,
     name,
     prompt_body: "",
-    runner: { kind: "claude-cli", model: DEFAULT_MODEL, effort: { mode: "standard" }, api_key_env: null },
+    runner: { kind: "claude-cli", model: DEFAULT_TEAM_MODEL, api_key_env: null },
     scope: { reads: [], writes: [], tools: [] },
     outputs: {},
     workers: { min: 1, max: 1 },
@@ -62,8 +62,27 @@ export function setPromptBody(d: DraftPipeline, id: string, body: string): Draft
   return mapTeams(d, (t) => (t.id === id ? { ...t, prompt_body: body } : t));
 }
 
-export function setTeamModel(d: DraftPipeline, id: string, model: string): DraftPipeline {
-  return mapTeams(d, (t) => (t.id === id ? { ...t, runner: { ...t.runner, model } } : t));
+/// Set a team's model. If the list says the new model doesn't support the
+/// team's effort level, effort snaps to Default; `snapped` is the dropped level
+/// (null when nothing changed) so the caller can say so. With no list, or a
+/// model the list lacks, effort is left alone.
+export function setTeamModel(
+  d: DraftPipeline,
+  id: string,
+  model: string,
+  list: ModelList | null,
+): { draft: DraftPipeline; snapped: string | null } {
+  const team = d.teams.find((t) => t.id === id);
+  const level = team?.runner.effort;
+  const option = findModel(list, model);
+  const snap = level !== undefined && option !== undefined && !option.effort_levels.includes(level);
+  const draft = mapTeams(d, (t) => {
+    if (t.id !== id) return t;
+    const runner = { ...t.runner, model };
+    if (snap) delete runner.effort;
+    return { ...t, runner };
+  });
+  return { draft, snapped: snap ? (level ?? null) : null };
 }
 
 /// Parse a comma-separated input into a trimmed, non-empty string list (the
@@ -72,8 +91,15 @@ function parseCsv(raw: string): string[] {
   return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
-export function setTeamEffort(d: DraftPipeline, id: string, effort: EffortMode): DraftPipeline {
-  return mapTeams(d, (t) => (t.id === id ? { ...t, runner: { ...t.runner, effort } } : t));
+/// Set a team's effort level; `undefined` is Default and removes the key, so
+/// it is never sent as `null` (which the backend rejects).
+export function setTeamEffort(d: DraftPipeline, id: string, effort: Effort | undefined): DraftPipeline {
+  return mapTeams(d, (t) => {
+    if (t.id !== id) return t;
+    const runner = { ...t.runner, effort };
+    if (effort === undefined) delete runner.effort;
+    return { ...t, runner };
+  });
 }
 
 /// Set a team's authoring role (vet F8). Producer = one hand-off edge; reviewer =

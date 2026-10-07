@@ -6,7 +6,17 @@ import { addForkJoin, removeForkJoin } from "./draft";
 import { setJoinQuorum, setJoinCancelOnReject } from "./draft";
 import { setTeamRole, setTeamStoreCapacity, setTeamWorkers } from "./draft";
 import { draftToPipeline } from "./draftToPipeline";
-import { DEFAULT_MODEL } from "../ipc/models";
+import type { ModelList } from "../ipc/models";
+
+const LIST: ModelList = {
+  source: "live",
+  cli_version: null,
+  models: [
+    { value: "opus", resolved_model: "claude-opus-5-5", display_name: "Opus 5.5", description: null, effort_levels: ["low", "high", "xhigh"] },
+    { value: "claude-opus-4-6", resolved_model: "claude-opus-4-6", display_name: "Opus 4.6", description: null, effort_levels: ["low", "high"] },
+    { value: "haiku", resolved_model: "claude-haiku-4-5-20251001", display_name: "Haiku 4.5", description: null, effort_levels: [] },
+  ],
+};
 
 describe("wizard draft helpers", () => {
   it("emptyDraft has no teams + current schema version", () => {
@@ -15,9 +25,11 @@ describe("wizard draft helpers", () => {
     expect(d.schema_version).toBeGreaterThanOrEqual(2);
   });
 
-  it("addTeam defaults the new team to DEFAULT_MODEL", () => {
+  it("addTeam defaults to the default alias with Default effort", () => {
     const d = addTeam(emptyDraft(), "research", "Research");
-    expect(d.teams[0].runner.model).toBe(DEFAULT_MODEL);
+    expect(d.teams[0].runner.model).toBe("default");
+    expect(d.teams[0].runner.effort).toBeUndefined();
+    expect("effort" in d.teams[0].runner).toBe(false);
   });
 
   it("emptyDraft seeds an empty gates array", () => {
@@ -47,8 +59,36 @@ describe("wizard draft helpers", () => {
   });
 
   it("setTeamModel edits the advanced config", () => {
-    const d = setTeamModel(addTeam(emptyDraft(), "research", "Research"), "research", "claude-haiku-4");
-    expect(d.teams[0].runner.model).toBe("claude-haiku-4");
+    const { draft, snapped } = setTeamModel(addTeam(emptyDraft(), "research", "Research"), "research", "haiku", LIST);
+    expect(draft.teams[0].runner.model).toBe("haiku");
+    expect(snapped).toBeNull();
+  });
+
+  it("switching to a model without the saved level snaps effort to Default", () => {
+    const base = setTeamEffort(setTeamModel(addTeam(emptyDraft(), "r", "R"), "r", "opus", LIST).draft, "r", "xhigh");
+    const { draft, snapped } = setTeamModel(base, "r", "claude-opus-4-6", LIST);
+    expect(draft.teams[0].runner.model).toBe("claude-opus-4-6");
+    expect(draft.teams[0].runner.effort).toBeUndefined();
+    expect(snapped).toBe("xhigh");
+  });
+
+  it("switching to a model that supports the level keeps it", () => {
+    const base = setTeamEffort(addTeam(emptyDraft(), "r", "R"), "r", "high");
+    const { draft, snapped } = setTeamModel(base, "r", "claude-opus-4-6", LIST);
+    expect(draft.teams[0].runner.effort).toBe("high");
+    expect(snapped).toBeNull();
+  });
+
+  it("a model without effort support snaps any level", () => {
+    const base = setTeamEffort(addTeam(emptyDraft(), "r", "R"), "r", "low");
+    expect(setTeamModel(base, "r", "haiku", LIST).snapped).toBe("low");
+  });
+
+  it("without a list nothing snaps", () => {
+    const base = setTeamEffort(addTeam(emptyDraft(), "r", "R"), "r", "low");
+    const { draft, snapped } = setTeamModel(base, "r", "haiku", null);
+    expect(snapped).toBeNull();
+    expect(draft.teams[0].runner.effort).toBe("low");
   });
 
   it("removeTeam drops the team", () => {
@@ -60,14 +100,15 @@ describe("wizard draft helpers", () => {
 describe("advanced team config helpers (W2)", () => {
   const base = addTeam(emptyDraft(), "research", "Research");
 
-  it("setTeamEffort sets a preset EffortMode", () => {
-    const d = setTeamEffort(base, "research", { mode: "extended-high" });
-    expect(d.teams[0].runner.effort).toEqual({ mode: "extended-high" });
+  it("setTeamEffort sets a level", () => {
+    const d = setTeamEffort(base, "research", "high");
+    expect(d.teams[0].runner.effort).toBe("high");
   });
 
-  it("setTeamEffort sets a custom EffortMode with a budget", () => {
-    const d = setTeamEffort(base, "research", { mode: "custom", budget_tokens: 16000 });
-    expect(d.teams[0].runner.effort).toEqual({ mode: "custom", budget_tokens: 16000 });
+  it("setTeamEffort(undefined) clears the level so none is sent", () => {
+    const d = setTeamEffort(setTeamEffort(base, "research", "low"), "research", undefined);
+    expect("effort" in d.teams[0].runner).toBe(false);
+    expect(JSON.stringify(d.teams[0].runner)).not.toContain("effort");
   });
 
   it("setTeamTools parses a comma list into a trimmed string array", () => {

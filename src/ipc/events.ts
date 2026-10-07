@@ -19,6 +19,8 @@ export const EVENTS = {
   conversationDelta: "conversation-delta",
   /// A generator (source) pass started/settled (LF31). Payload {run_id, stage, task_id, active}.
   generatorStatus: "generator-status",
+  /// A live model-list fetch replaced the current list. Pickers refetch.
+  modelListUpdated: "model-list-updated",
 } as const;
 
 export type EventName = (typeof EVENTS)[keyof typeof EVENTS];

@@ -1,34 +1,63 @@
-/// Curated list of known current Claude model IDs (G6). There is no
-/// subscription model-list API, so the node-drawer's model SELECTOR is driven
-/// by this constant (opus/sonnet/haiku families) rather than false
-/// pre-validation. A free-text override is still allowed and flagged
-/// "unverified"; availability is confirmed where it fails (the runner's
-/// model-unavailable class) or via the authoring-time `test_model` probe.
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { EVENTS } from "./events";
 
-export interface ClaudeModel {
-  id: string;
-  label: string;
-  family: "opus" | "sonnet" | "haiku";
+/// The models the installed Claude CLI offers, each with the effort levels it
+/// supports. The one source of truth for which Model and Effort combinations
+/// are valid; the backend reads it from the CLI for free (no model call).
+
+export type ModelListSource = "live" | "cached" | "curated";
+
+export interface ModelOption {
+  /// What is saved as the team's model and passed as `--model`.
+  value: string;
+  resolved_model: string | null;
+  display_name: string;
+  description: string | null;
+  /// Empty when the model takes no effort level (only Default).
+  effort_levels: string[];
 }
 
-/// Known current model IDs, newest-first within each family. Use the exact ID
-/// strings as-is (no date suffixes).
-/// The model a new team uses when none is chosen. Mirrors `DEFAULT_MODEL` in
-/// `agent_bus_core`.
-export const DEFAULT_MODEL = "claude-opus-5-5";
+export interface ModelList {
+  models: ModelOption[];
+  source: ModelListSource;
+  cli_version: string | null;
+}
 
-export const CLAUDE_MODELS: ClaudeModel[] = [
-  { id: "claude-opus-5-5", label: "Claude Opus 5.5", family: "opus" },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8", family: "opus" },
-  { id: "claude-opus-4-7", label: "Claude Opus 4.7", family: "opus" },
-  { id: "claude-opus-4-6", label: "Claude Opus 4.6", family: "opus" },
-  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", family: "sonnet" },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", family: "sonnet" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", family: "haiku" },
-];
+/// The model new teams use: the CLI's `default` alias. Mirrors
+/// `DEFAULT_TEAM_MODEL` in `agent_bus_core`.
+export const DEFAULT_TEAM_MODEL = "default";
 
-/// True when `model` is one of the curated known IDs (selector entry). A model
-/// outside this set is a free-text override and should be flagged "unverified".
-export function isKnownModel(model: string): boolean {
-  return CLAUDE_MODELS.some((m) => m.id === model);
+export async function getModelList(): Promise<ModelList> {
+  return await invoke<ModelList>("model_list");
+}
+
+/// Re-query the CLI. Resolves to the list now current: the fresh one, or the
+/// previous one if the query failed.
+export async function refreshModelList(): Promise<ModelList> {
+  return await invoke<ModelList>("refresh_model_list");
+}
+
+/// Call `cb` with the new list whenever a live fetch replaces it. Resolves to
+/// the unlisten function.
+export async function onModelListUpdated(cb: (list: ModelList) => void): Promise<() => void> {
+  return await listen(EVENTS.modelListUpdated, async () => cb(await getModelList()));
+}
+
+export function findModel(list: ModelList | null, value: string): ModelOption | undefined {
+  return list?.models.find((m) => m.value === value);
+}
+
+/// An alias shows what it resolves to ("opus → claude-opus-5-5"); a pinned id
+/// shows itself.
+export function modelLabel(m: ModelOption): string {
+  return m.resolved_model && m.resolved_model !== m.value ? `${m.value} → ${m.resolved_model}` : m.value;
+}
+
+export function sourceLabel(s: ModelListSource): string {
+  return s === "curated" ? "built-in" : s;
+}
+
+export function supportsEffort(list: ModelList | null, model: string, level: string): boolean {
+  return findModel(list, model)?.effort_levels.includes(level) ?? false;
 }
