@@ -35,7 +35,7 @@
 
 - **Revise attempts.** Tasks do not carry `attempts` across stages, so the reviewed task is always on attempt 1. "attempts + 1" is counted from the send-back target's last attempt for the item: `n = max(attempts)` over the item's tasks at that stage; the child gets `n + 1`; when `n >= MAX_ATTEMPTS` the item escalates instead. Without this the revise loop never reaches the cap.
 - **Revise target.** `on_revise` when set (a team → send back; an escalation id → escalate), else the team whose `on_approve` is the reviewer. No such team, or the target is the pipeline's source (the generator consumes no store) → escalate.
-- **Send-back backpressure.** If the target store is full, the reviewed task is parked `revising` at the reviewer stage (keeps its slot) and `transform_once` for that team retries the send-back first on later polls (`StepOutcome::ReviseBackpressure`). Gates keep `GateBackpressure`.
+- **Send-back backpressure.** A reviewer's send-back is readmitted to the target store even when it is full (`StoreRepo::readmit`, an uncapped increment): the item is already in the run, and refusing it can wedge the run (the producer waits on the reviewer's store while the reviewer waits on the producer's). The overflow is bounded by the items in flight, and `reserve` admits no new work until the store drains. Gates keep `GateBackpressure` (a human retries).
 - **Reject target.** `on_reject` when set, else the pipeline's escalation id (`needs-human` when none declared). The reviewed task itself becomes `needs_human` there (as a gate reject does).
 - **Reviewer artifact.** When a reviewer approves without an `artifact`, the reviewed artifact (`parent_artifact`) is forwarded.
 - **Producer audit outcome.** Producer and generator results record `verdict:approve` (their item goes forward); reviewer results record their real verdict.
@@ -44,7 +44,7 @@
 ## Review Focus
 
 1. **The real CLI result line with no `structured_output`** (model gave up after the nudge, `subtype: success`) must be an operational failure, never a silent approve or revise. Pinned in Task 2 with a captured fixture.
-2. **A reviewer revise when the producer store is full** must not lose the item or strand it `running`; it parks and is sent back once there is room. Pinned in Task 4.
+2. **A reviewer revise when the producer store is full** must not lose the item, strand it `running`, or wedge the run; the send-back is readmitted past capacity. Pinned in Task 4.
 3. **A revise loop** must end in needs-human at the attempts cap, not cycle forever. Pinned in Task 4.
 4. **A human comment on the gated parent task** must reach the producer's revised child. Pinned in Task 5.
 5. **A comment row with `kind = 'review'`** must not break `list_comments` (the Review store rejects unknown kinds) or the comment rail. Pinned in Tasks 5 and 6.
@@ -198,7 +198,7 @@ let result = match &self.structured {
   - `TaskStore::max_attempts_at_stage(run_id, item_key, stage) -> Result<Option<u32>, _>`.
   - `async fn send_back(ctx, task: &Task, target: &str, attempts: u32) -> Result<bool, EngineError>` (reserve target store; `false` = full; else insert queued child carrying key, parent artifact, target repo, worktree, attempts).
   - `async fn escalate(ctx, task: &mut Task, target: String) -> Result<(), EngineError>` (state `needs_human`, `current_stage = target`).
-  - `StepOutcome::ReviseBackpressure { task_id }`.
+  - `StoreRepo::readmit(run_id, stage)`: take a slot past capacity for an item coming back.
   - `apply_gate_verdict` revise/reject use these helpers; behaviour unchanged.
 
 - [ ] **Step 1: Failing tests** (pipeline `prod → rev → done`, `rev` a reviewer):
@@ -208,7 +208,7 @@ let result = match &self.structured {
   - revise when `prod` has already run the item `MAX_ATTEMPTS` times → `Escalated`, task `needs_human`;
   - revise with no producer (reviewer fed by the source/generator) → `Escalated`;
   - reject → task `needs_human` at `on_reject`; with no `on_reject` → the pipeline's escalation id;
-  - revise with a full `prod` store → `ReviseBackpressure`, task `revising` at `rev`, slot kept; after a `prod` slot frees, the next `transform_once(rev)` sends it back (`Revised`) without invoking the runner;
+  - revise with a full `prod` store → `Revised`: the child is readmitted past capacity (`StoreRepo::readmit`), the reviewer slot frees, and `reserve` admits no new work until `prod` drains; a generator refilling `prod` between the producer's pass and the review cannot wedge the run;
   - a reviewer before a gate: revise sends back instead of gating;
   - gate approve/revise/reject and join tests unchanged.
 - [ ] **Step 2:** FAIL. **Step 3:** implement. **Step 4:** PASS.

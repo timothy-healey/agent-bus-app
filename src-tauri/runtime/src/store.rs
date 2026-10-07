@@ -67,6 +67,21 @@ impl StoreRepo {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Take a slot for an item coming BACK into this store (a reviewer's
+    /// send-back), even past capacity. The item was already admitted to the run,
+    /// so refusing it could wedge the run: the producer would wait on the
+    /// reviewer's store while the reviewer waits on the producer's. The overflow
+    /// is bounded by the items in flight; `reserve` admits no new work until the
+    /// store drains below capacity.
+    pub async fn readmit(&self, run_id: &str, stage: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE stores SET occupancy = occupancy + 1 WHERE run_id = ? AND stage = ?")
+            .bind(run_id)
+            .bind(stage)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Release a previously-reserved slot (undo on failure / on an item leaving
     /// the store). The `occupancy > 0` guard keeps occupancy from going negative
     /// under any racing release. Returns `true` if a slot was actually freed.
@@ -160,6 +175,20 @@ mod tests {
         assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(0));
         // capacity is the original (re-ensure ignored)
         assert!(!repo.is_full("R1", "spec").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn readmit_takes_a_slot_past_capacity_and_reserve_then_backpressures() {
+        let repo = StoreRepo::new(fresh_pool().await);
+        repo.ensure("R1", "spec", 1).await.unwrap();
+        assert!(repo.reserve("R1", "spec").await.unwrap());
+        repo.readmit("R1", "spec").await.unwrap();
+        assert_eq!(repo.occupancy("R1", "spec").await.unwrap(), Some(2));
+        assert!(!repo.reserve("R1", "spec").await.unwrap(), "new work waits until it drains");
+        repo.release("R1", "spec").await.unwrap();
+        assert!(!repo.reserve("R1", "spec").await.unwrap(), "still at capacity");
+        repo.release("R1", "spec").await.unwrap();
+        assert!(repo.reserve("R1", "spec").await.unwrap());
     }
 
     #[tokio::test]

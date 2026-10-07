@@ -328,9 +328,7 @@ impl PipelineActivator {
                             StepOutcome::Advanced { .. }
                                 | StepOutcome::Failed { .. }
                                 | StepOutcome::Revised { .. }
-                                | StepOutcome::Escalated { .. }
-                                | StepOutcome::ReviseBackpressure { .. }
-                        );
+                                | StepOutcome::Escalated { .. }                        );
                         if settled {
                             let _ = handle.emit(crate::events::TASK_CHANGED, "settled");
                             let _ = handle.emit(crate::events::USAGE_CHANGED, ());

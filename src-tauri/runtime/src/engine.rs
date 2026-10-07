@@ -130,10 +130,6 @@ pub enum StepOutcome {
     /// A gate verdict could not be applied yet because the downstream store was
     /// full (approve backpressure) — the gated item stays put; retry later.
     GateBackpressure { task_id: String },
-    /// A reviewer's revise could not be sent back yet because the target store
-    /// is full: the reviewed item is parked `revising` at the reviewer stage
-    /// (keeping its slot) and is sent back by a later `transform_once`.
-    ReviseBackpressure { task_id: String },
     /// A join barrier completed but its continuation (downstream or
     /// revise-to-producer) store was full — the group is already marked
     /// completed; the continuation is retried by a later driver round.
@@ -329,14 +325,6 @@ pub async fn transform_once(ctx: &EngineContext, team: &Team) -> Result<StepOutc
     // 1. BRAKE
     if ctx.brake.is_on() {
         return Ok(StepOutcome::Braked);
-    }
-
-    // 1b. A reviewer first retries a revise parked on a full target store; it
-    //     needs no new run.
-    if team.role == pipeline::model::Role::Reviewer {
-        if let Some(outcome) = retry_parked_revise(ctx, team).await? {
-            return Ok(outcome);
-        }
     }
 
     // 2. Determine the downstream store + RESERVE a slot there (block-before-claim).
@@ -605,7 +593,7 @@ pub async fn apply_gate_verdict(
             // A revise is a re-claim: bump attempts so compose_invocation_message
             // pulls the persisted feedback bundle (revise-once feedback path).
             let attempts = (task.attempts + 1).min(MAX_ATTEMPTS);
-            if !send_back(ctx, &task, &producer, attempts).await? {
+            if !send_back(ctx, &task, &producer, attempts, Admission::Reserve).await? {
                 return Ok(StepOutcome::GateBackpressure { task_id: task.id.0 });
             }
             leave_stage_done(ctx, &mut task, &gate_id).await?;
@@ -620,16 +608,38 @@ pub async fn apply_gate_verdict(
     }
 }
 
-/// Send-back step shared by a gate revise and a reviewer revise: reserve a slot
-/// in `target`'s store and queue a child there carrying the item's key, input
-/// artifact, topic, repo and worktree, with `attempts`. Returns `false` (and
-/// queues nothing) when the target store is full.
-async fn send_back(ctx: &EngineContext, task: &Task, target: &str, attempts: u32) -> Result<bool, EngineError> {
+/// How a send-back takes its slot in the target store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// Reserve within capacity; a full store refuses (a gate revise stays gated
+    /// and the human retries).
+    Reserve,
+    /// Readmit past capacity: the item is already in the run, and a reviewer has
+    /// no later moment to retry, so refusing it could wedge the run.
+    Readmit,
+}
+
+/// Send-back step shared by a gate revise and a reviewer revise: take a slot in
+/// `target`'s store per `admission` and queue a child there carrying the item's
+/// key, input artifact, topic, repo and worktree, with `attempts`. Returns
+/// `false` (and queues nothing) only when a `Reserve` finds the store full.
+async fn send_back(
+    ctx: &EngineContext,
+    task: &Task,
+    target: &str,
+    attempts: u32,
+    admission: Admission,
+) -> Result<bool, EngineError> {
     ctx.stores
         .ensure(&ctx.run_id, target, stage_store_capacity(ctx, target))
         .await?;
-    if !ctx.stores.reserve(&ctx.run_id, target).await? {
-        return Ok(false);
+    match admission {
+        Admission::Reserve => {
+            if !ctx.stores.reserve(&ctx.run_id, target).await? {
+                return Ok(false);
+            }
+        }
+        Admission::Readmit => ctx.stores.readmit(&ctx.run_id, target).await?,
     }
     let mut child = Task::work_item(
         task.project_id.clone(),
@@ -707,9 +717,8 @@ async fn revise_route(ctx: &EngineContext, team: &Team, task: &Task) -> Result<R
 
 /// Act on a reviewer's revise or reject for an item claimed at `team` (any edge
 /// kind but a join). Reject escalates to `on_reject` (the pipeline's escalation
-/// when unset). Revise sends the item back per `revise_route`; when the target
-/// store is full the item is parked `revising` here, keeping its slot, and
-/// `retry_parked_revise` sends it on a later poll.
+/// when unset). Revise sends the item back per `revise_route`, readmitted to the
+/// target store even when it is full.
 async fn route_reviewer_verdict(
     ctx: &EngineContext,
     team: &Team,
@@ -729,32 +738,10 @@ async fn route_reviewer_verdict(
             Ok(StepOutcome::Escalated { task_id: task.id.0.clone() })
         }
         ReviseRoute::SendBack { target, attempts } => {
-            if send_back(ctx, task, &target, attempts).await? {
-                leave_stage_done(ctx, task, &team.id).await?;
-                Ok(StepOutcome::Revised { task_id: task.id.0.clone(), producer: target })
-            } else {
-                task.state = TaskState::Revising;
-                task.updated_at = now_unix();
-                ctx.tasks.update(task).await?;
-                Ok(StepOutcome::ReviseBackpressure { task_id: task.id.0.clone() })
-            }
+            send_back(ctx, task, &target, attempts, Admission::Readmit).await?;
+            leave_stage_done(ctx, task, &team.id).await?;
+            Ok(StepOutcome::Revised { task_id: task.id.0.clone(), producer: target })
         }
-    }
-}
-
-/// Retry one revise parked at `team` by `route_reviewer_verdict`. `None` when
-/// nothing is parked or its target store is still full.
-async fn retry_parked_revise(ctx: &EngineContext, team: &Team) -> Result<Option<StepOutcome>, EngineError> {
-    let parked = ctx.tasks.list_by_state(TaskState::Revising).await?;
-    let Some(mut task) = parked
-        .into_iter()
-        .find(|t| t.run_id.as_deref() == Some(ctx.run_id.as_str()) && t.current_stage == team.id)
-    else {
-        return Ok(None);
-    };
-    match route_reviewer_verdict(ctx, team, &mut task, agent_bus_core::Verdict::Revise).await? {
-        StepOutcome::ReviseBackpressure { .. } => Ok(None),
-        outcome => Ok(Some(outcome)),
     }
 }
 
@@ -3588,27 +3575,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_revise_into_a_full_producer_store_parks_then_sends_back_without_rerunning() {
-        let (ctx, item, runner) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Revise, 1).await;
-        // prod is full
+    async fn a_revise_into_a_full_producer_store_is_readmitted_past_capacity() {
+        let (ctx, item, _) = reviewed(review_pipeline(routes(Some("done"), None, None)), Verdict::Revise, 1).await;
         ctx.stores.ensure(&ctx.run_id, "prod", 1).await.unwrap();
         while ctx.stores.reserve(&ctx.run_id, "prod").await.unwrap() {}
-        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
-        assert_eq!(o, StepOutcome::ReviseBackpressure { task_id: item.id.0.clone() });
-        let t = ctx.tasks.get(&item.id).await.unwrap();
-        assert_eq!((t.state, t.current_stage.as_str()), (TaskState::Revising, "rev"));
-        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(1), "keeps its slot");
-        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "done").await.unwrap(), Some(0));
-        // still full: the next poll leaves it parked and finds nothing else to do
-        assert_eq!(transform_once(&ctx, &rev_team(&ctx)).await.unwrap(), StepOutcome::Idle);
-        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Revising);
-        // room appears: the next poll sends it back without invoking the runner
-        ctx.stores.release(&ctx.run_id, "prod").await.unwrap();
+        let before = ctx.stores.occupancy(&ctx.run_id, "prod").await.unwrap().unwrap();
         let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap();
         assert_eq!(o, StepOutcome::Revised { task_id: item.id.0.clone(), producer: "prod".into() });
-        assert_eq!(runner.received.lock().unwrap().len(), 1, "the review ran once");
-        assert_eq!(ctx.tasks.get(&item.id).await.unwrap().state, TaskState::Done);
-        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(0));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "prod").await.unwrap(), Some(before + 1));
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(0), "the reviewer slot is free");
+        assert!(!ctx.stores.reserve(&ctx.run_id, "prod").await.unwrap(), "no new work until it drains");
+        assert!(ctx.tasks.list_by_state(TaskState::Revising).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3719,6 +3696,54 @@ mod tests {
         assert_eq!(second.output_kind, OutputKind::Producer);
         assert!(second.user_message.contains("REVISION REQUEST (attempt 2)"), "{}", second.user_message);
         assert!(second.user_message.contains("rev: revise. add a retry bound"), "{}", second.user_message);
+    }
+
+    /// A reviewer that always revises, behind a generator that keeps every store
+    /// full (capacity 1): the run must still finish, every item in needs-human,
+    /// never wedged on a send-back waiting for a producer slot.
+    #[tokio::test]
+    async fn an_always_revising_reviewer_behind_full_stores_still_finishes_the_run() {
+        let mut p = review_pipeline(routes(Some("done"), None, None));
+        for t in p.teams.iter_mut() {
+            t.store.capacity = 1;
+        }
+        let runner = KindRunner::new(vec![gen_out(&["a", "b", "c"])], producer_out(), reviewer_out(Verdict::Revise, "again"));
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(runner)).await;
+        for s in ["prod", "rev", "done"] {
+            ctx.stores.ensure(&ctx.run_id, s, 1).await.unwrap();
+        }
+        let source = ctx.pipeline.teams[0].clone();
+        let transformers: Vec<Team> = ctx.pipeline.teams[1..].to_vec();
+        let report = run_pool_until_quiescent_with(&ctx, &source, &transformers, &AlwaysApprove, 200).await.unwrap();
+        assert!(report.completed, "the run finishes: {report:?}");
+        let nh = ctx.tasks.list_by_state(TaskState::NeedsHuman).await.unwrap();
+        assert_eq!(nh.len(), 3, "each item escalates at the attempts cap");
+        assert!(ctx.tasks.list_by_state(TaskState::Revising).await.unwrap().is_empty());
+    }
+
+    /// The interleaving that can wedge a run: the generator refills the producer
+    /// store between the producer's pass and the review. The revise must still
+    /// land, freeing the reviewer slot, so the producer can move its next item.
+    #[tokio::test]
+    async fn a_revise_lands_even_when_the_generator_refilled_the_producer_store() {
+        let mut p = review_pipeline(routes(Some("done"), None, None));
+        for t in p.teams.iter_mut() {
+            t.store.capacity = 1;
+        }
+        let runner = KindRunner::new(vec![gen_out(&["a"]), gen_out(&["b"])], producer_out(), reviewer_out(Verdict::Revise, "again"));
+        let ctx = ctx_with(fresh_pool().await, p, Arc::new(runner)).await;
+        for s in ["prod", "rev", "done"] {
+            ctx.stores.ensure(&ctx.run_id, s, 1).await.unwrap();
+        }
+        let src = ctx.pipeline.teams[0].clone();
+        let prod = ctx.pipeline.teams[1].clone();
+        assert!(matches!(generate_once(&ctx, &src).await.unwrap(), StepOutcome::Generated { .. })); // a -> prod
+        assert!(matches!(transform_once(&ctx, &prod).await.unwrap(), StepOutcome::Advanced { .. })); // a -> rev
+        assert!(matches!(generate_once(&ctx, &src).await.unwrap(), StepOutcome::Generated { .. })); // b -> prod (full)
+        let o = transform_once(&ctx, &rev_team(&ctx)).await.unwrap(); // a revised
+        assert!(matches!(o, StepOutcome::Revised { .. }), "the send-back lands: {o:?}");
+        assert_eq!(ctx.stores.occupancy(&ctx.run_id, "rev").await.unwrap(), Some(0), "the reviewer slot is free");
+        assert!(matches!(transform_once(&ctx, &prod).await.unwrap(), StepOutcome::Advanced { .. }), "the producer moves on");
     }
 
     /// Live check against the installed `claude` (two paid haiku runs): a
