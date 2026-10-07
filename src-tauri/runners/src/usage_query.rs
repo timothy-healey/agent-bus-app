@@ -2,34 +2,18 @@
 //! from the `claude` CLI without calling a model. The only code that knows the
 //! request and response shape.
 //!
-//! The poll runs `claude` with `--setting-sources=` and `--strict-mcp-config`
-//! from the system temp dir, so it never loads the operator's settings, hooks
-//! or MCP servers (a poll fires every minute). Valued flags use the `=` form so
-//! an empty value cannot swallow the next argument.
+//! The poll uses the shared control-request spawn (`control_request.rs`), which
+//! never loads the operator's settings, hooks or MCP servers (a poll fires
+//! every minute).
 
+use crate::control_request::{self, ControlError};
 use agent_bus_core::{LimitKind, LimitReading, UtilizationReading, UtilizationSource};
 use serde_json::Value;
-use std::io::{BufReader, Read, Write};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The control request line written to `claude`'s stdin.
 pub const GET_USAGE_REQUEST: &str =
     "{\"type\":\"control_request\",\"request_id\":\"u1\",\"request\":{\"subtype\":\"get_usage\"}}\n";
-
-const ARGS: &[&str] = &[
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--no-session-persistence",
-    "--setting-sources=",
-    "--strict-mcp-config",
-];
 
 /// RFC 3339 → unix seconds. Accepts optional fractional seconds and either `Z`
 /// or a `±HH:MM` offset (fractions are truncated).
@@ -151,19 +135,6 @@ pub fn parse_get_usage(stdout: &str, now: i64) -> Result<UtilizationReading, Str
     Err("no usage response from claude".into())
 }
 
-/// SIGKILL `claude` and everything it started (MCP servers, hook shells): on
-/// unix the child leads its own process group, so the whole group is signalled.
-fn kill_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-    }
-}
-
 /// Production source: spawns `claude` and sends `get_usage`.
 pub struct ClaudeCliUtilizationSource {
     bin: String,
@@ -188,77 +159,10 @@ impl Default for ClaudeCliUtilizationSource {
 
 impl UtilizationSource for ClaudeCliUtilizationSource {
     fn fetch(&self) -> Result<UtilizationReading, String> {
-        let mut cmd = Command::new(&self.bin);
-        cmd.args(ARGS)
-            .current_dir(std::env::temp_dir())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0); // claude leads a fresh group; pgid == child pid
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("could not start claude: {e}"))?;
-
-        // Take stdout immediately and read it on a separate thread to avoid pipe-fill deadlock.
-        let stdout = child.stdout.take();
-        let (tx, rx) = mpsc::channel();
-        let _reader_thread = if let Some(stdout_handle) = stdout {
-            Some(thread::spawn(move || {
-                let mut out = String::new();
-                let mut reader = BufReader::new(stdout_handle);
-                let _ = reader.read_to_string(&mut out);
-                let _ = tx.send(out);
-            }))
-        } else {
-            None
-        };
-
-        // Send request to stdin and drop it to signal EOF.
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(GET_USAGE_REQUEST.as_bytes());
-        }
-
-        // Helper: reap child with bounded try_wait up to deadline.
-        let bounded_reap = |child: &mut std::process::Child, deadline: Instant| {
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => return, // Child exited
-                    Ok(None) if Instant::now() >= deadline => {
-                        // Deadline passed; force kill and wait (killed process reaps promptly).
-                        kill_group(child);
-                        let _ = child.wait();
-                        return;
-                    }
-                    Ok(None) => std::thread::sleep(Duration::from_millis(30)),
-                    Err(_) => return, // Error reaping; give up
-                }
-            }
-        };
-
-        // Wait for stdout data or timeout, bounded by the overall timeout.
-        let deadline = Instant::now() + self.timeout;
-        let out = loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match rx.recv_timeout(remaining) {
-                Ok(data) => break data,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    kill_group(&mut child);
-                    bounded_reap(&mut child, deadline);
-                    return Err("usage query timed out".into());
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // Reader thread panicked or closed; bounded reap then break.
-                    bounded_reap(&mut child, deadline);
-                    break String::new();
-                }
-            }
-        };
-
-        // Reap the child with bounded try_wait (child may still be running if it closed stdout early).
-        bounded_reap(&mut child, deadline);
-
+        let out = control_request::run(&self.bin, GET_USAGE_REQUEST, self.timeout).map_err(|e| match e {
+            ControlError::TimedOut => "usage query timed out".to_string(),
+            ControlError::Spawn(e) => format!("could not start claude: {e}"),
+        })?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         parse_get_usage(&out, now)
     }
