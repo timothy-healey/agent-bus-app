@@ -33,8 +33,8 @@ impl WorkerUsageStore {
     pub async fn insert(&self, e: &UsageEvent) -> Result<(), WorkerUsageError> {
         sqlx::query(
             "INSERT INTO worker_usage_log
-               (ts, team_id, task_id, model, runner, input_tokens, output_tokens, cache_creation, cache_read)
-             VALUES (?,?,?,?,?,?,?,?,?)",
+               (ts, team_id, task_id, model, runner, input_tokens, output_tokens, cache_creation, cache_read, cost_micros)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(e.ts)
         .bind(&e.team_id.0)
@@ -45,6 +45,7 @@ impl WorkerUsageStore {
         .bind(e.output_tokens as i64)
         .bind(e.cache_creation as i64)
         .bind(e.cache_read as i64)
+        .bind(e.cost_micros.map(|c| c as i64))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -115,6 +116,7 @@ mod tests {
     async fn fresh_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         sqlx::query(include_str!("../../app/migrations/005_usage.sql")).execute(&pool).await.unwrap();
+        sqlx::query("ALTER TABLE worker_usage_log ADD COLUMN cost_micros INTEGER").execute(&pool).await.unwrap();
         pool
     }
 
@@ -128,6 +130,7 @@ mod tests {
             output_tokens: out,
             cache_creation: 0,
             cache_read: 0,
+            cost_micros: None,
         }
     }
 

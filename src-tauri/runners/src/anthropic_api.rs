@@ -123,6 +123,7 @@ pub fn parse_response(raw: &str, model: &str) -> Result<RunnerOutput, RunnerErro
         output_tokens: g("output_tokens"),
         cache_creation: g("cache_creation_input_tokens"),
         cache_read: g("cache_read_input_tokens"),
+        cost_micros: None,
     };
 
     Ok(RunnerOutput { verdict, artifact_path, final_text: text, usage })

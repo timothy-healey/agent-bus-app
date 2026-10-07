@@ -135,6 +135,7 @@ mod tests {
     async fn fresh_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
         sqlx::query(include_str!("../../app/migrations/005_usage.sql")).execute(&pool).await.unwrap();
+        sqlx::query("ALTER TABLE worker_usage_log ADD COLUMN cost_micros INTEGER").execute(&pool).await.unwrap();
         pool
     }
 
@@ -147,7 +148,7 @@ mod tests {
 
         // worker rows (team attribution + per-task cost); NOT counted in total (cli)
         let now = cc.oldest_in_window(0).await.unwrap().unwrap() + 100;
-        worker.insert(&UsageEvent { ts: now, team_id: TeamId("research".into()), task_id: Some(TaskId("T-1".into())), model: "m".into(), input_tokens: 100, output_tokens: 20, cache_creation: 0, cache_read: 0 }).await.unwrap();
+        worker.insert(&UsageEvent { ts: now, team_id: TeamId("research".into()), task_id: Some(TaskId("T-1".into())), model: "m".into(), input_tokens: 100, output_tokens: 20, cache_creation: 0, cache_read: 0, cost_micros: None }).await.unwrap();
 
         let cfg = UsageConfig { window_budget: 4340, ..UsageConfig::default() };
         let snap = compute_snapshot(&cc, &worker, &cfg, false, now + 60).await.unwrap();
