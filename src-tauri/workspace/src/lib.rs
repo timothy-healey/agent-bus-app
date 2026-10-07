@@ -6,6 +6,8 @@ pub mod api;
 pub mod dir_listing;
 pub mod git_config;
 pub mod paths;
+pub mod plugins;
+pub mod visibility;
 pub mod worktree;
 
 pub use project::*;

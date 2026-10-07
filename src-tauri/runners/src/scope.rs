@@ -59,7 +59,14 @@ pub fn build_settings(scope: &Scope, vars: &PathVars) -> Result<(SettingsFile, V
     add_dirs.sort();
     add_dirs.dedup();
 
-    let mut allow = scope.tools.clone();
+    let mut allow: Vec<String> = scope
+        .grants
+        .iter()
+        .filter_map(|g| match g {
+            agent_bus_core::ToolGrant::BashPattern(p) => Some(format!("Bash({p})")),
+            _ => None,
+        })
+        .collect();
     for tool in ALWAYS_ALLOW {
         if !allow.iter().any(|t| t == tool) {
             allow.push(tool.to_string());
@@ -125,9 +132,10 @@ pub fn sandbox_profile(scope: &Scope, vars: &PathVars) -> Result<String, ScopeEr
     writes.dedup();
 
     let net_allowed = scope
-        .tools
+        .grants
         .iter()
-        .any(|t| NETWORK_TOOLS.iter().any(|n| t.starts_with(n)));
+        .any(|g| matches!(g, agent_bus_core::ToolGrant::WebFetch | agent_bus_core::ToolGrant::WebSearch));
+    let _ = NETWORK_TOOLS;
 
     let mut p = String::new();
     p.push_str("(version 1)\n");
@@ -205,7 +213,8 @@ mod tests {
         Scope {
             reads: vec!["${target_repo}".into(), "${project}/artifacts/analyses".into()],
             writes: vec!["${project}/artifacts/analyses".into()],
-            tools: vec!["Read".into(), "Write".into(), "Bash(git commit:*)".into()],
+            grants: vec![agent_bus_core::ToolGrant::BashPattern("git commit:*".into())],
+            plugins: vec![],
         }
     }
 
@@ -213,7 +222,7 @@ mod tests {
     fn build_settings_allows_team_tools_and_always_denies_push_fetch() {
         let vars = PathVars::new("/proj").with_target_repo("/repo");
         let (settings, _dirs) = build_settings(&demo_scope(), &vars).unwrap();
-        assert!(settings.permissions.allow.contains(&"Read".to_string()));
+        
         assert!(settings.permissions.allow.contains(&"Bash(git commit:*)".to_string()));
         assert!(settings.permissions.deny.contains(&"Bash(git push:*)".to_string()));
         assert!(settings.permissions.deny.contains(&"Bash(git fetch:*)".to_string()));
@@ -222,7 +231,7 @@ mod tests {
     #[test]
     fn build_settings_always_allows_structured_output() {
         let vars = PathVars::new("/proj");
-        let empty = Scope { reads: vec![], writes: vec![], tools: vec![] };
+        let empty = Scope::default();
         let (settings, _) = build_settings(&empty, &vars).unwrap();
         assert_eq!(settings.permissions.allow, vec!["StructuredOutput".to_string()]);
         let (settings, _) = build_settings(&demo_scope(), &PathVars::new("/proj").with_target_repo("/repo")).unwrap();
@@ -232,7 +241,7 @@ mod tests {
     #[test]
     fn build_settings_does_not_duplicate_a_listed_structured_output() {
         let vars = PathVars::new("/proj");
-        let scope = Scope { reads: vec![], writes: vec![], tools: vec!["StructuredOutput".into(), "Read".into()] };
+        let scope = Scope::default();
         let (settings, _) = build_settings(&scope, &vars).unwrap();
         assert_eq!(settings.permissions.allow.iter().filter(|t| *t == "StructuredOutput").count(), 1);
     }
@@ -294,7 +303,7 @@ mod tests {
         assert!(!p.contains("(allow network*)"));
 
         let mut net = demo_scope();
-        net.tools.push("WebFetch".into());
+        net.grants.push(agent_bus_core::ToolGrant::WebFetch);
         let p2 = sandbox_profile(&net, &vars).unwrap();
         assert!(p2.contains("(allow network*)"));
         assert!(!p2.contains("(deny network*)"));
@@ -304,8 +313,7 @@ mod tests {
     fn sandbox_profile_escapes_quotes_and_backslashes_in_paths() {
         let scope = Scope {
             reads: vec!["${project}/a\"b".into()],
-            writes: vec![],
-            tools: vec![],
+            ..Scope::default()
         };
         let vars = PathVars::new("/proj");
         let p = sandbox_profile(&scope, &vars).unwrap();

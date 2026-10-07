@@ -29,6 +29,15 @@ impl PreflightFailed {
                     RunnerConfigProblem::EffortNotSupported { level } => {
                         format!("{name}: effort '{level}' is not supported by {model}")
                     }
+                    RunnerConfigProblem::PluginNotFound { name: plugin } => {
+                        format!("{name}: plugin '{plugin}' is not installed")
+                    }
+                    RunnerConfigProblem::PathUnresolvable { pattern } => {
+                        format!("{name}: scope path '{pattern}' cannot be resolved")
+                    }
+                    RunnerConfigProblem::RemoteGitWithoutAutoMode => {
+                        format!("{name}: Remote git needs a model with auto mode, and {model} has none")
+                    }
                 }
             })
             .collect();

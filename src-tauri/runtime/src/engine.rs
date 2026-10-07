@@ -1777,7 +1777,7 @@ pub(crate) mod test_support {
                 effort: Some(Effort::Default),
                 api_key_env: None,
             }),
-            scope: Scope { reads: vec![], writes: vec![], tools: vec!["Read".into(), "Write".into()] },
+            scope: Scope::default(),
             outputs: Routes { on_approve: approve.map(String::from), on_revise: None, on_reject: Some("needs-human".into()) },
             workers: Workers::default(),
             role,

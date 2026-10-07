@@ -47,6 +47,10 @@ pub enum PathResolveError {
     UnknownVariable(String),
     #[error("path references ${{{0}}} but no value was supplied")]
     MissingValue(String),
+    #[error("relative path '{0}' has no target repo to resolve against")]
+    RelativeWithoutBase(String),
+    #[error("empty path")]
+    Empty,
 }
 
 /// Substitute `${...}` tokens in `pattern` against `vars`. Returns the
@@ -92,6 +96,43 @@ pub fn resolve(pattern: &str, vars: &PathVars) -> Result<String, PathResolveErro
 /// Convenience: resolve a pattern and return it as a PathBuf.
 pub fn resolve_path(pattern: &str, vars: &PathVars) -> Result<PathBuf, PathResolveError> {
     resolve(pattern, vars).map(PathBuf::from)
+}
+
+/// Resolve a scope pattern to an absolute path: substitute variables, join a
+/// relative result to the target repo, and normalise `.`/`..` lexically (the
+/// path need not exist). A relative path with no target repo is an error.
+pub fn resolve_absolute(pattern: &str, vars: &PathVars) -> Result<PathBuf, PathResolveError> {
+    let substituted = resolve(pattern.trim(), vars)?;
+    if substituted.is_empty() {
+        return Err(PathResolveError::Empty);
+    }
+    let p = PathBuf::from(&substituted);
+    let joined = if p.is_absolute() {
+        p
+    } else {
+        let base = vars
+            .target_repo
+            .as_ref()
+            .ok_or_else(|| PathResolveError::RelativeWithoutBase(pattern.trim().to_string()))?;
+        base.join(p)
+    };
+    Ok(normalise(&joined))
+}
+
+/// Lexically drop `.` segments and fold `..` into its parent.
+fn normalise(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// The canonical project sub-directories the wizard creates (spec → Data model
@@ -155,6 +196,29 @@ mod tests {
             resolve("${target_repo}/x", &vars),
             Err(PathResolveError::MissingValue("target_repo".into()))
         );
+    }
+
+    #[test]
+    fn resolve_absolute_joins_a_relative_path_to_the_target_repo() {
+        let vars = PathVars::new("/p").with_target_repo("/repo");
+        assert_eq!(resolve_absolute("docs", &vars).unwrap(), PathBuf::from("/repo/docs"));
+        assert_eq!(resolve_absolute("./docs/", &vars).unwrap(), PathBuf::from("/repo/docs"));
+        assert_eq!(resolve_absolute("${target_repo}", &vars).unwrap(), PathBuf::from("/repo"));
+        assert_eq!(resolve_absolute("/abs/x", &vars).unwrap(), PathBuf::from("/abs/x"));
+    }
+
+    #[test]
+    fn resolve_absolute_normalises_dot_segments() {
+        let vars = PathVars::new("/p").with_target_repo("/repo");
+        assert_eq!(resolve_absolute("${project}/a/../b", &vars).unwrap(), PathBuf::from("/p/b"));
+        assert_eq!(resolve_absolute("../sibling", &vars).unwrap(), PathBuf::from("/sibling"));
+    }
+
+    #[test]
+    fn a_relative_path_without_a_target_repo_is_unresolvable() {
+        let vars = PathVars::new("/p");
+        assert_eq!(resolve_absolute("docs", &vars), Err(PathResolveError::RelativeWithoutBase("docs".into())));
+        assert_eq!(resolve_absolute("", &vars.clone().with_target_repo("/r")), Err(PathResolveError::Empty));
     }
 
     #[test]

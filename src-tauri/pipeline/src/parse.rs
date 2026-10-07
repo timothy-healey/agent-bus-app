@@ -94,7 +94,7 @@ escalations:
         let p = parse_pipeline(yaml).unwrap();
         assert_eq!(p.teams[0].runner.as_ref().unwrap().effort, None);
         let draft: crate::draft::DraftTeam = serde_json::from_str(
-            r#"{"id":"t","name":"T","prompt_body":"","runner":{"kind":"claude-cli","model":"m","effort":null},"scope":{"reads":[],"writes":[],"tools":[]},"outputs":{},"workers":{"min":1,"max":1}}"#,
+            r#"{"id":"t","name":"T","prompt_body":"","runner":{"kind":"claude-cli","model":"m","effort":null},"scope":{"reads":[],"writes":[],"grants":[],"plugins":[]},"outputs":{},"workers":{"min":1,"max":1}}"#,
         )
         .unwrap();
         assert_eq!(draft.runner.effort, Effort::Default);
