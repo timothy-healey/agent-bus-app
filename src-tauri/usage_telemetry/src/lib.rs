@@ -15,6 +15,7 @@ pub mod window;
 pub mod brake_policy;
 pub mod snapshot;
 pub mod api;
+pub mod utilization_store;
 
 #[cfg(test)]
 mod crate_smoke {

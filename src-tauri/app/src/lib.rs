@@ -54,6 +54,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         (13, include_str!("../migrations/013_lifecycle_hardening.sql")),
         (14, include_str!("../migrations/014_task_worktree.sql")),
         (15, include_str!("../migrations/015_usage_budget_recalibrate.sql")),
+        (16, include_str!("../migrations/016_utilization.sql")),
     ];
 
     let current: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -1558,6 +1559,12 @@ pub fn run() {
             sql: include_str!("../migrations/015_usage_budget_recalibrate.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 16,
+            description: "real plan utilization + worker cost",
+            sql: include_str!("../migrations/016_utilization.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     // Live child process-group registry (LF20): the killable spawners register
@@ -2264,7 +2271,7 @@ mod migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 15, "all fifteen migrations recorded");
+        assert_eq!(version, 16, "all sixteen migrations recorded");
 
         let _ = std::fs::remove_file(&db);
     }
